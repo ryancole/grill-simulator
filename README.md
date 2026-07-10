@@ -15,7 +15,11 @@ unit cube drawn under a different transform.
 | `Click` | capture the mouse and look around |
 | `W` `A` `S` `D` | walk |
 | `Shift` | sprint |
+| `Space` | jump — clears 1.1 m, enough to reach the cooler and the picnic table |
 | `Esc` | release the mouse, or quit if it is already free |
+
+Anything within a 25 cm step is climbed rather than collided with, so the patio
+slab is walked onto rather than bumped into.
 
 ## Requirements
 
