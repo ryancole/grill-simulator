@@ -22,13 +22,25 @@ constexpr UINT kDefaultHeight = 720;
 // frame. Clamping it means the player is never teleported through a wall.
 constexpr float kMaxFrameSeconds = 0.1f;
 
+// `scene` is built before `viewmodel` because members are initialised in
+// declaration order, and the arms are drawn as instances of the scene's cube.
 struct Game {
     Renderer renderer;
     Scene scene;
     Camera camera;
-    Viewmodel viewmodel;
+    Viewmodel viewmodel{scene.CubeModel()};
     Input input;
 };
+
+// WIC decodes the textures inside a glTF, and WIC is COM. Uninitialising is left
+// to process teardown: the models are loaded once and never released.
+void InitializeCom() {
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // S_FALSE means some other component got here first, which is not a failure.
+    if (hr != S_FALSE) {
+        ThrowIfFailed(hr, "CoInitializeEx");
+    }
+}
 
 void RegisterRawMouse(HWND hwnd) {
     RAWINPUTDEVICE mouse{};
@@ -110,6 +122,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
 }
 
 int Run(HINSTANCE instance, int show_command) {
+    // Before `Game`, whose Scene loads a glTF and decodes its textures.
+    InitializeCom();
+
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;

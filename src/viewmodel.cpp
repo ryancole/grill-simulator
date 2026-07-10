@@ -54,7 +54,8 @@ XMFLOAT3 Mirror(XMFLOAT3 point, float side) {
 
 } // namespace
 
-Viewmodel::Viewmodel() {
+Viewmodel::Viewmodel(std::uint32_t cube_model)
+    : cube_(cube_model) {
     AddArm(1.0f);
     AddArm(-1.0f);
     world_space_.resize(eye_space_.size());
@@ -98,26 +99,26 @@ void Viewmodel::AddLimb(XMFLOAT3 start, XMFLOAT3 end, XMFLOAT2 thickness, XMFLOA
     const XMMATRIX transform(XMVectorScale(right, thickness.x), XMVectorScale(up, thickness.y),
                              XMVectorScale(forward, length), XMVectorSetW(midpoint, 1.0f));
 
-    Prop prop{};
-    XMStoreFloat4x4(&prop.transform, transform);
-    prop.color = color;
-    prop.checker = 0.0f;
-    eye_space_.push_back(prop);
+    MeshInstance limb{};
+    limb.model = cube_;
+    XMStoreFloat4x4(&limb.transform, transform);
+    limb.tint = color;
+    limb.checker = 0.0f;
+    eye_space_.push_back(limb);
 }
 
 ViewmodelPose Viewmodel::Pose(const XMMATRIX& camera_to_world) {
     for (size_t i = 0; i < eye_space_.size(); ++i) {
         const XMMATRIX local = XMLoadFloat4x4(&eye_space_[i].transform);
+        world_space_[i] = eye_space_[i];
         XMStoreFloat4x4(&world_space_[i].transform, local * camera_to_world);
-        world_space_[i].color = eye_space_[i].color;
-        world_space_[i].checker = eye_space_[i].checker;
     }
 
     // Rotating the eye-space sun by the camera's basis is what pins it to the
     // player's head. TransformNormal drops the translation, which is what a
     // direction wants, and the basis is orthonormal, so it stays unit length.
     ViewmodelPose pose{};
-    pose.props = world_space_;
+    pose.instances = world_space_;
     XMStoreFloat3(&pose.sun_direction,
                   XMVector3TransformNormal(XMVector3Normalize(XMLoadFloat3(&kEyeSunDirection)),
                                            camera_to_world));

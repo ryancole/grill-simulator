@@ -25,19 +25,25 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(AgilitySDK)
 include(Shaders)
+include(FastGltf)
+include(Assets)
 
 add_executable(grill WIN32
   src/main.cpp
   src/camera.cpp
   src/collision.cpp
+  src/image.cpp
   src/input.cpp
+  src/model.cpp
   src/scene.cpp
   src/viewmodel.cpp
   src/renderer.cpp
   src/agility_exports.cpp)
 
 target_include_directories(grill PRIVATE src)
-target_link_libraries(grill PRIVATE Agility::SDK)
+# windowscodecs is WIC, which decodes the PNG and JPEG images glTF embeds. It
+# ships with Windows, so it costs the project no third-party dependency.
+target_link_libraries(grill PRIVATE Agility::SDK fastgltf::fastgltf windowscodecs)
 
 target_compile_definitions(grill PRIVATE
   UNICODE _UNICODE
@@ -57,3 +63,5 @@ agility_sdk_stage_runtime(grill)
 
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT scene.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT scene.ps.cso)
+
+stage_assets(grill DIRECTORY assets/models FILES grill.glb)
