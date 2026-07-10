@@ -1,7 +1,9 @@
 #pragma once
 
 #include "dx_common.hpp"
+#include "scene.hpp"
 
+#include <DirectXMath.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
@@ -13,21 +15,24 @@ class Renderer {
 public:
     static constexpr UINT kFrameCount = 2;
 
-    void Initialize(HWND hwnd, UINT width, UINT height);
+    void Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene);
     void Resize(UINT width, UINT height);
-    void Render();
+    void Render(const Scene& scene, const DirectX::XMMATRIX& view_projection);
     void Shutdown();
+
+    float AspectRatio() const;
 
 private:
     void CreateDevice();
     void CreateCommandObjects();
     void CreateSwapChain(HWND hwnd, UINT width, UINT height);
     void CreateRenderTargetViews();
+    void CreateDepthBuffer();
     void CreatePipeline();
-    void CreateTriangle();
+    void CreateSceneGeometry(const Scene& scene);
 
-    // Blocks until the GPU has retired every frame. Only for teardown and
-    // resize; the steady-state path is MoveToNextFrame.
+    // Blocks until the GPU has retired every frame. Only for teardown, resize
+    // and the one-off geometry upload; the steady-state path is MoveToNextFrame.
     void FlushGpu();
     // Signals the current frame and waits only if the frame we are about to
     // reuse is still in flight.
@@ -42,14 +47,22 @@ private:
     UINT rtv_size_ = 0;
     ComPtr<ID3D12Resource> render_targets_[kFrameCount];
 
+    ComPtr<ID3D12DescriptorHeap> dsv_heap_;
+    ComPtr<ID3D12Resource> depth_stencil_;
+
     ComPtr<ID3D12CommandAllocator> allocators_[kFrameCount];
     ComPtr<ID3D12GraphicsCommandList> command_list_;
 
     ComPtr<ID3D12RootSignature> root_signature_;
     ComPtr<ID3D12PipelineState> pipeline_state_;
 
+    // One shared unit cube. Each prop is a draw of the whole mesh under a
+    // different transform.
     ComPtr<ID3D12Resource> vertex_buffer_;
     D3D12_VERTEX_BUFFER_VIEW vertex_buffer_view_{};
+    ComPtr<ID3D12Resource> index_buffer_;
+    D3D12_INDEX_BUFFER_VIEW index_buffer_view_{};
+    UINT index_count_ = 0;
 
     ComPtr<ID3D12Fence> fence_;
     HANDLE fence_event_ = nullptr;
