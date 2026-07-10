@@ -46,6 +46,28 @@ Multi-Config`), so switching between Debug and Release never reconfigures.
 
 `Esc` closes the window.
 
+## Cleaning
+
+Every generated artifact is nested under `build/`, so deleting that one
+directory is a complete reset:
+
+```powershell
+Remove-Item -Recurse -Force build
+```
+
+That covers the CMake cache, the Ninja graph, both configurations' objects and
+binaries, the compiled shaders and their depfiles, clangd's background index
+(`build/.cache`) and the fetched packages (`build/_deps`). Nothing generated is
+written outside it.
+
+The one cost is that `build/_deps` holds the pinned Agility SDK and DXC
+packages, so a clean wipe re-downloads roughly 84 MB on the next configure. To
+keep them across wipes, point CMake at a base directory of your own:
+
+```powershell
+cmake --preset windows-clang -D FETCHCONTENT_BASE_DIR=C:/some/shared/cache
+```
+
 ## Editing
 
 Open the folder in VS Code and accept the recommended extensions. IntelliSense
