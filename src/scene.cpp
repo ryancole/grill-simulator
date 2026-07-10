@@ -13,17 +13,15 @@ namespace {
 // converted to linear light and the back buffer is not sRGB, so the shader's
 // arithmetic happens in whatever space these are -- fine for flat colours.
 //
-// The grill's colours are no longer among them: they live in the materials of
-// assets/models/grill.glb, and the instance that places it passes white.
+// Only the props that are still boxes are painted here. The grill, the trees and
+// the picnic table carry their colours in the materials of their own .glb, and
+// the instances that place them pass white.
 constexpr XMFLOAT3 kWhite{1.0f, 1.0f, 1.0f};
 constexpr XMFLOAT3 kGrass{0.24f, 0.36f, 0.18f};
 constexpr XMFLOAT3 kConcrete{0.55f, 0.54f, 0.51f};
 constexpr XMFLOAT3 kFenceWood{0.45f, 0.32f, 0.21f};
-constexpr XMFLOAT3 kTableWood{0.60f, 0.44f, 0.28f};
 constexpr XMFLOAT3 kCoolerBlue{0.16f, 0.44f, 0.62f};
 constexpr XMFLOAT3 kCrate{0.52f, 0.38f, 0.24f};
-constexpr XMFLOAT3 kTrunk{0.33f, 0.24f, 0.16f};
-constexpr XMFLOAT3 kLeaves{0.20f, 0.42f, 0.18f};
 
 // The world-space bound of a transformed box. For a rotated one that is a loose
 // fit, which for a tree canopy nobody can reach is not worth a separate
@@ -52,8 +50,9 @@ Aabb TransformBounds(const Aabb& bounds, FXMMATRIX transform) {
 
 Scene::Scene() {
     cube_ = AddModel(MakeUnitCubeModel());
-    const std::uint32_t grill =
-        AddModel(LoadGltfModel(ExecutableDirectory() / "assets" / "models" / "grill.glb"));
+    const std::uint32_t grill = LoadModel("grill.glb");
+    const std::uint32_t tree = LoadModel("tree.glb");
+    const std::uint32_t table = LoadModel("table.glb");
 
     // The yard. +X is east, +Z is north, and the player spawns at the south end
     // looking at the grill.
@@ -66,20 +65,11 @@ Scene::Scene() {
     AddBox({12.0f, 1.0f, 0.0f}, {0.25f, 2.0f, 24.5f}, 0.0f, kFenceWood);
     AddBox({-12.0f, 1.0f, 0.0f}, {0.25f, 2.0f, 24.5f}, 0.0f, kFenceWood);
 
-    // The grill. Its own origin sits on the ground between its legs, so it goes
-    // where it belongs with a plain translation, and its legs, body, lid and
-    // shelf come along as the nodes of one asset.
+    // Each model's origin sits on the ground beneath it, so a prop that is not
+    // scaled or turned goes where it belongs with a plain translation, and its
+    // parts come along as the nodes of one asset.
     AddInstance(grill, XMMatrixTranslation(0.0f, 0.0f, 5.0f), kWhite);
-
-    // Picnic table with two benches.
-    AddBox({-4.5f, 0.75f, 1.5f}, {2.6f, 0.1f, 1.2f}, 0.0f, kTableWood);
-    for (const float x : {-5.65f, -3.35f}) {
-        for (const float z : {1.05f, 1.95f}) {
-            AddBox({x, 0.35f, z}, {0.12f, 0.7f, 0.12f}, 0.0f, kTableWood);
-        }
-    }
-    AddBox({-4.5f, 0.45f, 0.55f}, {2.6f, 0.08f, 0.4f}, 0.0f, kTableWood);
-    AddBox({-4.5f, 0.45f, 2.45f}, {2.6f, 0.08f, 0.4f}, 0.0f, kTableWood);
+    AddInstance(table, XMMatrixTranslation(-4.5f, 0.0f, 1.5f), kWhite);
 
     AddBox({3.6f, 0.3f, 6.5f}, {0.9f, 0.6f, 0.6f}, 0.0f, kCoolerBlue);
 
@@ -87,12 +77,29 @@ Scene::Scene() {
     AddBox({5.8f, 0.4f, -2.0f}, {0.8f, 0.8f, 0.8f}, 0.0f, kCrate);
     AddBox({5.8f, 1.15f, -2.0f}, {0.7f, 0.7f, 0.7f}, 22.0f, kCrate);
 
-    // Trees. Each canopy starts above head height, so the collider pass skips it
-    // and the player can walk underneath.
-    AddBox({-8.0f, 1.5f, 7.5f}, {0.5f, 3.0f, 0.5f}, 0.0f, kTrunk);
-    AddBox({-8.0f, 3.7f, 7.5f}, {3.0f, 1.8f, 3.0f}, 25.0f, kLeaves);
-    AddBox({8.5f, 1.3f, -6.0f}, {0.45f, 2.6f, 0.45f}, 0.0f, kTrunk);
-    AddBox({8.5f, 3.2f, -6.0f}, {2.6f, 1.6f, 2.6f}, -15.0f, kLeaves);
+    // Two of the same tree, told apart by a scale and a turn -- which is the
+    // whole reason it is one asset rather than two. The canopy is already yawed
+    // 12 degrees inside the model, so neither tree's leaves line up with its own
+    // trunk, and the two do not line up with each other.
+    //
+    // Each canopy starts above head height, so the collider pass skips it and the
+    // player can walk underneath. Turning a tree does turn its trunk, whose
+    // collider is the world bound of a box no longer axis aligned -- a few
+    // centimetres wider than the trunk really is. Nobody has ever noticed a tree
+    // being slightly too solid.
+    AddInstance(tree,
+                XMMatrixRotationY(XMConvertToRadians(25.0f)) *
+                    XMMatrixTranslation(-8.0f, 0.0f, 7.5f),
+                kWhite);
+    AddInstance(tree,
+                XMMatrixScaling(0.87f, 0.87f, 0.87f) *
+                    XMMatrixRotationY(XMConvertToRadians(-15.0f)) *
+                    XMMatrixTranslation(8.5f, 0.0f, -6.0f),
+                kWhite);
+}
+
+std::uint32_t Scene::LoadModel(const char* file) {
+    return AddModel(LoadGltfModel(ExecutableDirectory() / "assets" / "models" / file));
 }
 
 std::uint32_t Scene::AddModel(Model model) {

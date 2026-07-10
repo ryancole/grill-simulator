@@ -40,6 +40,8 @@ public:
 
 private:
     std::uint32_t AddModel(Model model);
+    // `file` names a .glb under the executable's assets/models/.
+    std::uint32_t LoadModel(const char* file);
 
     // Places one model and gives the collider pass one box per primitive of it.
     // For the cube that is a single box, exactly as if it had been added by hand.
