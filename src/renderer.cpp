@@ -16,15 +16,26 @@ constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
 // The sky the fog fades into, so the horizon has no seam.
 constexpr float kSkyColor[] = {0.52f, 0.62f, 0.76f, 1.0f};
 
+// The sun is south of the yard, over the player's shoulder at the spawn point,
+// so the faces they are looking at are the lit ones.
+constexpr XMFLOAT3 kSunDirection{0.35f, 0.78f, -0.5f};
+
 // Mirrors the `Constants` cbuffer in shaders/scene.hlsl. Root constants live in
-// the command list itself: at 144 bytes per prop there is nothing here worth the
+// the command list itself: at 160 bytes per prop there is nothing here worth the
 // descriptor heap and the aliasing rules a real constant buffer would cost.
+//
+// HLSL packs a cbuffer into float4 rows and never straddles one, so `albedo` and
+// `checker` share a row and `sun_direction` and its padding share the next --
+// which is exactly the C++ layout below. Do not reorder either side alone.
 struct Constants {
     XMFLOAT4X4 mvp;
     XMFLOAT4X4 model;
     XMFLOAT3 albedo;
     float checker;
+    XMFLOAT3 sun_direction;
+    float padding;
 };
+
 static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
 static_assert(kConstantDwords <= 64, "A root signature holds at most 64 DWORDs in total");
@@ -352,7 +363,25 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     index_buffer_view_.SizeInBytes = static_cast<UINT>(index_bytes);
 }
 
-void Renderer::Render(const Scene& scene, const XMMATRIX& view_projection) {
+void Renderer::DrawProps(std::span<const Prop> props, const XMMATRIX& view_projection,
+                         XMFLOAT3 sun_direction) {
+    for (const Prop& prop : props) {
+        const XMMATRIX model = XMLoadFloat4x4(&prop.transform);
+
+        Constants constants{};
+        XMStoreFloat4x4(&constants.mvp, model * view_projection);
+        constants.model = prop.transform;
+        constants.albedo = prop.color;
+        constants.checker = prop.checker;
+        constants.sun_direction = sun_direction;
+
+        command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
+        command_list_->DrawIndexedInstanced(index_count_, 1, 0, 0, 0);
+    }
+}
+
+void Renderer::Render(const Scene& scene, const ViewmodelPose& viewmodel,
+                      const XMMATRIX& view_projection) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
@@ -378,18 +407,16 @@ void Renderer::Render(const Scene& scene, const XMMATRIX& view_projection) {
     command_list_->IASetVertexBuffers(0, 1, &vertex_buffer_view_);
     command_list_->IASetIndexBuffer(&index_buffer_view_);
 
-    for (const Prop& prop : scene.Props()) {
-        const XMMATRIX model = XMLoadFloat4x4(&prop.transform);
+    XMFLOAT3 sun{};
+    XMStoreFloat3(&sun, XMVector3Normalize(XMLoadFloat3(&kSunDirection)));
+    DrawProps(scene.Props(), view_projection, sun);
 
-        Constants constants{};
-        XMStoreFloat4x4(&constants.mvp, model * view_projection);
-        constants.model = prop.transform;
-        constants.albedo = prop.color;
-        constants.checker = prop.checker;
-
-        command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
-        command_list_->DrawIndexedInstanced(index_count_, 1, 0, 0, 0);
-    }
+    // The arms live about half a metre from the eye, close enough that any wall
+    // the player leans against would be drawn in front of them. Throwing the
+    // depth buffer away first is the usual answer: it costs one clear, and the
+    // arms still occlude each other because they keep writing depth as they go.
+    command_list_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    DrawProps(viewmodel.props, view_projection, viewmodel.sun_direction);
 
     const CD3DX12_RESOURCE_BARRIER to_present = CD3DX12_RESOURCE_BARRIER::Transition(
         render_targets_[frame_index_].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,

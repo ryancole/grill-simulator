@@ -2,12 +2,14 @@
 
 #include "dx_common.hpp"
 #include "scene.hpp"
+#include "viewmodel.hpp"
 
 #include <DirectXMath.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
 #include <cstdint>
+#include <span>
 
 // Raw Direct3D 12. No abstraction layer, no engine: the swapchain, the command
 // allocators and the fence are all right here on purpose.
@@ -17,7 +19,10 @@ public:
 
     void Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene);
     void Resize(UINT width, UINT height);
-    void Render(const Scene& scene, const DirectX::XMMATRIX& view_projection);
+    // `viewmodel` is drawn last, over a cleared depth buffer, so the player's
+    // arms are never sliced open by the wall they are standing against.
+    void Render(const Scene& scene, const ViewmodelPose& viewmodel,
+                const DirectX::XMMATRIX& view_projection);
     void Shutdown();
 
     float AspectRatio() const;
@@ -30,6 +35,10 @@ private:
     void CreateDepthBuffer();
     void CreatePipeline();
     void CreateSceneGeometry(const Scene& scene);
+
+    // One draw of the shared cube per prop, each under its own root constants.
+    void DrawProps(std::span<const Prop> props, const DirectX::XMMATRIX& view_projection,
+                   DirectX::XMFLOAT3 sun_direction);
 
     // Blocks until the GPU has retired every frame. Only for teardown, resize
     // and the one-off geometry upload; the steady-state path is MoveToNextFrame.

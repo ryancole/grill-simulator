@@ -3,6 +3,7 @@
 #include "input.hpp"
 #include "renderer.hpp"
 #include "scene.hpp"
+#include "viewmodel.hpp"
 
 #include <DirectXMath.h>
 
@@ -25,6 +26,7 @@ struct Game {
     Renderer renderer;
     Scene scene;
     Camera camera;
+    Viewmodel viewmodel;
     Input input;
 };
 
@@ -151,9 +153,10 @@ int Run(HINSTANCE instance, int show_command) {
 
         LARGE_INTEGER now{};
         QueryPerformanceCounter(&now);
-        const float dt = std::min(static_cast<float>(static_cast<double>(now.QuadPart - previous.QuadPart) /
-                                                     static_cast<double>(frequency.QuadPart)),
-                                  kMaxFrameSeconds);
+        const float dt =
+            std::min(static_cast<float>(static_cast<double>(now.QuadPart - previous.QuadPart) /
+                                        static_cast<double>(frequency.QuadPart)),
+                     kMaxFrameSeconds);
         previous = now;
 
         float mouse_dx = 0.0f;
@@ -164,7 +167,8 @@ int Run(HINSTANCE instance, int show_command) {
 
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
-        game.renderer.Render(game.scene, view_projection);
+        game.renderer.Render(game.scene, game.viewmodel.Pose(game.camera.CameraToWorldMatrix()),
+                             view_projection);
     }
 
     game.renderer.Shutdown();
