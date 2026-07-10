@@ -21,10 +21,17 @@ public:
 
     DirectX::XMMATRIX ViewMatrix() const;
     DirectX::XMMATRIX ProjectionMatrix(float aspect) const;
+    // The inverse of the view matrix: it carries a point expressed relative to
+    // the eye out into the world. Anything bolted to the player's face -- their
+    // arms, for now -- is placed with this.
+    DirectX::XMMATRIX CameraToWorldMatrix() const;
 
     DirectX::XMFLOAT3 Position() const { return position_; }
 
 private:
+    // The unit vector the eye is looking down, yaw and pitch applied.
+    DirectX::XMVECTOR Forward() const;
+
     DirectX::XMFLOAT3 position_{0.0f, 1.7f, -7.0f};
     // Radians. A yaw of zero looks straight down +Z; positive pitch looks up.
     float yaw_ = 0.0f;

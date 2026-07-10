@@ -10,11 +10,14 @@ cbuffer Constants : register(b0) {
     float3 g_albedo;
     // Size of one checkerboard tile in metres; zero leaves the surface flat.
     float g_checker;
+    // Unit vector pointing at the sun, in world space, already normalized.
+    // The yard passes the real one; the viewmodel passes a sun of its own that
+    // rides along with the camera, so the player's arms are lit the same way no
+    // matter which way they turn.
+    float3 g_sun_direction;
+    float g_padding;
 };
 
-// The sun is south of the yard, over the player's shoulder at the spawn point,
-// so the faces they are looking at are the lit ones.
-static const float3 kSunDirection = normalize(float3(0.35f, 0.78f, -0.5f));
 static const float3 kSunColor = float3(1.0f, 0.96f, 0.88f);
 static const float3 kSkyColor = float3(0.52f, 0.62f, 0.76f);
 static const float3 kGroundBounce = float3(0.20f, 0.18f, 0.16f);
@@ -72,8 +75,8 @@ float4 PSMain(PSInput input) : SV_TARGET {
     // below. Surfaces facing up read cool, undersides read warm and dark.
     const float3 ambient =
         lerp(kGroundBounce, kSkyColor, saturate(normal.y * 0.5f + 0.5f)) * kAmbientStrength;
-    const float sun = saturate(dot(normal, kSunDirection));
-    const float fill = saturate(dot(normal, -kSunDirection)) * kFillStrength;
+    const float sun = saturate(dot(normal, g_sun_direction));
+    const float fill = saturate(dot(normal, -g_sun_direction)) * kFillStrength;
     const float3 lit = albedo * (ambient + kSunColor * sun + kSkyColor * fill);
 
     const float fog = saturate((input.view_depth - kFogStart) / (kFogEnd - kFogStart));

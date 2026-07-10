@@ -148,10 +148,25 @@ void Camera::Update(const Input& input, std::span<const Aabb> colliders, float d
 }
 
 XMMATRIX Camera::ViewMatrix() const {
+    return XMMatrixLookToLH(XMLoadFloat3(&position_), Forward(),
+                            XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f));
+}
+
+XMMATRIX Camera::CameraToWorldMatrix() const {
+    // The same frame XMMatrixLookToLH derives, laid out as rows instead of
+    // inverted into columns: right, up, forward, then the eye itself. Pitch is
+    // clamped short of vertical, so the cross product can never degenerate.
+    const XMVECTOR forward = Forward();
+    const XMVECTOR right =
+        XMVector3Normalize(XMVector3Cross(XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f), forward));
+    const XMVECTOR up = XMVector3Cross(forward, right);
+    return XMMATRIX(right, up, forward, XMVectorSetW(XMLoadFloat3(&position_), 1.0f));
+}
+
+XMVECTOR Camera::Forward() const {
     const float cos_pitch = std::cos(pitch_);
-    const XMVECTOR direction =
-        XMVectorSet(std::sin(yaw_) * cos_pitch, std::sin(pitch_), std::cos(yaw_) * cos_pitch, 0.0f);
-    return XMMatrixLookToLH(XMLoadFloat3(&position_), direction, XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f));
+    return XMVectorSet(std::sin(yaw_) * cos_pitch, std::sin(pitch_), std::cos(yaw_) * cos_pitch,
+                       0.0f);
 }
 
 XMMATRIX Camera::ProjectionMatrix(float aspect) const {

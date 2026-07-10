@@ -32,6 +32,7 @@ add_executable(grill WIN32
   src/collision.cpp
   src/input.cpp
   src/scene.cpp
+  src/viewmodel.cpp
   src/renderer.cpp
   src/agility_exports.cpp)
 
