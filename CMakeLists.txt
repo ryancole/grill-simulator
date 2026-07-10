@@ -28,6 +28,10 @@ include(Shaders)
 
 add_executable(grill WIN32
   src/main.cpp
+  src/camera.cpp
+  src/collision.cpp
+  src/input.cpp
+  src/scene.cpp
   src/renderer.cpp
   src/agility_exports.cpp)
 
@@ -50,5 +54,5 @@ target_compile_options(grill PRIVATE
 
 agility_sdk_stage_runtime(grill)
 
-add_hlsl_shader(grill SOURCE shaders/triangle.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT triangle.vs.cso)
-add_hlsl_shader(grill SOURCE shaders/triangle.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT triangle.ps.cso)
+add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT scene.vs.cso)
+add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT scene.ps.cso)
