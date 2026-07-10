@@ -30,6 +30,10 @@ private:
     float yaw_ = 0.0f;
     float pitch_ = 0.0f;
 
+    // Metres per second across the ground plane; `y` here is the world's Z. The
+    // player accelerates towards the speed the keys ask for rather than snapping
+    // to it, which is what carries a jump forward after the keys are released.
+    DirectX::XMFLOAT2 velocity_{0.0f, 0.0f};
     // Metres per second, positive up. Gravity owns this between jumps.
     float vertical_speed_ = 0.0f;
     // Whether the player was standing on something at the end of the last frame,
