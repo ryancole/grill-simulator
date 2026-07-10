@@ -1,5 +1,7 @@
 #include "scene.hpp"
 
+#include "dx_common.hpp"
+
 #include <cfloat>
 #include <cmath>
 
@@ -10,22 +12,47 @@ namespace {
 // Every colour is written the way it should look on screen. Nothing here is
 // converted to linear light and the back buffer is not sRGB, so the shader's
 // arithmetic happens in whatever space these are -- fine for flat colours.
+//
+// Only the ground, the patio and the fence are still painted here. Every other
+// prop carries its colours in the materials of its own .glb, and the instance
+// that places it passes white.
+constexpr XMFLOAT3 kWhite{1.0f, 1.0f, 1.0f};
 constexpr XMFLOAT3 kGrass{0.24f, 0.36f, 0.18f};
 constexpr XMFLOAT3 kConcrete{0.55f, 0.54f, 0.51f};
 constexpr XMFLOAT3 kFenceWood{0.45f, 0.32f, 0.21f};
-constexpr XMFLOAT3 kCharcoal{0.13f, 0.13f, 0.14f};
-constexpr XMFLOAT3 kGrillRed{0.62f, 0.11f, 0.09f};
-constexpr XMFLOAT3 kSteel{0.62f, 0.64f, 0.67f};
-constexpr XMFLOAT3 kTableWood{0.60f, 0.44f, 0.28f};
-constexpr XMFLOAT3 kCoolerBlue{0.16f, 0.44f, 0.62f};
-constexpr XMFLOAT3 kCrate{0.52f, 0.38f, 0.24f};
-constexpr XMFLOAT3 kTrunk{0.33f, 0.24f, 0.16f};
-constexpr XMFLOAT3 kLeaves{0.20f, 0.42f, 0.18f};
+
+// The world-space bound of a transformed box. For a rotated one that is a loose
+// fit, which for a tree canopy nobody can reach is not worth a separate
+// oriented-box test.
+Aabb TransformBounds(const Aabb& bounds, FXMMATRIX transform) {
+    XMVECTOR minimum = XMVectorReplicate(FLT_MAX);
+    XMVECTOR maximum = XMVectorReplicate(-FLT_MAX);
+
+    for (const float x : {bounds.min.x, bounds.max.x}) {
+        for (const float y : {bounds.min.y, bounds.max.y}) {
+            for (const float z : {bounds.min.z, bounds.max.z}) {
+                const XMVECTOR corner = XMVector3Transform(XMVectorSet(x, y, z, 1.0f), transform);
+                minimum = XMVectorMin(minimum, corner);
+                maximum = XMVectorMax(maximum, corner);
+            }
+        }
+    }
+
+    Aabb result{};
+    XMStoreFloat3(&result.min, minimum);
+    XMStoreFloat3(&result.max, maximum);
+    return result;
+}
 
 } // namespace
 
 Scene::Scene() {
-    BuildUnitCube();
+    cube_ = AddModel(MakeUnitCubeModel());
+    const std::uint32_t grill = LoadModel("grill.glb");
+    const std::uint32_t tree = LoadModel("tree.glb");
+    const std::uint32_t table = LoadModel("table.glb");
+    const std::uint32_t crate = LoadModel("crate.glb");
+    const std::uint32_t cooler = LoadModel("cooler.glb");
 
     // The yard. +X is east, +Z is north, and the player spawns at the south end
     // looking at the grill.
@@ -38,115 +65,80 @@ Scene::Scene() {
     AddBox({12.0f, 1.0f, 0.0f}, {0.25f, 2.0f, 24.5f}, 0.0f, kFenceWood);
     AddBox({-12.0f, 1.0f, 0.0f}, {0.25f, 2.0f, 24.5f}, 0.0f, kFenceWood);
 
-    // The grill itself: four legs, a body, a lid and a side shelf.
-    for (const float x : {-0.65f, 0.65f}) {
-        for (const float z : {4.65f, 5.35f}) {
-            AddBox({x, 0.125f, z}, {0.08f, 0.25f, 0.08f}, 0.0f, kCharcoal);
-        }
-    }
-    AddBox({0.0f, 0.6f, 5.0f}, {1.6f, 0.7f, 0.9f}, 0.0f, kCharcoal);
-    AddBox({0.0f, 1.05f, 5.0f}, {1.7f, 0.24f, 1.0f}, 0.0f, kGrillRed);
-    AddBox({1.15f, 0.75f, 5.0f}, {0.7f, 0.05f, 0.7f}, 0.0f, kSteel);
+    // Each model's origin sits on the ground beneath it, so a prop that is not
+    // scaled or turned goes where it belongs with a plain translation, and its
+    // parts come along as the nodes of one asset.
+    AddInstance(grill, XMMatrixTranslation(0.0f, 0.0f, 5.0f), kWhite);
+    AddInstance(table, XMMatrixTranslation(-4.5f, 0.0f, 1.5f), kWhite);
+    AddInstance(cooler, XMMatrixTranslation(3.6f, 0.0f, 6.5f), kWhite);
 
-    // Picnic table with two benches.
-    AddBox({-4.5f, 0.75f, 1.5f}, {2.6f, 0.1f, 1.2f}, 0.0f, kTableWood);
-    for (const float x : {-5.65f, -3.35f}) {
-        for (const float z : {1.05f, 1.95f}) {
-            AddBox({x, 0.35f, z}, {0.12f, 0.7f, 0.12f}, 0.0f, kTableWood);
-        }
-    }
-    AddBox({-4.5f, 0.45f, 0.55f}, {2.6f, 0.08f, 0.4f}, 0.0f, kTableWood);
-    AddBox({-4.5f, 0.45f, 2.45f}, {2.6f, 0.08f, 0.4f}, 0.0f, kTableWood);
+    // Two crates, the upper one knocked askew. The smaller is the same box at
+    // 0.875 -- an exact scale, unlike the trees', because these two always were
+    // the same cube at 0.8 m and 0.7 m. It stands on the lower one, so it is
+    // lifted by the lower one's height rather than by an arithmetic centre.
+    AddInstance(crate, XMMatrixTranslation(5.8f, 0.0f, -2.0f), kWhite);
+    AddInstance(crate,
+                XMMatrixScaling(0.875f, 0.875f, 0.875f) *
+                    XMMatrixRotationY(XMConvertToRadians(22.0f)) *
+                    XMMatrixTranslation(5.8f, 0.8f, -2.0f),
+                kWhite);
 
-    AddBox({3.6f, 0.3f, 6.5f}, {0.9f, 0.6f, 0.6f}, 0.0f, kCoolerBlue);
-
-    // Two crates, the upper one knocked askew.
-    AddBox({5.8f, 0.4f, -2.0f}, {0.8f, 0.8f, 0.8f}, 0.0f, kCrate);
-    AddBox({5.8f, 1.15f, -2.0f}, {0.7f, 0.7f, 0.7f}, 22.0f, kCrate);
-
-    // Trees. Each canopy starts above head height, so the collider pass skips it
-    // and the player can walk underneath.
-    AddBox({-8.0f, 1.5f, 7.5f}, {0.5f, 3.0f, 0.5f}, 0.0f, kTrunk);
-    AddBox({-8.0f, 3.7f, 7.5f}, {3.0f, 1.8f, 3.0f}, 25.0f, kLeaves);
-    AddBox({8.5f, 1.3f, -6.0f}, {0.45f, 2.6f, 0.45f}, 0.0f, kTrunk);
-    AddBox({8.5f, 3.2f, -6.0f}, {2.6f, 1.6f, 2.6f}, -15.0f, kLeaves);
+    // Two of the same tree, told apart by a scale and a turn -- which is the
+    // whole reason it is one asset rather than two. The canopy is already yawed
+    // 12 degrees inside the model, so neither tree's leaves line up with its own
+    // trunk, and the two do not line up with each other.
+    //
+    // Each canopy starts above head height, so the collider pass skips it and the
+    // player can walk underneath. Turning a tree does turn its trunk, whose
+    // collider is the world bound of a box no longer axis aligned -- a few
+    // centimetres wider than the trunk really is. Nobody has ever noticed a tree
+    // being slightly too solid.
+    AddInstance(tree,
+                XMMatrixRotationY(XMConvertToRadians(25.0f)) *
+                    XMMatrixTranslation(-8.0f, 0.0f, 7.5f),
+                kWhite);
+    AddInstance(tree,
+                XMMatrixScaling(0.87f, 0.87f, 0.87f) *
+                    XMMatrixRotationY(XMConvertToRadians(-15.0f)) *
+                    XMMatrixTranslation(8.5f, 0.0f, -6.0f),
+                kWhite);
 }
 
-// A cube of side 1 centred on the origin, with one flat normal per face -- so 24
-// vertices rather than 8, because the corners are shared by three normals.
-void Scene::BuildUnitCube() {
-    constexpr XMFLOAT3 kFaceNormals[] = {{1.0f, 0.0f, 0.0f},  {-1.0f, 0.0f, 0.0f},
-                                         {0.0f, 1.0f, 0.0f},  {0.0f, -1.0f, 0.0f},
-                                         {0.0f, 0.0f, 1.0f},  {0.0f, 0.0f, -1.0f}};
+std::uint32_t Scene::LoadModel(const char* file) {
+    return AddModel(LoadGltfModel(ExecutableDirectory() / "assets" / "models" / file));
+}
 
-    for (const XMFLOAT3& face_normal : kFaceNormals) {
-        const XMVECTOR normal = XMLoadFloat3(&face_normal);
+std::uint32_t Scene::AddModel(Model model) {
+    models_.push_back(std::move(model));
+    return static_cast<std::uint32_t>(models_.size() - 1);
+}
 
-        // Any vector that is not parallel to the normal seeds the face's tangent
-        // frame. Build u and v so that cross(u, v) == normal.
-        const XMVECTOR seed = std::abs(face_normal.y) > 0.5f ? XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f)
-                                                             : XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-        const XMVECTOR u = XMVector3Normalize(XMVector3Cross(seed, normal));
-        const XMVECTOR v = XMVector3Cross(normal, u);
+void Scene::AddInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint, float checker) {
+    MeshInstance instance{};
+    instance.model = model;
+    XMStoreFloat4x4(&instance.transform, transform);
+    instance.tint = tint;
+    instance.checker = checker;
+    instances_.push_back(instance);
 
-        // Direct3D's default rasteriser treats a triangle as front facing when
-        // cross(v1 - v0, v2 - v0) points at the camera. Emitting the corners in
-        // this order makes that cross product the outward normal, so every face
-        // of the cube is front facing from outside and back-face culling works.
-        const XMVECTOR center = XMVectorScale(normal, 0.5f);
-        const XMVECTOR half_u = XMVectorScale(u, 0.5f);
-        const XMVECTOR half_v = XMVectorScale(v, 0.5f);
-        const XMVECTOR corners[] = {
-            XMVectorSubtract(XMVectorSubtract(center, half_u), half_v),
-            XMVectorSubtract(XMVectorAdd(center, half_u), half_v),
-            XMVectorAdd(XMVectorAdd(center, half_u), half_v),
-            XMVectorAdd(XMVectorSubtract(center, half_u), half_v),
-        };
-
-        const auto base = static_cast<std::uint16_t>(vertices_.size());
-        for (const XMVECTOR& corner : corners) {
-            Vertex vertex{};
-            XMStoreFloat3(&vertex.position, corner);
-            vertex.normal = face_normal;
-            vertices_.push_back(vertex);
+    // One collider per primitive, from the bounds glTF already stored on the
+    // POSITION accessor. No vertex is ever looked at. Decorative parts -- the
+    // cooler's lid, which only laps over a body that is already the whole cooler
+    // -- contribute nothing, or the player would stand on them.
+    for (const Primitive& primitive : models_[model].primitives) {
+        if (!primitive.collides) {
+            continue;
         }
-
-        for (const int offset : {0, 1, 2, 0, 2, 3}) {
-            indices_.push_back(static_cast<std::uint16_t>(base + offset));
-        }
+        const XMMATRIX to_world = XMLoadFloat4x4(&primitive.transform) * transform;
+        colliders_.push_back(TransformBounds(primitive.bounds, to_world));
     }
 }
 
 void Scene::AddBox(XMFLOAT3 center, XMFLOAT3 size, float yaw_degrees, XMFLOAT3 color,
                    float checker) {
-    const XMMATRIX transform = XMMatrixScaling(size.x, size.y, size.z) *
-                               XMMatrixRotationY(XMConvertToRadians(yaw_degrees)) *
-                               XMMatrixTranslation(center.x, center.y, center.z);
-
-    Prop prop{};
-    XMStoreFloat4x4(&prop.transform, transform);
-    prop.color = color;
-    prop.checker = checker;
-    props_.push_back(prop);
-
-    // The collider is the world-space bound of the transformed cube. For a
-    // rotated box that is a loose fit, which for a tree canopy nobody can reach
-    // is not worth a separate oriented-box test.
-    XMVECTOR minimum = XMVectorReplicate(FLT_MAX);
-    XMVECTOR maximum = XMVectorReplicate(-FLT_MAX);
-    for (const float x : {-0.5f, 0.5f}) {
-        for (const float y : {-0.5f, 0.5f}) {
-            for (const float z : {-0.5f, 0.5f}) {
-                const XMVECTOR corner =
-                    XMVector3Transform(XMVectorSet(x, y, z, 1.0f), transform);
-                minimum = XMVectorMin(minimum, corner);
-                maximum = XMVectorMax(maximum, corner);
-            }
-        }
-    }
-
-    Aabb bounds{};
-    XMStoreFloat3(&bounds.min, minimum);
-    XMStoreFloat3(&bounds.max, maximum);
-    colliders_.push_back(bounds);
+    AddInstance(cube_,
+                XMMatrixScaling(size.x, size.y, size.z) *
+                    XMMatrixRotationY(XMConvertToRadians(yaw_degrees)) *
+                    XMMatrixTranslation(center.x, center.y, center.z),
+                color, checker);
 }

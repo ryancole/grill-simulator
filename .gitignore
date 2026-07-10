@@ -14,3 +14,7 @@ compile_commands.json
 .vs/
 CMakeUserPresets.json
 *.user
+
+# tools/gen_models.py is a script, not a package, but importing it to poke at a
+# texture leaves this behind.
+__pycache__/

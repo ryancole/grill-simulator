@@ -4,6 +4,7 @@
 
 #include <DirectXMath.h>
 
+#include <algorithm>
 #include <cstring>
 
 using namespace DirectX;
@@ -21,7 +22,7 @@ constexpr float kSkyColor[] = {0.52f, 0.62f, 0.76f, 1.0f};
 constexpr XMFLOAT3 kSunDirection{0.35f, 0.78f, -0.5f};
 
 // Mirrors the `Constants` cbuffer in shaders/scene.hlsl. Root constants live in
-// the command list itself: at 160 bytes per prop there is nothing here worth the
+// the command list itself: at 208 bytes per draw there is nothing here worth the
 // descriptor heap and the aliasing rules a real constant buffer would cost.
 //
 // HLSL packs a cbuffer into float4 rows and never straddles one, so `albedo` and
@@ -30,6 +31,9 @@ constexpr XMFLOAT3 kSunDirection{0.35f, 0.78f, -0.5f};
 struct Constants {
     XMFLOAT4X4 mvp;
     XMFLOAT4X4 model;
+    // Rows of transpose(inverse(model)). Each occupies a full float4 row in the
+    // cbuffer; the w components are never read.
+    XMFLOAT4 normal_rows[3];
     XMFLOAT3 albedo;
     float checker;
     XMFLOAT3 sun_direction;
@@ -38,7 +42,20 @@ struct Constants {
 
 static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
-static_assert(kConstantDwords <= 64, "A root signature holds at most 64 DWORDs in total");
+// The descriptor table for the base colour texture costs one more DWORD.
+static_assert(kConstantDwords + 1 <= 64, "A root signature holds at most 64 DWORDs in total");
+
+// _UNORM rather than _UNORM_SRGB, and deliberately. Nothing in this renderer
+// converts to linear light: the flat colours in scene.cpp, the constants in the
+// shader, the box filter that builds the mips and the back buffer are all in
+// whatever space they were written. Decoding only the textures would leave them
+// the one linear thing in the frame, reading darker than the flat colour beside
+// them. Fixing it is a single change that has to touch all five.
+constexpr DXGI_FORMAT kTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+// Slot 0 of the texture heap. A material with no base colour texture points
+// here, which spares the shader a branch and the pipeline a second variant.
+constexpr UINT kWhiteTexture = 0;
 
 #ifndef NDEBUG
 constexpr bool kEnableDebugLayer = true;
@@ -230,13 +247,24 @@ void Renderer::CreateDepthBuffer() {
 }
 
 void Renderer::CreatePipeline() {
-    // The per-prop transform and colour arrive as root constants, so there is no
-    // descriptor table and nothing to bind but the vertex and index buffers.
-    CD3DX12_ROOT_PARAMETER constants;
-    constants.InitAsConstants(kConstantDwords, 0);
+    // The per-draw transform and colour arrive as root constants. The one thing
+    // that cannot travel that way is the base colour texture, which needs a
+    // descriptor table, and the sampler that reads it is baked into the root
+    // signature -- every texture in the game wants the same one.
+    const CD3DX12_DESCRIPTOR_RANGE base_color_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+    CD3DX12_ROOT_PARAMETER parameters[2];
+    parameters[0].InitAsConstants(kConstantDwords, 0);
+    parameters[1].InitAsDescriptorTable(1, &base_color_range, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    // Anisotropic because the ground and the patio are seen almost edge on, and
+    // trilinear alone turns them to mush a few metres out.
+    CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_ANISOTROPIC);
+    sampler.MaxAnisotropy = 8;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     CD3DX12_ROOT_SIGNATURE_DESC root_desc;
-    root_desc.Init(1, &constants, 0, nullptr,
+    root_desc.Init(_countof(parameters), parameters, 1, &sampler,
                    D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
@@ -262,12 +290,18 @@ void Renderer::CreatePipeline() {
     const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "scene.vs.cso");
     const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "scene.ps.cso");
 
+    // Slot 0 only. When rigging lands, JOINTS_0 and WEIGHTS_0 arrive as a second
+    // vertex stream in slot 1, so the yard's unskinned geometry never carries
+    // them -- see SkinVertex in model.hpp.
     const D3D12_INPUT_ELEMENT_DESC input_layout[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12,
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
+    static_assert(sizeof(Vertex) == 32, "The input layout above spells out Vertex's offsets");
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
     pso.InputLayout = {input_layout, _countof(input_layout)};
@@ -290,93 +324,241 @@ void Renderer::CreatePipeline() {
                   "CreateGraphicsPipelineState");
 }
 
-void Renderer::CreateSceneGeometry(const Scene& scene) {
-    const std::vector<Vertex>& vertices = scene.Vertices();
-    const std::vector<std::uint16_t>& indices = scene.Indices();
-    index_count_ = static_cast<UINT>(indices.size());
-
-    const UINT64 vertex_bytes = vertices.size() * sizeof(Vertex);
-    const UINT64 index_bytes = indices.size() * sizeof(std::uint16_t);
+ComPtr<ID3D12Resource> Renderer::UploadBuffer(const void* data, UINT64 bytes,
+                                              D3D12_RESOURCE_STATES final_state,
+                                              std::vector<ComPtr<ID3D12Resource>>& staging) {
+    auto create = [this](UINT64 size, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state,
+                         const char* what) {
+        const CD3DX12_HEAP_PROPERTIES heap(type);
+        const CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(size);
+        ComPtr<ID3D12Resource> resource;
+        ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
+                                                       nullptr, IID_PPV_ARGS(&resource)),
+                      what);
+        return resource;
+    };
 
     // The mesh never changes, so it lives in the default heap -- video memory --
     // and is filled once through a staging copy. An upload-heap buffer would sit
     // in system memory and be re-read across PCIe on every draw.
-    auto create = [this](UINT64 bytes, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state,
-                         ComPtr<ID3D12Resource>& out, const char* what) {
-        const CD3DX12_HEAP_PROPERTIES heap(type);
-        const CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(bytes);
-        ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
-                                                       nullptr, IID_PPV_ARGS(&out)),
-                      what);
-    };
+    ComPtr<ID3D12Resource> buffer = create(bytes, D3D12_HEAP_TYPE_DEFAULT,
+                                           D3D12_RESOURCE_STATE_COPY_DEST,
+                                           "CreateCommittedResource(buffer)");
+    ComPtr<ID3D12Resource> upload = create(bytes, D3D12_HEAP_TYPE_UPLOAD,
+                                           D3D12_RESOURCE_STATE_GENERIC_READ,
+                                           "CreateCommittedResource(buffer staging)");
 
-    ComPtr<ID3D12Resource> vertex_staging;
-    ComPtr<ID3D12Resource> index_staging;
-    create(vertex_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, vertex_buffer_,
-           "CreateCommittedResource(vertex buffer)");
-    create(index_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, index_buffer_,
-           "CreateCommittedResource(index buffer)");
-    create(vertex_bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, vertex_staging,
-           "CreateCommittedResource(vertex staging)");
-    create(index_bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, index_staging,
-           "CreateCommittedResource(index staging)");
+    void* mapped = nullptr;
+    const CD3DX12_RANGE no_read(0, 0);
+    ThrowIfFailed(upload->Map(0, &no_read, &mapped), "Buffer::Map");
+    std::memcpy(mapped, data, static_cast<size_t>(bytes));
+    upload->Unmap(0, nullptr);
 
-    auto fill = [](ID3D12Resource* buffer, const void* data, UINT64 bytes) {
-        void* mapped = nullptr;
-        const CD3DX12_RANGE no_read(0, 0);
-        ThrowIfFailed(buffer->Map(0, &no_read, &mapped), "Buffer::Map");
-        std::memcpy(mapped, data, static_cast<size_t>(bytes));
-        buffer->Unmap(0, nullptr);
-    };
-    fill(vertex_staging.Get(), vertices.data(), vertex_bytes);
-    fill(index_staging.Get(), indices.data(), index_bytes);
+    command_list_->CopyBufferRegion(buffer.Get(), 0, upload.Get(), 0, bytes);
+    const CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        buffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, final_state);
+    command_list_->ResourceBarrier(1, &barrier);
+
+    staging.push_back(std::move(upload));
+    return buffer;
+}
+
+ComPtr<ID3D12Resource> Renderer::UploadTexture(const Image& image, UINT descriptor,
+                                               std::vector<ComPtr<ID3D12Resource>>& staging) {
+    const auto mip_levels = static_cast<UINT16>(image.levels.size());
+
+    const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+    const CD3DX12_RESOURCE_DESC desc =
+        CD3DX12_RESOURCE_DESC::Tex2D(kTextureFormat, image.width, image.height, 1, mip_levels);
+
+    ComPtr<ID3D12Resource> texture;
+    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                   IID_PPV_ARGS(&texture)),
+                  "CreateCommittedResource(texture)");
+
+    // One staging buffer for the whole chain. UpdateSubresources knows how to
+    // re-pitch each level into it: a texture's rows are aligned to 256 bytes on
+    // the GPU, and the tightly packed rows from the decoder are not.
+    const UINT64 staging_bytes = GetRequiredIntermediateSize(texture.Get(), 0, mip_levels);
+    const CD3DX12_HEAP_PROPERTIES upload_heap(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RESOURCE_DESC upload_desc = CD3DX12_RESOURCE_DESC::Buffer(staging_bytes);
+
+    ComPtr<ID3D12Resource> upload;
+    ThrowIfFailed(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&upload)),
+                  "CreateCommittedResource(texture staging)");
+
+    std::vector<D3D12_SUBRESOURCE_DATA> levels(mip_levels);
+    for (UINT16 level = 0; level < mip_levels; ++level) {
+        const UINT64 width = std::max(1u, image.width >> level);
+        const UINT64 height = std::max(1u, image.height >> level);
+        levels[level].pData = image.levels[level].data();
+        levels[level].RowPitch = static_cast<LONG_PTR>(width * 4);
+        levels[level].SlicePitch = static_cast<LONG_PTR>(width * height * 4);
+    }
+
+    UpdateSubresources(command_list_.Get(), texture.Get(), upload.Get(), 0, 0, mip_levels,
+                       levels.data());
+
+    const CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    command_list_->ResourceBarrier(1, &barrier);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = kTextureFormat;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = mip_levels;
+
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(texture_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                               static_cast<INT>(descriptor), texture_size_);
+    device_->CreateShaderResourceView(texture.Get(), &srv, handle);
+
+    staging.push_back(std::move(upload));
+    return texture;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE Renderer::TextureHandle(UINT descriptor) const {
+    return CD3DX12_GPU_DESCRIPTOR_HANDLE(texture_heap_->GetGPUDescriptorHandleForHeapStart(),
+                                         static_cast<INT>(descriptor), texture_size_);
+}
+
+void Renderer::CreateSceneGeometry(const Scene& scene) {
+    const std::vector<Model>& models = scene.Models();
+
+    UINT image_count = 0;
+    for (const Model& model : models) {
+        image_count += static_cast<UINT>(model.images.size());
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+    heap_desc.NumDescriptors = 1 + image_count; // The white texture, then the rest.
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ThrowIfFailed(device_->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&texture_heap_)),
+                  "CreateDescriptorHeap(SRV)");
+    texture_size_ =
+        device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
     ThrowIfFailed(allocators_[frame_index_]->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocators_[frame_index_].Get(), nullptr),
                   "CommandList::Reset");
 
-    command_list_->CopyBufferRegion(vertex_buffer_.Get(), 0, vertex_staging.Get(), 0, vertex_bytes);
-    command_list_->CopyBufferRegion(index_buffer_.Get(), 0, index_staging.Get(), 0, index_bytes);
+    // Every staging resource stays alive until the copies have landed.
+    std::vector<ComPtr<ID3D12Resource>> staging;
 
-    const CD3DX12_RESOURCE_BARRIER barriers[] = {
-        CD3DX12_RESOURCE_BARRIER::Transition(vertex_buffer_.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                                             D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER),
-        CD3DX12_RESOURCE_BARRIER::Transition(index_buffer_.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                                             D3D12_RESOURCE_STATE_INDEX_BUFFER),
-    };
-    command_list_->ResourceBarrier(_countof(barriers), barriers);
+    Image white{};
+    white.width = 1;
+    white.height = 1;
+    white.levels.push_back(std::vector<std::byte>(4, std::byte{0xff}));
+    textures_.push_back(UploadTexture(white, kWhiteTexture, staging));
+
+    UINT next_descriptor = kWhiteTexture + 1;
+    models_.resize(models.size());
+
+    for (size_t i = 0; i < models.size(); ++i) {
+        const Model& model = models[i];
+        GpuModel& gpu = models_[i];
+
+        const UINT64 vertex_bytes = model.vertices.size() * sizeof(Vertex);
+        const UINT64 index_bytes = model.indices.size() * sizeof(std::uint32_t);
+
+        gpu.vertex_buffer = UploadBuffer(model.vertices.data(), vertex_bytes,
+                                         D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, staging);
+        gpu.vertex_buffer_view.BufferLocation = gpu.vertex_buffer->GetGPUVirtualAddress();
+        gpu.vertex_buffer_view.StrideInBytes = sizeof(Vertex);
+        gpu.vertex_buffer_view.SizeInBytes = static_cast<UINT>(vertex_bytes);
+
+        gpu.index_buffer = UploadBuffer(model.indices.data(), index_bytes,
+                                        D3D12_RESOURCE_STATE_INDEX_BUFFER, staging);
+        gpu.index_buffer_view.BufferLocation = gpu.index_buffer->GetGPUVirtualAddress();
+        gpu.index_buffer_view.Format = DXGI_FORMAT_R32_UINT;
+        gpu.index_buffer_view.SizeInBytes = static_cast<UINT>(index_bytes);
+
+        // Where each of this model's images landed in the shared heap.
+        std::vector<UINT> descriptors;
+        descriptors.reserve(model.images.size());
+        for (const Image& image : model.images) {
+            textures_.push_back(UploadTexture(image, next_descriptor, staging));
+            descriptors.push_back(next_descriptor++);
+        }
+
+        gpu.primitives.reserve(model.primitives.size());
+        for (const Primitive& primitive : model.primitives) {
+            DrawPrimitive draw{};
+            draw.transform = primitive.transform;
+            draw.first_index = primitive.first_index;
+            draw.index_count = primitive.index_count;
+
+            // No material means plain white, which leaves the instance's tint as
+            // the only thing colouring the draw. That is how every box in the
+            // yard gets its colour.
+            draw.base_color = {1.0f, 1.0f, 1.0f};
+            UINT descriptor = kWhiteTexture;
+            if (primitive.material >= 0) {
+                const Material& material = model.materials[primitive.material];
+                draw.base_color = material.base_color;
+                if (material.base_color_image >= 0) {
+                    descriptor = descriptors[material.base_color_image];
+                }
+            }
+            draw.base_color_texture = TextureHandle(descriptor);
+
+            gpu.primitives.push_back(draw);
+        }
+    }
 
     ThrowIfFailed(command_list_->Close(), "CommandList::Close");
     ID3D12CommandList* lists[] = {command_list_.Get()};
     queue_->ExecuteCommandLists(_countof(lists), lists);
 
-    // The staging buffers are released when this function returns, so the copy
-    // has to have landed before it does.
+    // The staging buffers are released when this function returns, so the copies
+    // have to have landed before it does.
     FlushGpu();
-
-    vertex_buffer_view_.BufferLocation = vertex_buffer_->GetGPUVirtualAddress();
-    vertex_buffer_view_.StrideInBytes = sizeof(Vertex);
-    vertex_buffer_view_.SizeInBytes = static_cast<UINT>(vertex_bytes);
-
-    index_buffer_view_.BufferLocation = index_buffer_->GetGPUVirtualAddress();
-    index_buffer_view_.Format = DXGI_FORMAT_R16_UINT;
-    index_buffer_view_.SizeInBytes = static_cast<UINT>(index_bytes);
 }
 
-void Renderer::DrawProps(std::span<const Prop> props, const XMMATRIX& view_projection,
-                         XMFLOAT3 sun_direction) {
-    for (const Prop& prop : props) {
-        const XMMATRIX model = XMLoadFloat4x4(&prop.transform);
+void Renderer::DrawInstances(std::span<const MeshInstance> instances,
+                             const XMMATRIX& view_projection, XMFLOAT3 sun_direction) {
+    for (const MeshInstance& instance : instances) {
+        const GpuModel& model = models_[instance.model];
+        const XMMATRIX instance_to_world = XMLoadFloat4x4(&instance.transform);
+        const XMVECTOR tint = XMLoadFloat3(&instance.tint);
 
-        Constants constants{};
-        XMStoreFloat4x4(&constants.mvp, model * view_projection);
-        constants.model = prop.transform;
-        constants.albedo = prop.color;
-        constants.checker = prop.checker;
-        constants.sun_direction = sun_direction;
+        command_list_->IASetVertexBuffers(0, 1, &model.vertex_buffer_view);
+        command_list_->IASetIndexBuffer(&model.index_buffer_view);
 
-        command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
-        command_list_->DrawIndexedInstanced(index_count_, 1, 0, 0, 0);
+        for (const DrawPrimitive& primitive : model.primitives) {
+            // The primitive's own place in the model, then the model's place in
+            // the world.
+            const XMMATRIX to_world =
+                XMLoadFloat4x4(&primitive.transform) * instance_to_world;
+
+            Constants constants{};
+            XMStoreFloat4x4(&constants.mvp, to_world * view_projection);
+            XMStoreFloat4x4(&constants.model, to_world);
+
+            // A normal is not carried by the model matrix when that matrix scales
+            // unevenly -- and the yard's ground is a cube scaled 60 x 0.3 x 60.
+            // The inverse transpose is what carries it instead. Only the upper
+            // 3x3 matters, so the translation in the fourth row is left behind.
+            const XMMATRIX normal_matrix = XMMatrixTranspose(XMMatrixInverse(nullptr, to_world));
+            for (int row = 0; row < 3; ++row) {
+                XMStoreFloat4(&constants.normal_rows[row], normal_matrix.r[row]);
+            }
+
+            XMStoreFloat3(&constants.albedo,
+                          XMVectorMultiply(tint, XMLoadFloat3(&primitive.base_color)));
+            constants.checker = instance.checker;
+            constants.sun_direction = sun_direction;
+
+            command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
+            command_list_->SetGraphicsRootDescriptorTable(1, primitive.base_color_texture);
+            command_list_->DrawIndexedInstanced(primitive.index_count, 1, primitive.first_index, 0,
+                                                0);
+        }
     }
 }
 
@@ -387,6 +569,12 @@ void Renderer::Render(const Scene& scene, const ViewmodelPose& viewmodel,
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
 
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
+
+    // The only heap the game binds, and it must be bound before any root
+    // descriptor table that points into it.
+    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
+
     command_list_->RSSetViewports(1, &viewport_);
     command_list_->RSSetScissorRects(1, &scissor_);
 
@@ -404,19 +592,17 @@ void Renderer::Render(const Scene& scene, const ViewmodelPose& viewmodel,
     command_list_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
     command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    command_list_->IASetVertexBuffers(0, 1, &vertex_buffer_view_);
-    command_list_->IASetIndexBuffer(&index_buffer_view_);
 
     XMFLOAT3 sun{};
     XMStoreFloat3(&sun, XMVector3Normalize(XMLoadFloat3(&kSunDirection)));
-    DrawProps(scene.Props(), view_projection, sun);
+    DrawInstances(scene.Instances(), view_projection, sun);
 
     // The arms live about half a metre from the eye, close enough that any wall
     // the player leans against would be drawn in front of them. Throwing the
     // depth buffer away first is the usual answer: it costs one clear, and the
     // arms still occlude each other because they keep writing depth as they go.
     command_list_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-    DrawProps(viewmodel.props, view_projection, viewmodel.sun_direction);
+    DrawInstances(viewmodel.instances, view_projection, viewmodel.sun_direction);
 
     const CD3DX12_RESOURCE_BARRIER to_present = CD3DX12_RESOURCE_BARRIER::Transition(
         render_targets_[frame_index_].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,

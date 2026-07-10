@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <span>
+#include <vector>
 
 // Raw Direct3D 12. No abstraction layer, no engine: the swapchain, the command
 // allocators and the fence are all right here on purpose.
@@ -28,17 +29,51 @@ public:
     float AspectRatio() const;
 
 private:
+    // One draw: a slice of its model's index buffer, the base colour the glTF
+    // material asked for, and the descriptor of the texture that modulates it.
+    struct DrawPrimitive {
+        DirectX::XMFLOAT4X4 transform;
+        UINT first_index;
+        UINT index_count;
+        DirectX::XMFLOAT3 base_color;
+        D3D12_GPU_DESCRIPTOR_HANDLE base_color_texture;
+    };
+
+    // A Model, uploaded. The CPU-side Model that produced it is not needed again.
+    struct GpuModel {
+        ComPtr<ID3D12Resource> vertex_buffer;
+        D3D12_VERTEX_BUFFER_VIEW vertex_buffer_view{};
+        ComPtr<ID3D12Resource> index_buffer;
+        D3D12_INDEX_BUFFER_VIEW index_buffer_view{};
+        std::vector<DrawPrimitive> primitives;
+    };
+
     void CreateDevice();
     void CreateCommandObjects();
     void CreateSwapChain(HWND hwnd, UINT width, UINT height);
     void CreateRenderTargetViews();
     void CreateDepthBuffer();
     void CreatePipeline();
+    // Uploads every model the scene holds, plus the 1x1 white texture that
+    // stands in for a material with no texture of its own.
     void CreateSceneGeometry(const Scene& scene);
 
-    // One draw of the shared cube per prop, each under its own root constants.
-    void DrawProps(std::span<const Prop> props, const DirectX::XMMATRIX& view_projection,
-                   DirectX::XMFLOAT3 sun_direction);
+    // Fills a default-heap buffer through a staging copy. The staging resource is
+    // appended to `staging`, which the caller must keep alive until the GPU has
+    // retired the copy.
+    ComPtr<ID3D12Resource> UploadBuffer(const void* data, UINT64 bytes,
+                                        D3D12_RESOURCE_STATES final_state,
+                                        std::vector<ComPtr<ID3D12Resource>>& staging);
+    // Uploads a mip chain and writes its shader resource view into slot
+    // `descriptor` of the texture heap.
+    ComPtr<ID3D12Resource> UploadTexture(const Image& image, UINT descriptor,
+                                         std::vector<ComPtr<ID3D12Resource>>& staging);
+    D3D12_GPU_DESCRIPTOR_HANDLE TextureHandle(UINT descriptor) const;
+
+    // One draw per primitive of each instance's model, each under its own root
+    // constants.
+    void DrawInstances(std::span<const MeshInstance> instances,
+                       const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction);
 
     // Blocks until the GPU has retired every frame. Only for teardown, resize
     // and the one-off geometry upload; the steady-state path is MoveToNextFrame.
@@ -65,13 +100,13 @@ private:
     ComPtr<ID3D12RootSignature> root_signature_;
     ComPtr<ID3D12PipelineState> pipeline_state_;
 
-    // One shared unit cube. Each prop is a draw of the whole mesh under a
-    // different transform.
-    ComPtr<ID3D12Resource> vertex_buffer_;
-    D3D12_VERTEX_BUFFER_VIEW vertex_buffer_view_{};
-    ComPtr<ID3D12Resource> index_buffer_;
-    D3D12_INDEX_BUFFER_VIEW index_buffer_view_{};
-    UINT index_count_ = 0;
+    // Shader-visible, and the only descriptor heap the game binds. Slot 0 is the
+    // white texture; every glTF image follows it.
+    ComPtr<ID3D12DescriptorHeap> texture_heap_;
+    UINT texture_size_ = 0;
+    std::vector<ComPtr<ID3D12Resource>> textures_;
+
+    std::vector<GpuModel> models_;
 
     ComPtr<ID3D12Fence> fence_;
     HANDLE fence_event_ = nullptr;

@@ -4,12 +4,13 @@
 
 #include <DirectXMath.h>
 
+#include <cstdint>
 #include <span>
 #include <vector>
 
 // Everything the renderer needs to draw the arms for one frame.
 struct ViewmodelPose {
-    std::span<const Prop> props;
+    std::span<const MeshInstance> instances;
     // World space, unit length. Not the yard's sun -- see Viewmodel::Pose.
     DirectX::XMFLOAT3 sun_direction;
 };
@@ -21,9 +22,11 @@ struct ViewmodelPose {
 // the world by the camera's own basis every frame. Doing it that way rather than
 // leaving them in eye space keeps `g_model` a genuine world matrix, so the arms
 // take the same ambient and the same hemisphere as everything else in the yard.
+//
+// They are boxes, like the yard's props, and share the scene's unit cube.
 class Viewmodel {
 public:
-    Viewmodel();
+    explicit Viewmodel(std::uint32_t cube_model);
 
     // Lifts the arms into the world for one frame. The span stays valid until
     // the next call.
@@ -37,6 +40,7 @@ private:
     // with its eye-space X negated.
     void AddArm(float side);
 
-    std::vector<Prop> eye_space_;
-    std::vector<Prop> world_space_;
+    std::uint32_t cube_;
+    std::vector<MeshInstance> eye_space_;
+    std::vector<MeshInstance> world_space_;
 };
