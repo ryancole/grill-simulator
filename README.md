@@ -5,10 +5,10 @@ layer — the swapchain, command allocators and fences are all right there in
 `src/renderer.cpp` on purpose.
 
 Currently a first person camera in a walled backyard: a patio, a grill, a picnic
-table and a couple of trees. The grill, the table and the trees are textured
-**glTF 2.0** models loaded with [fastgltf](https://github.com/spnda/fastgltf);
-the ground, fence, cooler and crates are still the same unit cube drawn under a
-different transform.
+table, a cooler, a stack of crates and a couple of trees. Every prop is a
+textured **glTF 2.0** model loaded with
+[fastgltf](https://github.com/spnda/fastgltf). Only the ground, the patio slab
+and the fence are still the same unit cube drawn under a different transform.
 
 ## Controls
 
@@ -173,14 +173,16 @@ the pin has slipped.
 Props that deserve real geometry are **glTF 2.0**, loaded with fastgltf and
 decoded through the Windows Imaging Component:
 
-| Asset | Nodes | Textures |
-| --- | --- | --- |
-| `grill.glb` | four legs, a body, a lid, a side shelf | brushed charcoal on the body |
-| `tree.glb` | a trunk, a canopy | bark, leaves |
-| `table.glb` | a top, four legs, two benches | planks |
+| Asset | Nodes | Textures | Placed |
+| --- | --- | --- | --- |
+| `grill.glb` | four legs, a body, a lid, a side shelf | brushed charcoal on the body | once |
+| `tree.glb` | a trunk, a canopy | bark, leaves | twice, at different scale and yaw |
+| `table.glb` | a top, four legs, two benches | planks | once |
+| `crate.glb` | one box | cardboard | twice, stacked, the upper one askew |
+| `cooler.glb` | a body, a decorative lid | moulded plastic, in two colours | once |
 
-The ground, fence, cooler and crates are still the unit cube under a transform.
-A prop crosses over when someone has something better to put there.
+The ground, the patio slab and the fence are still the unit cube under a
+transform. A prop crosses over when someone has something better to put there.
 
 The committed `.glb` files are written by `tools/gen_models.py`, which builds
 them out of the same boxes the code used to. It is deliberately **not** wired
@@ -261,6 +263,35 @@ every asset to carry, so no vertex is ever touched to compute one. Each node
 yields its own box, so the grill collides as a leg, body, lid and shelf rather
 than as one loose box around the whole thing.
 
+### Decorative nodes, and why they had to exist
+
+**A node whose name ends in `_nocollide` is drawn and never collided with.**
+
+One box per node is exactly what a prop assembled from parts wants — until two
+of those parts are *stacked*. `HighestSupportUnder` will stand the player on any
+box's top face, and the lower part's top face is buried inside the prop where
+nobody can see it.
+
+The cooler is where this bit. Building it as a short body under a lid put a
+standable surface at 0.45 m, inside the cooler, at exactly the height of the lid.
+A player descending past its corner landed on that surface and hovered there.
+Porting `collision.cpp` to a script and sweeping every reachable state — every
+position around the cooler, every `feet_before`, every downward velocity — turned
+up **63,960** states where `landed` flipped. Insetting the body so the lid
+overhangs it only reduced the count; nothing short of *one collider* fixes it,
+because there is no inset that puts a lower box's top out of reach in every case.
+
+So the cooler's body is the whole cooler — the same 0.9 × 0.6 × 0.6 box the yard
+used to draw, and the only thing that collides — and the lid is a lip that laps
+1 cm over its sides and stands 5 mm proud of its top, so the two share no face
+and cannot z-fight. Collision is unchanged because the collider set is literally
+unchanged, not because an argument says so.
+
+glTF has no standard way to mark geometry decorative. A name suffix is what
+engines settle on (Unreal's `UCX_`, Godot's `-noimp`) and it survives a round
+trip through Blender's outliner. The alternative, a custom `extras` field, would
+drag simdjson's headers into `model.cpp` to read one bool.
+
 ## Layout
 
 ```
@@ -276,6 +307,7 @@ tools/
   gen_models.py                   writes assets/models/*.glb; run by hand
 assets/models/
   grill.glb  tree.glb  table.glb  boxes, but through the real asset pipeline
+  crate.glb  cooler.glb
 src/
   main.cpp                        window, message loop, timing, file helpers
   camera.cpp/.hpp                 yaw/pitch eye, WASD movement, view + projection
@@ -348,5 +380,8 @@ and a model matrix that scales unevenly does not carry a normal.
 - **`memcpy`ing a fastgltf matrix into an `XMFLOAT4X4` is the handedness
   conversion, not a bug.** Column-major in, row-major out, which is the transpose
   that carries `p' = M*p` to `p' = p*M`. See [Models](#models).
+- **Stacking two colliding nodes buries a standable surface inside a prop.**
+  `HighestSupportUnder` stands the player on any box's top face, seen or not.
+  Hence `_nocollide`.
 - **`PW_RENDERFULLCONTENT` is mandatory to screenshot this window.** A flip-model
   swapchain prints solid black under a plain `PrintWindow`.

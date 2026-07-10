@@ -56,6 +56,23 @@ XMFLOAT4X4 ToGameSpace(const fastgltf::math::fmat4x4& gltf_transform) {
     return result;
 }
 
+// A node whose name ends in this is drawn but never collided with.
+//
+// Colliders are derived from geometry, one axis-aligned box per node, and that
+// is what a prop assembled out of parts wants -- until two of those parts are
+// stacked. Then the lower one's top face is a surface the player can stand on,
+// buried inside the prop where nobody can see it. The cooler's body ends where
+// its lid begins, and without this a player descending past its corner lands on
+// the body's lid-height rim and hovers there.
+//
+// So the cooler's body is the whole cooler, and its lid is a lip that sits over
+// the top of it and collides with nothing. glTF has no standard way to say
+// "decorative"; a name suffix is what engines settle on (Unreal's UCX_, Godot's
+// -noimp), and it survives a round trip through Blender's outliner. The
+// alternative, a custom `extras` field, would drag simdjson's headers in here to
+// read one bool.
+constexpr std::string_view kDecorativeSuffix = "_nocollide";
+
 const fastgltf::Accessor& FindAccessor(const fastgltf::Asset& asset,
                                        const fastgltf::Primitive& primitive,
                                        std::string_view attribute) {
@@ -279,6 +296,7 @@ void LoadPrimitive(const fastgltf::Asset& asset, const fastgltf::Node& node,
     primitive.first_index = static_cast<std::uint32_t>(model.indices.size());
     primitive.material = source.materialIndex ? static_cast<int>(*source.materialIndex) : -1;
     primitive.skin = node.skinIndex ? static_cast<int>(*node.skinIndex) : -1;
+    primitive.collides = !std::string_view(node.name).ends_with(kDecorativeSuffix);
 
     const std::size_t first_vertex = model.vertices.size();
     model.vertices.resize(first_vertex + positions.count);

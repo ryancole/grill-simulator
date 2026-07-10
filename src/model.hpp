@@ -53,6 +53,10 @@ struct Primitive {
     // vertex is ever touched to compute it. The caller composes this with
     // `transform` and its own instance transform to get a world-space box.
     Aabb bounds{};
+    // False for decorative geometry: drawn, never collided with. See
+    // kDecorativeSuffix in model.cpp for how an asset says so, and why it has
+    // to be able to.
+    bool collides = true;
 };
 
 // Unused until rigging lands. `joints` indexes Model::nodes; `inverse_bind`

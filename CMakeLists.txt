@@ -64,4 +64,5 @@ agility_sdk_stage_runtime(grill)
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT scene.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT scene.ps.cso)
 
-stage_assets(grill DIRECTORY assets/models FILES grill.glb tree.glb table.glb)
+stage_assets(grill DIRECTORY assets/models
+  FILES grill.glb tree.glb table.glb crate.glb cooler.glb)

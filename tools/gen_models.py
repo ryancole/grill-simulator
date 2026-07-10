@@ -196,6 +196,43 @@ def leaves() -> bytes:
     return shaded_texture(size, size, (0.20, 0.42, 0.18), shade)
 
 
+def cardboard() -> bytes:
+    """A packing box: paper fibre over corrugation.
+
+    The flutes show faintly through the liner as evenly spaced ridges. They run
+    across the texture's U, so on the sides of a box they stand upright -- which
+    is which way up corrugation goes when a box is meant to be stacked, and the
+    yard has one crate stacked on another.
+    """
+    size = 64
+    flutes = 8
+
+    def shade(x: int, y: int) -> float:
+        ridge = 0.97 + 0.06 * math.sin(x * 2.0 * math.pi * flutes / size)
+        fibre = 0.10 * smooth_noise(x, y, size, size, 8, seed=5)
+        speck = 0.06 * noise(x * 31 + y * 131071)
+        return ridge * (0.92 + fibre + speck)
+
+    return shaded_texture(size, size, (0.52, 0.38, 0.24), shade)
+
+
+def moulded_plastic(base: tuple[float, float, float]) -> bytes:
+    """Injection-moulded plastic: a fine speckle under shallow ridges.
+
+    The cooler's body and its lid are the same plastic in two colours, so they
+    share this and differ only in `base`.
+    """
+    size = 64
+    ridges = 4
+
+    def shade(x: int, y: int) -> float:
+        ridge = 0.95 + 0.10 * (0.5 + 0.5 * math.cos(y * 2.0 * math.pi * ridges / size))
+        speck = 0.96 + 0.08 * noise(x * 131071 + y * 31)
+        return ridge * speck
+
+    return shaded_texture(size, size, base, shade)
+
+
 def planks(bands: int = 4) -> bytes:
     """The picnic table. Boards run along the texture's U, seams along its V.
 
@@ -426,6 +463,24 @@ def sampler() -> dict:
     }
 
 
+def part_nodes(root: str, parts) -> list[dict]:
+    """A root transform node with one child per part.
+
+    `parts` are (name, mesh, translation) or (name, mesh, translation, yaw), both
+    in the game's space. Every model here hangs its parts off a root so that the
+    loader flattens a real hierarchy, and so that each part yields its own
+    collider rather than one loose box around the whole prop.
+    """
+    nodes: list[dict] = [{"name": root, "children": list(range(1, len(parts) + 1))}]
+    for part in parts:
+        name, mesh, translation = part[0], part[1], part[2]
+        node = {"name": name, "mesh": mesh, "translation": list(project(*translation))}
+        if len(part) > 3 and part[3]:
+            node["rotation"] = yaw_quaternion(part[3])
+        nodes.append(node)
+    return nodes
+
+
 def assemble(builder: GlbBuilder, nodes: list[dict], meshes: list[dict], materials: list[dict],
              images: list[int]) -> bytes:
     """One scene, one node tree, one texture per image. Node 0 is the root."""
@@ -481,11 +536,7 @@ def build_grill() -> bytes:
         for z in (-0.35, 0.35):
             parts.append((f"leg_{'e' if x > 0 else 'w'}{'n' if z > 0 else 's'}", 2, (x, 0.125, z)))
 
-    nodes: list[dict] = [{"name": "Grill", "children": list(range(1, len(parts) + 1))}]
-    for name, mesh, translation in parts:
-        nodes.append({"name": name, "mesh": mesh, "translation": list(project(*translation))})
-
-    return assemble(builder, nodes, meshes, materials, [charcoal_image])
+    return assemble(builder, part_nodes("Grill", parts), meshes, materials, [charcoal_image])
 
 
 def build_tree() -> bytes:
@@ -512,18 +563,10 @@ def build_tree() -> bytes:
         builder.box_mesh("canopy", (3.0, 1.8, 3.0), LEAVES, tile=1.5),
     ]
 
-    nodes = [
-        {"name": "Tree", "children": [1, 2]},
-        {"name": "trunk", "mesh": 0, "translation": list(project(0.0, 1.5, 0.0))},
-        {
-            "name": "canopy",
-            "mesh": 1,
-            "translation": list(project(0.0, 3.7, 0.0)),
-            "rotation": yaw_quaternion(12.0),
-        },
-    ]
+    parts = [("trunk", 0, (0.0, 1.5, 0.0)), ("canopy", 1, (0.0, 3.7, 0.0), 12.0)]
 
-    return assemble(builder, nodes, meshes, materials, [bark_image, leaves_image])
+    return assemble(builder, part_nodes("Tree", parts), meshes, materials,
+                    [bark_image, leaves_image])
 
 
 def build_table() -> bytes:
@@ -550,17 +593,68 @@ def build_table() -> bytes:
         for z in (-0.45, 0.45):
             parts.append((f"leg_{'e' if x > 0 else 'w'}{'n' if z > 0 else 's'}", 1, (x, 0.35, z)))
 
-    nodes: list[dict] = [{"name": "Table", "children": list(range(1, len(parts) + 1))}]
-    for name, mesh, translation in parts:
-        nodes.append({"name": name, "mesh": mesh, "translation": list(project(*translation))})
+    return assemble(builder, part_nodes("Table", parts), meshes, materials, [planks_image])
 
-    return assemble(builder, nodes, meshes, materials, [planks_image])
+
+def build_crate() -> bytes:
+    """A cardboard packing box, 80 cm on a side.
+
+    The scene stacks two of them, the upper one scaled to 0.875 and knocked
+    askew. Unlike the tree, that scale is exact: the two crates always were the
+    same cube at 0.8 m and 0.7 m.
+    """
+    builder = GlbBuilder()
+    cardboard_image = builder.image_view(cardboard())
+
+    materials = [material("cardboard", texture=0, roughness=0.95)]
+    meshes = [builder.box_mesh("box", (0.8, 0.8, 0.8), 0, tile=0.4)]
+
+    # The origin sits on the ground under the crate, so stacking one on another
+    # is a translation by the lower one's height.
+    return assemble(builder, part_nodes("Crate", [("box", 0, (0.0, 0.4, 0.0))]), meshes,
+                    materials, [cardboard_image])
+
+
+def build_cooler() -> bytes:
+    """A cool box: a blue body with a pale moulded lid lapped over its top.
+
+    The body is the whole cooler -- the full 0.9 x 0.6 x 0.6 box the yard used to
+    draw -- and it is the only thing that collides. The lid is decorative: it
+    laps 1 cm over the body's sides and stands 5 mm proud of its top, which is
+    what stops the two from sharing a face and z-fighting.
+
+    Stacking a shorter body under a lid would have been the obvious way to build
+    this, and it is wrong. Colliders come one per node, so the body's top face
+    would be a surface the player can stand on -- buried inside the cooler at lid
+    height, invisible, and reachable by anyone falling past the corner. Naming
+    the lid `_nocollide` is how the asset says it is a decoration; see
+    kDecorativeSuffix in src/model.cpp.
+    """
+    builder = GlbBuilder()
+    body_image = builder.image_view(moulded_plastic((0.16, 0.44, 0.62)))
+    lid_image = builder.image_view(moulded_plastic((0.82, 0.84, 0.86)))
+
+    materials = [material("body", texture=0, roughness=0.55),
+                 material("lid", texture=1, roughness=0.45)]
+    BODY, LID = range(2)
+
+    meshes = [
+        builder.box_mesh("body", (0.9, 0.6, 0.6), BODY, tile=0.6),
+        builder.box_mesh("lid", (0.92, 0.16, 0.62), LID, tile=0.6),
+    ]
+
+    # The lid spans 0.445 .. 0.605, so it swallows the body's top face rather
+    # than meeting it.
+    parts = [("body", 0, (0.0, 0.3, 0.0)), ("lid_nocollide", 1, (0.0, 0.525, 0.0))]
+    return assemble(builder, part_nodes("Cooler", parts), meshes, materials,
+                    [body_image, lid_image])
 
 
 def main() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
     models = (("grill.glb", build_grill()), ("tree.glb", build_tree()),
-              ("table.glb", build_table()))
+              ("table.glb", build_table()), ("crate.glb", build_crate()),
+              ("cooler.glb", build_cooler()))
     for name, data in models:
         path = ASSETS / name
         path.write_bytes(data)

@@ -13,15 +13,13 @@ namespace {
 // converted to linear light and the back buffer is not sRGB, so the shader's
 // arithmetic happens in whatever space these are -- fine for flat colours.
 //
-// Only the props that are still boxes are painted here. The grill, the trees and
-// the picnic table carry their colours in the materials of their own .glb, and
-// the instances that place them pass white.
+// Only the ground, the patio and the fence are still painted here. Every other
+// prop carries its colours in the materials of its own .glb, and the instance
+// that places it passes white.
 constexpr XMFLOAT3 kWhite{1.0f, 1.0f, 1.0f};
 constexpr XMFLOAT3 kGrass{0.24f, 0.36f, 0.18f};
 constexpr XMFLOAT3 kConcrete{0.55f, 0.54f, 0.51f};
 constexpr XMFLOAT3 kFenceWood{0.45f, 0.32f, 0.21f};
-constexpr XMFLOAT3 kCoolerBlue{0.16f, 0.44f, 0.62f};
-constexpr XMFLOAT3 kCrate{0.52f, 0.38f, 0.24f};
 
 // The world-space bound of a transformed box. For a rotated one that is a loose
 // fit, which for a tree canopy nobody can reach is not worth a separate
@@ -53,6 +51,8 @@ Scene::Scene() {
     const std::uint32_t grill = LoadModel("grill.glb");
     const std::uint32_t tree = LoadModel("tree.glb");
     const std::uint32_t table = LoadModel("table.glb");
+    const std::uint32_t crate = LoadModel("crate.glb");
+    const std::uint32_t cooler = LoadModel("cooler.glb");
 
     // The yard. +X is east, +Z is north, and the player spawns at the south end
     // looking at the grill.
@@ -70,12 +70,18 @@ Scene::Scene() {
     // parts come along as the nodes of one asset.
     AddInstance(grill, XMMatrixTranslation(0.0f, 0.0f, 5.0f), kWhite);
     AddInstance(table, XMMatrixTranslation(-4.5f, 0.0f, 1.5f), kWhite);
+    AddInstance(cooler, XMMatrixTranslation(3.6f, 0.0f, 6.5f), kWhite);
 
-    AddBox({3.6f, 0.3f, 6.5f}, {0.9f, 0.6f, 0.6f}, 0.0f, kCoolerBlue);
-
-    // Two crates, the upper one knocked askew.
-    AddBox({5.8f, 0.4f, -2.0f}, {0.8f, 0.8f, 0.8f}, 0.0f, kCrate);
-    AddBox({5.8f, 1.15f, -2.0f}, {0.7f, 0.7f, 0.7f}, 22.0f, kCrate);
+    // Two crates, the upper one knocked askew. The smaller is the same box at
+    // 0.875 -- an exact scale, unlike the trees', because these two always were
+    // the same cube at 0.8 m and 0.7 m. It stands on the lower one, so it is
+    // lifted by the lower one's height rather than by an arithmetic centre.
+    AddInstance(crate, XMMatrixTranslation(5.8f, 0.0f, -2.0f), kWhite);
+    AddInstance(crate,
+                XMMatrixScaling(0.875f, 0.875f, 0.875f) *
+                    XMMatrixRotationY(XMConvertToRadians(22.0f)) *
+                    XMMatrixTranslation(5.8f, 0.8f, -2.0f),
+                kWhite);
 
     // Two of the same tree, told apart by a scale and a turn -- which is the
     // whole reason it is one asset rather than two. The canopy is already yawed
@@ -116,8 +122,13 @@ void Scene::AddInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
     instances_.push_back(instance);
 
     // One collider per primitive, from the bounds glTF already stored on the
-    // POSITION accessor. No vertex is ever looked at.
+    // POSITION accessor. No vertex is ever looked at. Decorative parts -- the
+    // cooler's lid, which only laps over a body that is already the whole cooler
+    // -- contribute nothing, or the player would stand on them.
     for (const Primitive& primitive : models_[model].primitives) {
+        if (!primitive.collides) {
+            continue;
+        }
         const XMMATRIX to_world = XMLoadFloat4x4(&primitive.transform) * transform;
         colliders_.push_back(TransformBounds(primitive.bounds, to_world));
     }
