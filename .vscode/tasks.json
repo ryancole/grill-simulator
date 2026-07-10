@@ -1,0 +1,28 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cmake: configure",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--preset", "windows-clang"],
+      "problemMatcher": []
+    },
+    {
+      "label": "cmake: build debug",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", "--preset", "debug"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": "$gcc"
+    },
+    {
+      "label": "cmake: build release",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", "--preset", "release"],
+      "group": "build",
+      "problemMatcher": "$gcc"
+    }
+  ]
+}

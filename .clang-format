@@ -1,0 +1,13 @@
+---
+BasedOnStyle: LLVM
+Standard: c++20
+IndentWidth: 4
+ColumnLimit: 100
+AccessModifierOffset: -4
+PointerAlignment: Left
+ReferenceAlignment: Left
+BreakConstructorInitializers: BeforeComma
+AllowShortFunctionsOnASingleLine: Inline
+AlwaysBreakTemplateDeclarations: Yes
+IndentCaseLabels: false
+SeparateDefinitionBlocks: Always

@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug grill",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/bin/Debug/grill.exe",
+      // The executable finds shaders/ and D3D12/ relative to its own location,
+      // so cwd only affects where a crash dump would land.
+      "cwd": "${workspaceFolder}/build/bin/Debug",
+      "console": "internalConsole",
+      "preLaunchTask": "cmake: build debug"
+    },
+    {
+      "name": "Debug grill (Release)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/bin/Release/grill.exe",
+      "cwd": "${workspaceFolder}/build/bin/Release",
+      "console": "internalConsole",
+      "preLaunchTask": "cmake: build release"
+    }
+  ]
+}
