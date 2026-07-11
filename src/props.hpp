@@ -89,6 +89,9 @@ private:
         // A settled object is skipped by the solver until something disturbs it,
         // which is both cheaper and what keeps a resting box from jittering.
         bool asleep{true};
+        // Seconds this body has been slow and in contact. Once it passes the
+        // sleep threshold the body is put to sleep; any motion resets it.
+        float rest_timer{0.0f};
 
         // Rebuilt from position/orientation/com_offset each frame: the model-to-
         // world transform the renderer draws this item under.
@@ -111,13 +114,20 @@ private:
     // The item the player is looking at within reach, or -1. Nearest to the
     // centre of the gaze wins.
     int PickTarget(DirectX::FXMVECTOR eye, DirectX::FXMVECTOR forward) const;
-    // Lays the carried item on the ground in front of the player, on whatever
-    // surface is under that spot.
-    void Drop(DirectX::FXMVECTOR eye, DirectX::FXMVECTOR forward,
-              std::span<const Aabb> colliders);
+    // Releases the carried item into the simulation: it detaches at the exact
+    // pose it was held, takes a gentle toss along the gaze, and falls from there.
+    void Drop(DirectX::FXMMATRIX camera_to_world);
+    // Advances one awake body by a single fixed substep of length h: gravity and
+    // integration, then impulse resolution of its contacts with the static world
+    // `colliders`. Returns the number of contacts, so the caller knows whether the
+    // body is resting on something (and may be put to sleep).
+    int StepBody(Item& item, float h, std::span<const Aabb> colliders) const;
 
     std::vector<Item> items_;
     int carried_ = -1; // index into items_, or -1
+    // Leftover real time not yet consumed by a fixed physics substep. The solver
+    // runs on a fixed step for stability and banks the remainder here.
+    float physics_accumulator_ = 0.0f;
     int hovered_ = -1; // item in reach and looked at this frame, or -1
     bool interact_was_down_ = false;
 

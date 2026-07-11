@@ -19,12 +19,6 @@ constexpr XMFLOAT3 kWhite{1.0f, 1.0f, 1.0f};
 constexpr float kReach = 2.4f;
 constexpr float kMinAlignment = 0.80f;
 
-// A dropped object is set down this far in front of the eye, along the gaze
-// flattened to the ground. The radius is the footprint the support test uses to
-// find the surface under it -- small, because these objects are.
-constexpr float kDropDistance = 1.15f;
-constexpr float kDropRadius = 0.06f;
-
 // The interact key. Left-click is already the mouse-look toggle, so grabbing
 // gets its own key, the shooter convention.
 constexpr int kInteractKey = 'E';
@@ -34,6 +28,36 @@ constexpr int kInteractKey = 'E';
 // world (infinite mass) does not depend on it either -- but it keeps the inertia
 // tensor sensibly scaled for when props start knocking into each other.
 constexpr float kDensity = 500.0f; // kg/m^3, a bit lighter than water.
+
+// The rigid-body solver. It runs on a fixed substep so the integration and the
+// contact impulses stay stable however long a rendered frame took.
+constexpr float kGravity = 20.0f;         // m/s^2 down. Punchier than 9.81, to
+                                          // match the camera's snappy fall.
+constexpr float kSubstep = 1.0f / 120.0f; // fixed physics tick.
+constexpr int kMaxSubsteps = 8;           // catch-up cap, so a stall never bursts.
+constexpr int kSolverIterations = 10;     // sequential-impulse passes per tick.
+
+constexpr float kRestitution = 0.30f;          // how bouncy a hard hit is.
+constexpr float kRestitutionThreshold = 0.6f;  // below this closing speed, no
+                                               // bounce -- keeps a settling box
+                                               // from buzzing on the surface.
+constexpr float kFriction = 0.55f;             // Coulomb coefficient at contacts.
+constexpr float kBaumgarte = 0.2f;             // fraction of penetration pushed
+                                               // out per tick, via a velocity bias.
+constexpr float kPenetrationSlop = 0.005f;     // overlap left uncorrected, so a
+                                               // resting box does not jitter.
+
+// A body slower than these for kSleepTime while touching something is parked, so
+// resting props cost nothing and never buzz.
+constexpr float kLinearSleep = 0.06f;   // m/s
+constexpr float kAngularSleep = 0.20f;  // rad/s
+constexpr float kSleepTime = 0.35f;     // seconds
+
+// The toss imparted when an object leaves the hand: forward along the gaze, a
+// touch down, and a little pitch so it turns over instead of sliding flat.
+constexpr float kThrowSpeed = 1.5f;  // m/s along the gaze.
+constexpr float kThrowDrop = 0.5f;   // m/s downward bias.
+constexpr float kThrowSpin = 2.5f;   // rad/s of forward tumble.
 
 // A carried object hangs by the right hand -- see the viewmodel's wrist, which
 // sits near (0.27, -0.35, 0.78) in this same eye space. Flat things are tipped
@@ -152,12 +176,237 @@ void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XM
 }
 
 void Props::Simulate(float dt, std::span<const Aabb> colliders) {
-    // Phase 1: every item spawns, and is dropped, asleep -- so the solver has
-    // nothing to advance yet. Phase 2 replaces this body with gravity,
-    // integration and contact resolution against `colliders`, waking an item when
-    // it is dropped.
-    (void)dt;
-    (void)colliders;
+    // Advance the simulation in fixed ticks, banking whatever real time is left
+    // over for next frame. A fixed step is what keeps the impulse solver stable.
+    physics_accumulator_ += dt;
+    int ticks = 0;
+    while (physics_accumulator_ >= kSubstep && ticks < kMaxSubsteps) {
+        for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+            Item& item = items_[i];
+            if (item.asleep || i == carried_) {
+                continue;
+            }
+            const int contacts = StepBody(item, kSubstep, colliders);
+
+            // Park a body that has been slow while resting on something. The
+            // contact test guards against sleeping at the top of an arc, where
+            // speed also passes through zero but nothing is supporting it.
+            const float linear = XMVectorGetX(XMVector3Length(XMLoadFloat3(&item.linear_velocity)));
+            const float angular =
+                XMVectorGetX(XMVector3Length(XMLoadFloat3(&item.angular_velocity)));
+            if (contacts > 0 && linear < kLinearSleep && angular < kAngularSleep) {
+                item.rest_timer += kSubstep;
+                if (item.rest_timer >= kSleepTime) {
+                    item.asleep = true;
+                    item.linear_velocity = {0.0f, 0.0f, 0.0f};
+                    item.angular_velocity = {0.0f, 0.0f, 0.0f};
+                }
+            } else {
+                item.rest_timer = 0.0f;
+            }
+        }
+        physics_accumulator_ -= kSubstep;
+        ++ticks;
+    }
+    // A long stall is spent, not hoarded: dropping the remainder keeps the
+    // simulation from sprinting to catch up after a hitch.
+    if (ticks == kMaxSubsteps) {
+        physics_accumulator_ = 0.0f;
+    }
+
+    // Rewrite the render transform of everything that is (or just was) moving.
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        if (i != carried_ && !items_[i].asleep) {
+            RebuildTransform(items_[i]);
+        }
+    }
+}
+
+int Props::StepBody(Item& item, float h, std::span<const Aabb> colliders) const {
+    // --- Integrate velocity and pose ---------------------------------------
+    XMVECTOR velocity = XMLoadFloat3(&item.linear_velocity);
+    XMVECTOR omega = XMLoadFloat3(&item.angular_velocity); // world space
+    XMVECTOR position = XMLoadFloat3(&item.position);
+    XMVECTOR orientation = XMLoadFloat4(&item.orientation);
+
+    velocity = XMVectorAdd(velocity, XMVectorSet(0.0f, -kGravity * h, 0.0f, 0.0f));
+    position = XMVectorAdd(position, XMVectorScale(velocity, h));
+
+    // Turn the world-space angular velocity into a small rotation and apply it
+    // after the current orientation (world-frame spin composes on the right in
+    // this row-vector convention).
+    const float spin = XMVectorGetX(XMVector3Length(omega));
+    if (spin > 1e-6f) {
+        const XMVECTOR axis = XMVectorScale(omega, 1.0f / spin);
+        const XMVECTOR delta = XMQuaternionRotationAxis(axis, spin * h);
+        orientation = XMQuaternionNormalize(XMQuaternionMultiply(orientation, delta));
+    }
+
+    const XMMATRIX rotation = XMMatrixRotationQuaternion(orientation);
+    const XMVECTOR inv_inertia = XMLoadFloat3(&item.inv_inertia);
+
+    // Maps a world-space vector through the body's inverse inertia tensor: rotate
+    // it into body axes, scale by the diagonal, rotate back.
+    const XMMATRIX rotation_t = XMMatrixTranspose(rotation);
+    auto apply_inv_inertia = [&](XMVECTOR world) {
+        XMVECTOR body = XMVector3TransformNormal(world, rotation_t);
+        body = XMVectorMultiply(body, inv_inertia);
+        return XMVector3TransformNormal(body, rotation);
+    };
+
+    // --- Gather contacts: each of the eight box corners against the world -----
+    struct Contact {
+        XMVECTOR normal; // unit, world; points out of the surface into the body.
+        XMVECTOR r;      // contact point minus centre of mass, world.
+        float depth;     // penetration, metres.
+    };
+    Contact contacts[64];
+    int contact_count = 0;
+
+    const XMFLOAT3 h_ext = item.half_extents;
+    for (int corner = 0; corner < 8 && contact_count < 64; ++corner) {
+        const XMVECTOR offset =
+            XMVectorSet((corner & 1) ? h_ext.x : -h_ext.x, (corner & 2) ? h_ext.y : -h_ext.y,
+                        (corner & 4) ? h_ext.z : -h_ext.z, 0.0f);
+        const XMVECTOR point = XMVectorAdd(position, XMVector3TransformNormal(offset, rotation));
+        XMFLOAT3 p;
+        XMStoreFloat3(&p, point);
+
+        for (const Aabb& box : colliders) {
+            // Only a corner strictly inside a solid box is penetrating it.
+            if (p.x <= box.min.x || p.x >= box.max.x || p.y <= box.min.y || p.y >= box.max.y ||
+                p.z <= box.min.z || p.z >= box.max.z) {
+                continue;
+            }
+            // Leave through the nearest face; that face's outward normal is the
+            // push direction and its distance is the penetration depth.
+            const float px = std::min(box.max.x - p.x, p.x - box.min.x);
+            const float py = std::min(box.max.y - p.y, p.y - box.min.y);
+            const float pz = std::min(box.max.z - p.z, p.z - box.min.z);
+
+            XMVECTOR normal;
+            float depth;
+            if (px <= py && px <= pz) {
+                depth = px;
+                normal = XMVectorSet((box.max.x - p.x) < (p.x - box.min.x) ? 1.0f : -1.0f, 0.0f,
+                                     0.0f, 0.0f);
+            } else if (py <= pz) {
+                depth = py;
+                normal = XMVectorSet(0.0f, (box.max.y - p.y) < (p.y - box.min.y) ? 1.0f : -1.0f,
+                                     0.0f, 0.0f);
+            } else {
+                depth = pz;
+                normal = XMVectorSet(0.0f, 0.0f,
+                                     (box.max.z - p.z) < (p.z - box.min.z) ? 1.0f : -1.0f, 0.0f);
+            }
+
+            if (contact_count < 64) {
+                contacts[contact_count++] = {normal, XMVectorSubtract(point, position), depth};
+            }
+        }
+    }
+
+    // --- Resolve contacts: sequential impulses with friction -----------------
+    for (int iteration = 0; iteration < kSolverIterations; ++iteration) {
+        for (int c = 0; c < contact_count; ++c) {
+            const XMVECTOR n = contacts[c].normal;
+            const XMVECTOR r = contacts[c].r;
+
+            // Velocity of the material point at the contact.
+            XMVECTOR point_velocity = XMVectorAdd(velocity, XMVector3Cross(omega, r));
+            const float vn = XMVectorGetX(XMVector3Dot(point_velocity, n));
+
+            // Effective mass along the normal.
+            const XMVECTOR rn = XMVector3Cross(r, n);
+            const XMVECTOR angular_n = XMVector3Cross(apply_inv_inertia(rn), r);
+            const float k = item.inv_mass + XMVectorGetX(XMVector3Dot(angular_n, n));
+            if (k <= 0.0f) {
+                continue;
+            }
+
+            // Restitution only for genuine impacts; a slow settle gets none.
+            // Penetration is NOT corrected here -- doing that as a velocity would
+            // pump energy into a settling box and tip it up onto an edge. It is
+            // worked off separately below, as a pseudo-velocity that never touches
+            // the real motion.
+            const float restitution = vn < -kRestitutionThreshold ? kRestitution : 0.0f;
+            float jn = (-(1.0f + restitution) * vn) / k;
+            jn = std::max(jn, 0.0f); // contacts push, never pull.
+
+            const XMVECTOR impulse = XMVectorScale(n, jn);
+            velocity = XMVectorAdd(velocity, XMVectorScale(impulse, item.inv_mass));
+            omega = XMVectorAdd(omega, apply_inv_inertia(XMVector3Cross(r, impulse)));
+
+            // Friction: oppose the tangential motion, clamped to the normal
+            // impulse by the Coulomb cone.
+            point_velocity = XMVectorAdd(velocity, XMVector3Cross(omega, r));
+            const XMVECTOR tangent_velocity = XMVectorSubtract(
+                point_velocity, XMVectorScale(n, XMVectorGetX(XMVector3Dot(point_velocity, n))));
+            const float tangent_speed = XMVectorGetX(XMVector3Length(tangent_velocity));
+            if (tangent_speed > 1e-5f) {
+                const XMVECTOR t = XMVectorScale(tangent_velocity, 1.0f / tangent_speed);
+                const XMVECTOR rt = XMVector3Cross(r, t);
+                const XMVECTOR angular_t = XMVector3Cross(apply_inv_inertia(rt), r);
+                const float kt = item.inv_mass + XMVectorGetX(XMVector3Dot(angular_t, t));
+                if (kt > 0.0f) {
+                    float jt = -tangent_speed / kt;
+                    jt = std::clamp(jt, -kFriction * jn, kFriction * jn);
+                    const XMVECTOR friction = XMVectorScale(t, jt);
+                    velocity = XMVectorAdd(velocity, XMVectorScale(friction, item.inv_mass));
+                    omega = XMVectorAdd(omega, apply_inv_inertia(XMVector3Cross(r, friction)));
+                }
+            }
+        }
+    }
+
+    // --- Work off penetration with a separate pseudo-velocity ----------------
+    // Split-impulse position correction: the same impulse maths, but accumulated
+    // into a pseudo motion that is applied to the pose and then thrown away, so it
+    // never becomes kinetic energy. This is what lets a box settle instead of
+    // bouncing itself onto a corner.
+    XMVECTOR pseudo_linear = XMVectorZero();
+    XMVECTOR pseudo_angular = XMVectorZero();
+    for (int iteration = 0; iteration < kSolverIterations; ++iteration) {
+        for (int c = 0; c < contact_count; ++c) {
+            const XMVECTOR n = contacts[c].normal;
+            const XMVECTOR r = contacts[c].r;
+
+            const XMVECTOR rn = XMVector3Cross(r, n);
+            const XMVECTOR angular_n = XMVector3Cross(apply_inv_inertia(rn), r);
+            const float k = item.inv_mass + XMVectorGetX(XMVector3Dot(angular_n, n));
+            if (k <= 0.0f) {
+                continue;
+            }
+
+            // Drive the overlap (beyond a small allowed slop) to close over this
+            // tick, and no faster.
+            const float target =
+                (kBaumgarte / h) * std::max(contacts[c].depth - kPenetrationSlop, 0.0f);
+            const XMVECTOR pseudo_point =
+                XMVectorAdd(pseudo_linear, XMVector3Cross(pseudo_angular, r));
+            const float current = XMVectorGetX(XMVector3Dot(pseudo_point, n));
+            const float jp = std::max((target - current) / k, 0.0f);
+
+            const XMVECTOR impulse = XMVectorScale(n, jp);
+            pseudo_linear = XMVectorAdd(pseudo_linear, XMVectorScale(impulse, item.inv_mass));
+            pseudo_angular =
+                XMVectorAdd(pseudo_angular, apply_inv_inertia(XMVector3Cross(r, impulse)));
+        }
+    }
+    // Apply the accumulated correction to the pose only.
+    position = XMVectorAdd(position, XMVectorScale(pseudo_linear, h));
+    const float pseudo_spin = XMVectorGetX(XMVector3Length(pseudo_angular));
+    if (pseudo_spin > 1e-6f) {
+        const XMVECTOR axis = XMVectorScale(pseudo_angular, 1.0f / pseudo_spin);
+        const XMVECTOR delta = XMQuaternionRotationAxis(axis, pseudo_spin * h);
+        orientation = XMQuaternionNormalize(XMQuaternionMultiply(orientation, delta));
+    }
+
+    XMStoreFloat3(&item.linear_velocity, velocity);
+    XMStoreFloat3(&item.angular_velocity, omega);
+    XMStoreFloat3(&item.position, position);
+    XMStoreFloat4(&item.orientation, orientation);
+    return contact_count;
 }
 
 void Props::Update(const XMMATRIX& camera_to_world, const Input& input,
@@ -172,7 +421,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Input& input,
     const bool down = input.IsKeyDown(kInteractKey);
     if (down && !interact_was_down_) {
         if (carried_ >= 0) {
-            Drop(eye, forward, colliders);
+            Drop(camera_to_world);
         } else {
             carried_ = PickTarget(eye, forward);
         }
@@ -247,45 +496,29 @@ int Props::PickTarget(FXMVECTOR eye, FXMVECTOR forward) const {
     return best;
 }
 
-void Props::Drop(FXMVECTOR eye, FXMVECTOR forward, std::span<const Aabb> colliders) {
-    // The drop spot follows the gaze flattened to the ground, so looking down
-    // sets the object at the player's feet rather than burying it underfoot, and
-    // looking up still lays it out in front.
-    XMVECTOR flat = XMVectorSetY(forward, 0.0f);
-    if (XMVectorGetX(XMVector3LengthSq(flat)) < 1e-6f) {
-        flat = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f); // Gaze was dead vertical.
-    }
-    flat = XMVector3Normalize(flat);
-
-    const XMVECTOR spot = XMVectorAdd(eye, XMVectorScale(flat, kDropDistance));
-    const float x = XMVectorGetX(spot);
-    const float z = XMVectorGetZ(spot);
-
-    // Rest on whatever is under the spot, ignoring anything above eye height, so
-    // a steak can be set on the table or the grill lid but not pushed through a
-    // fence. Nothing there means it goes to the ground.
-    float y = HighestSupportUnder(x, z, kDropRadius, XMVectorGetY(eye), colliders);
-    if (y == -FLT_MAX) {
-        y = 0.0f;
-    }
-
-    // Face the object along the gaze, upright, so it lands the way it was held.
-    const float yaw = std::atan2(XMVectorGetX(flat), XMVectorGetZ(flat));
-
-    // Seed the rigid state so the model origin lands at (x, y, z), matching the
-    // old snap exactly. Phase 1 leaves it asleep and motionless; Phase 2 will
-    // wake it here with a small toss so it can fall and tumble.
+void Props::Drop(FXMMATRIX camera_to_world) {
     Item& item = items_[carried_];
-    const XMVECTOR q = XMQuaternionRotationRollPitchYaw(0.0f, yaw, 0.0f);
-    const XMVECTOR com = XMLoadFloat3(&item.com_offset);
-    const XMVECTOR origin = XMVectorSet(x, y, z, 0.0f);
-    const XMVECTOR com_world =
-        XMVectorAdd(XMVector3TransformNormal(com, XMMatrixRotationQuaternion(q)), origin);
-    XMStoreFloat4(&item.orientation, q);
+
+    // Let go at the exact pose the object was carried, so it falls out of the
+    // hand rather than teleporting to a tidy spot. The held instance is drawn
+    // under held_local * camera_to_world, so that same matrix places the body.
+    const XMMATRIX held_world = XMLoadFloat4x4(&item.held_local) * camera_to_world;
+    const XMVECTOR com_world = XMVector3TransformCoord(XMLoadFloat3(&item.com_offset), held_world);
+    const XMVECTOR orientation = XMQuaternionNormalize(XMQuaternionRotationMatrix(held_world));
+
+    const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
+    const XMVECTOR right = XMVector3Normalize(camera_to_world.r[0]);
+
     XMStoreFloat3(&item.position, com_world);
-    item.linear_velocity = {0.0f, 0.0f, 0.0f};
-    item.angular_velocity = {0.0f, 0.0f, 0.0f};
-    item.asleep = true;
+    XMStoreFloat4(&item.orientation, orientation);
+    // A gentle underarm toss down the gaze, plus a forward pitch about the
+    // player's right so it tumbles over instead of gliding down flat.
+    const XMVECTOR toss =
+        XMVectorAdd(XMVectorScale(forward, kThrowSpeed), XMVectorSet(0.0f, -kThrowDrop, 0.0f, 0.0f));
+    XMStoreFloat3(&item.linear_velocity, toss);
+    XMStoreFloat3(&item.angular_velocity, XMVectorScale(right, kThrowSpin));
+    item.rest_timer = 0.0f;
+    item.asleep = false;
     RebuildTransform(item);
 
     carried_ = -1;
