@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dx_common.hpp"
+#include "font.hpp"
 #include "scene.hpp"
 #include "viewmodel.hpp"
 
@@ -10,6 +11,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string_view>
 #include <vector>
 
 // Raw Direct3D 12. No abstraction layer, no engine: the swapchain, the command
@@ -23,10 +25,11 @@ public:
     // `props` are the loose objects resting in the yard, drawn with the scene.
     // `viewmodel` and `held_props` are drawn last, over a cleared depth buffer,
     // so the player's arms and whatever they carry are never sliced open by the
-    // wall they are standing against.
+    // wall they are standing against. `hud_prompt` is the one line of HUD text
+    // laid over the finished frame; empty draws nothing.
     void Render(const Scene& scene, std::span<const MeshInstance> props,
                 const ViewmodelPose& viewmodel, std::span<const MeshInstance> held_props,
-                const DirectX::XMMATRIX& view_projection);
+                const DirectX::XMMATRIX& view_projection, std::string_view hud_prompt);
     void Shutdown();
 
     float AspectRatio() const;
@@ -60,6 +63,18 @@ private:
     // Uploads every model the scene holds, plus the 1x1 white texture that
     // stands in for a material with no texture of its own.
     void CreateSceneGeometry(const Scene& scene);
+
+    // The second, tiny pipeline: the alpha-blended, depth-free pass that draws
+    // HUD text from the MSDF atlas. Builds its root signature, PSO and the
+    // per-frame dynamic vertex buffer the glyph quads are written into.
+    void CreateTextPipeline();
+    // Loads the font's glyph metrics and uploads its atlas into the shared
+    // texture heap. Shares the scene upload's open command list and staging list.
+    void LoadFontAtlas(std::vector<ComPtr<ID3D12Resource>>& staging);
+    // Lays `text` out into a centred line near the bottom of the screen and draws
+    // it -- a dark shadow pass, then the text -- into the current frame. A no-op
+    // for empty text. Assumes the render target is already bound.
+    void DrawText(std::string_view text);
 
     // Fills a default-heap buffer through a staging copy. The staging resource is
     // appended to `staging`, which the caller must keep alive until the GPU has
@@ -102,6 +117,19 @@ private:
 
     ComPtr<ID3D12RootSignature> root_signature_;
     ComPtr<ID3D12PipelineState> pipeline_state_;
+
+    // The HUD text pass. The atlas SRV lives in the shared texture_heap_ at
+    // atlas_descriptor_; the vertex buffer is one upload-heap region per frame in
+    // flight, kept mapped, rewritten with the frame's glyph quads.
+    ComPtr<ID3D12RootSignature> text_root_signature_;
+    ComPtr<ID3D12PipelineState> text_pipeline_state_;
+    ComPtr<ID3D12Resource> atlas_texture_;
+    UINT atlas_descriptor_ = 0;
+    UINT atlas_width_ = 0;
+    UINT atlas_height_ = 0;
+    Font font_;
+    ComPtr<ID3D12Resource> text_vertex_buffer_;
+    std::byte* text_vertex_mapped_ = nullptr;
 
     // Shader-visible, and the only descriptor heap the game binds. Slot 0 is the
     // white texture; every glTF image follows it.
