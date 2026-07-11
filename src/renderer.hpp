@@ -80,6 +80,11 @@ private:
     // that hands that matrix to the scene pass.
     void CreateShadowPipeline();
     void CreatePipeline();
+    // The gradient-sky background: a fullscreen pass whose pixel shader turns each
+    // pixel into a world-space view ray and samples the same analytic sky the
+    // scene reflects. Its own tiny root signature (just the inverse view-projection
+    // and the eye) and PSO with depth off.
+    void CreateSkyPipeline();
     // The inverted-hull outline pass: its own root signature and PSO that grow a
     // mesh along its normals, cull the near faces and paint the far shell a flat
     // glowing colour. Depth-tests against the world but writes no depth.
@@ -87,6 +92,13 @@ private:
     // Uploads every model the scene holds, plus the 1x1 white texture that
     // stands in for a material with no texture of its own.
     void CreateSceneGeometry(const Scene& scene);
+
+    // Renders the static yard into a cubemap once, from a fixed point at its
+    // centre, so the scene pass can reflect the real fence and trees off a metal
+    // rather than only the analytic sky. Six faces, each the scene lit by the
+    // analytic sky (the capture pixel shader), with the gradient sky behind. Runs
+    // after CreateSceneGeometry, on the same one-shot command list.
+    void CaptureReflectionProbe(const Scene& scene);
 
     // The second, tiny pipeline: the alpha-blended, depth-free pass that draws
     // HUD text from the MSDF atlas. Builds its root signature, PSO and the
@@ -116,9 +128,18 @@ private:
     // One draw per primitive of each instance's model, each under its own root
     // constants. `shadow_receive` is 1 for the world, which is shadowed by the
     // sun, and 0 for the viewmodel, which is not.
+    // `bind_probe` binds the reflection cubemap for the pass to sample. The
+    // on-screen pass wants it; the probe-capture pass must not (it is filling that
+    // cube and its pixel shader never reads it), so it passes false.
     void DrawInstances(std::span<const MeshInstance> instances,
                        const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction,
-                       float shadow_receive);
+                       float shadow_receive, bool bind_probe);
+
+    // Fills the currently bound render target with the gradient sky, seen from
+    // `camera_position` through `view_projection`. Draws no depth, so geometry
+    // rendered afterward paints over it. Switches to the sky pipeline and root
+    // signature; the caller restores whatever it needs next.
+    void DrawSky(const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position);
 
     // The shadow pass: draws every caster depth-only into the shadow map from the
     // sun's point of view, wrapped in the barriers that flip the map between
@@ -160,6 +181,23 @@ private:
 
     ComPtr<ID3D12RootSignature> root_signature_;
     ComPtr<ID3D12PipelineState> pipeline_state_;
+
+    // The gradient-sky background pass. No vertex buffer, no textures: the pixel
+    // shader reconstructs the view ray from the inverse view-projection handed in
+    // as root constants.
+    ComPtr<ID3D12RootSignature> sky_root_signature_;
+    ComPtr<ID3D12PipelineState> sky_pipeline_state_;
+
+    // The reflection probe. `scene_capture_pipeline_state_` is the scene PSO with
+    // the capture pixel shader (analytic sky, no cube read); it fills probe_cube_
+    // through the six face RTVs in probe_rtv_heap_, depth-tested against
+    // probe_depth_. The finished cube's SRV lives in texture_heap_ at
+    // probe_descriptor_. All built once, at startup.
+    ComPtr<ID3D12PipelineState> scene_capture_pipeline_state_;
+    ComPtr<ID3D12Resource> probe_cube_;
+    ComPtr<ID3D12DescriptorHeap> probe_rtv_heap_;
+    ComPtr<ID3D12Resource> probe_depth_;
+    UINT probe_descriptor_ = 0;
 
     // The pick-up outline pass. Shares the scene's vertex buffers and input
     // layout; only the root signature and PSO differ.

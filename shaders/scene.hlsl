@@ -4,6 +4,8 @@
 // DirectXMath is row-major and treats vectors as rows, so the matrices are
 // declared row_major and multiplied as `v * M`. That saves a transpose on the
 // CPU and keeps the two sides reading the same way.
+#include "common.hlsli"
+
 cbuffer Constants : register(b0) {
     row_major float4x4 g_mvp;
     row_major float4x4 g_model;
@@ -58,6 +60,11 @@ Texture2D<float4> g_normal_map : register(t2);
 // The metallic-roughness map: glTF packs roughness in G and metallic in B. A
 // material with none samples a 1x1 white, so the factors above stand alone.
 Texture2D<float4> g_metallic_roughness : register(t3);
+// The reflection probe: the yard captured into a cubemap once at startup, so a
+// metal reflects the fence and the trees, not just the analytic sky. Sampled by
+// PSMain; PSMainCapture, which fills this very cube, must not read it, so the
+// sample is behind a compile-time flag that folds away for the capture variant.
+TextureCube<float4> g_reflection_probe : register(t4);
 SamplerState g_sampler : register(s0);
 // Hardware PCF. SampleCmp compares the receiver's depth against the stored one
 // and bilinearly filters the 0/1 results, so a single tap already softens across
@@ -65,16 +72,10 @@ SamplerState g_sampler : register(s0);
 SamplerComparisonState g_shadow_sampler : register(s1);
 
 static const float3 kSunColor = float3(1.0f, 0.96f, 0.88f);
+// The sky tone the diffuse ambient uses. The specular reflection and the
+// background use the zenith/horizon gradient in common.hlsli; this one flat value
+// stands in for the sky's cosine-convolved irradiance.
 static const float3 kSkyColor = float3(0.52f, 0.62f, 0.76f);
-static const float3 kGroundBounce = float3(0.20f, 0.18f, 0.16f);
-
-// The analytic sky the specular IBL reflects: a deeper blue overhead fading to a
-// pale band at the horizon, over the same dull bounce below. The two sky tones
-// straddle kSkyColor so the reflection stays of a piece with the flat sky the
-// frame is cleared to and the fog fades into. All display-space, linearised where
-// they are used.
-static const float3 kSkyZenith = float3(0.40f, 0.54f, 0.76f);
-static const float3 kSkyHorizon = float3(0.70f, 0.76f, 0.82f);
 // Without a shadow term the only thing keeping unlit faces off pure black is
 // the ambient, so it carries more weight here than it would with real bounce.
 static const float kAmbientStrength = 0.65f;
@@ -178,18 +179,6 @@ static const float3 kDielectricF0 = float3(0.04f, 0.04f, 0.04f);
 // to punch above it.
 static const float kSunIntensity = kPi;
 
-// The colour constants above are written the way they should look on screen, i.e.
-// in sRGB. Lighting has to happen in linear light, so they are decoded on the way
-// in and the whole frame is encoded again on the way out. Base-colour textures
-// are decoded in hardware by their sRGB view; these do it by hand.
-float3 SrgbToLinear(float3 c) {
-    return select(c <= 0.04045f, c / 12.92f, pow((c + 0.055f) / 1.055f, 2.4f));
-}
-
-float3 LinearToSrgb(float3 c) {
-    return select(c <= 0.0031308f, c * 12.92f, 1.055f * pow(c, 1.0f / 2.4f) - 0.055f);
-}
-
 // The GGX/Trowbridge-Reitz normal distribution: how much of the surface's
 // microfacets face exactly the half vector. `a` is the roughness squared.
 float DistributionGGX(float n_dot_h, float a) {
@@ -214,29 +203,31 @@ float3 FresnelSchlick(float v_dot_h, float3 f0) {
     return f0 + (1.0f - f0) * pow(saturate(1.0f - v_dot_h), 5.0f);
 }
 
-// The radiance of the analytic sky along a world-space direction, in linear light.
-// A horizon band brightens toward it and darkens into the ground below. This is
-// the sky only -- the sun is left out, because the direct term already accounts
-// for it and its GGX lobe already broadens with roughness, so adding a sun disc
-// here would count it twice.
-float3 SampleSky(float3 dir) {
-    const float3 zenith = SrgbToLinear(kSkyZenith);
-    const float3 horizon = SrgbToLinear(kSkyHorizon);
-    const float3 ground = SrgbToLinear(kGroundBounce);
-    // Above the horizon fade horizon->zenith; below, fall off to the ground colour
-    // over a short span so the reflection has a floor rather than a hard seam.
-    const float3 sky = lerp(horizon, zenith, saturate(dir.y));
-    return lerp(sky, ground, saturate(-dir.y * 4.0f));
+// The sky's rough average -- what a fully blurred reflection tends toward, and the
+// floor the probe reflection fades into as roughness climbs.
+float3 SkyAverage() {
+    return lerp(SrgbToLinear(kSkyHorizon), SrgbToLinear(kSkyZenith), 0.5f);
 }
 
-// The prefiltered environment: a rough surface reflects a blurred sky, which the
-// real split-sum approximation bakes into mip levels of a cubemap. With an
-// analytic sky there is nothing to prebake, so the blur is faked by fading the
-// sharp reflection toward the sky's rough average as roughness climbs -- cheap,
-// and on a smooth gradient close to what a convolution would give.
+// The prefiltered analytic environment: a rough surface reflects a blurred sky,
+// which the real split-sum approximation bakes into mip levels of a cubemap. With
+// an analytic sky there is nothing to prebake, so the blur is faked by fading the
+// sharp reflection toward the sky's rough average as roughness climbs.
 float3 PrefilteredSky(float3 r, float roughness) {
-    const float3 average = lerp(SrgbToLinear(kSkyHorizon), SrgbToLinear(kSkyZenith), 0.5f);
-    return lerp(SampleSky(r), average, roughness);
+    return lerp(SampleSky(r), SkyAverage(), roughness);
+}
+
+// The prefiltered *environment* along a reflection vector: the captured cubemap
+// when `use_probe`, so a metal reflects the real yard, and the analytic sky
+// otherwise -- the path the capture pass itself takes, which is why it must not
+// read the cube it is filling. The single-mip cube cannot blur, so roughness fades
+// its reflection toward the sky average, the same floor PrefilteredSky uses.
+float3 SpecularEnvironment(float3 r, float roughness, bool use_probe) {
+    if (use_probe) {
+        const float3 sharp = g_reflection_probe.SampleLevel(g_sampler, r, 0.0f).rgb;
+        return lerp(sharp, SkyAverage(), roughness);
+    }
+    return PrefilteredSky(r, roughness);
 }
 
 // The environment half of the split-sum: the integral of the specular BRDF over
@@ -250,7 +241,12 @@ float2 EnvBRDFApprox(float roughness, float n_dot_v) {
     return float2(-1.04f, 1.04f) * a004 + r.zw;
 }
 
-float4 PSMain(PSInput input) : SV_TARGET {
+// The whole surface shade, in linear light. `use_probe` picks the specular
+// environment: the captured cubemap for the on-screen pass, the analytic sky for
+// the capture pass that fills that cube. It is a compile-time literal at each
+// entry point below, so the cube sample folds away entirely for the capture
+// variant and no feedback is possible.
+float4 ShadeScene(PSInput input, bool use_probe) {
     // Rebuild the tangent frame and perturb the geometric normal by the map. The
     // tangent is re-orthogonalized against the interpolated normal (Gram-Schmidt),
     // which absorbs the small drift interpolation leaves between them; the
@@ -326,7 +322,7 @@ float4 PSMain(PSInput input) : SV_TARGET {
     const float3 reflection = reflect(-view, normal);
     const float2 env_brdf = EnvBRDFApprox(roughness, n_dot_v);
     const float3 ambient_specular =
-        PrefilteredSky(reflection, roughness) * (f0 * env_brdf.x + env_brdf.y);
+        SpecularEnvironment(reflection, roughness, use_probe) * (f0 * env_brdf.x + env_brdf.y);
 
     const float3 ambient = ambient_diffuse + ambient_specular;
 
@@ -337,9 +333,24 @@ float4 PSMain(PSInput input) : SV_TARGET {
 
     const float3 lit = ambient + sun + fill;
 
+    // Fade into the very sky drawn behind this pixel, sampled along the view ray,
+    // so distant geometry dissolves into the gradient rather than into a flat tone
+    // that would seam against it at the horizon.
+    const float3 view_ray = normalize(input.world - g_camera_position);
     const float fog = saturate((input.view_depth - kFogStart) / (kFogEnd - kFogStart));
-    const float3 color = lerp(lit, SrgbToLinear(kSkyColor), fog * 0.9f);
+    const float3 color = lerp(lit, SampleSky(view_ray), fog * 0.9f);
     // Back to sRGB for the plain _UNORM back buffer the outline and text passes
     // also write to in display space.
     return float4(LinearToSrgb(color), 1.0f);
+}
+
+// The on-screen pass: reflect the captured probe.
+float4 PSMain(PSInput input) : SV_TARGET {
+    return ShadeScene(input, true);
+}
+
+// The capture pass that fills the probe: reflect the analytic sky instead, so it
+// never reads the cube it is writing.
+float4 PSMainCapture(PSInput input) : SV_TARGET {
+    return ShadeScene(input, false);
 }

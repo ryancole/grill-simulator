@@ -58,8 +58,9 @@ static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
 // Beyond the root constants the scene signature holds the base-colour table (1),
 // the frame constant buffer (2), the shadow-map table (1), the normal-map table
-// (1) and the metallic-roughness table (1) -- six DWORDs.
-static_assert(kConstantDwords + 6 <= 64, "A root signature holds at most 64 DWORDs in total");
+// (1), the metallic-roughness table (1) and the reflection-probe table (1) --
+// seven DWORDs.
+static_assert(kConstantDwords + 7 <= 64, "A root signature holds at most 64 DWORDs in total");
 
 // The shadow map is square and this many texels on a side. Matches kShadowMapSize
 // in scene.hlsl, which sizes one texel for the PCF taps. 2048 gives the fenced
@@ -79,6 +80,17 @@ struct ShadowConstants {
 };
 
 constexpr UINT kShadowConstantDwords = sizeof(ShadowConstants) / sizeof(UINT);
+
+// Mirrors the SkyConstants cbuffer in shaders/sky.hlsl: clip space back to world,
+// and the eye the view rays start from.
+struct SkyConstants {
+    XMFLOAT4X4 inv_view_projection;
+    XMFLOAT3 camera_position;
+    float pad0;
+};
+
+static_assert(sizeof(SkyConstants) % sizeof(UINT) == 0);
+constexpr UINT kSkyConstantDwords = sizeof(SkyConstants) / sizeof(UINT);
 
 // Mirrors the FrameConstants cbuffer in shaders/scene.hlsl: state shared by every
 // scene draw in a frame. The sun's view-projection never changes; the camera
@@ -144,6 +156,19 @@ constexpr DXGI_FORMAT kTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 // _UNORM: the encode is done in the shader, which keeps the outline and text
 // passes, which still write display-space colour, untouched.
 constexpr DXGI_FORMAT kSrgbTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+
+// The reflection probe cubemap: this many texels on a side, per face, captured
+// once from the yard's centre at eye height. Typeless so the same memory renders
+// as _UNORM (the capture writes display-space colour, as the scene pass does to
+// the back buffer) and samples as _UNORM_SRGB (decoded to linear light, like a
+// base-colour texture). The scene's own depth buffer cannot be reused -- it is the
+// window's size -- so the capture has a square depth of its own in DSV slot 2.
+constexpr UINT kProbeSize = 256;
+constexpr XMFLOAT3 kProbePosition{0.0f, 1.5f, 0.0f};
+constexpr DXGI_FORMAT kProbeResourceFormat = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+constexpr DXGI_FORMAT kProbeRtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+constexpr DXGI_FORMAT kProbeSrvFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+constexpr UINT kProbeDsvIndex = 2;
 
 // Slot 0 of the texture heap. A material with no base colour texture points
 // here, which spares the shader a branch and the pipeline a second variant.
@@ -226,9 +251,11 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene
     CreateDepthBuffer();
     CreateShadowMap();
     CreatePipeline();
+    CreateSkyPipeline();
     CreateOutlinePipeline();
     CreateShadowPipeline();
     CreateSceneGeometry(scene);
+    CaptureReflectionProbe(scene);
     CreateTextPipeline();
 
     initialized_ = true;
@@ -335,9 +362,10 @@ void Renderer::CreateSwapChain(HWND hwnd, UINT width, UINT height) {
                   "CreateDescriptorHeap(RTV)");
     rtv_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
-    // Two: the scene's depth buffer, then the sun's shadow map.
+    // Three: the scene's depth buffer, the sun's shadow map, then the reflection
+    // probe's square capture depth.
     D3D12_DESCRIPTOR_HEAP_DESC dsv_desc{};
-    dsv_desc.NumDescriptors = 2;
+    dsv_desc.NumDescriptors = 3;
     dsv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
     ThrowIfFailed(device_->CreateDescriptorHeap(&dsv_desc, IID_PPV_ARGS(&dsv_heap_)),
                   "CreateDescriptorHeap(DSV)");
@@ -432,8 +460,11 @@ void Renderer::CreatePipeline() {
     // in the heap.
     const CD3DX12_DESCRIPTOR_RANGE normal_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
     const CD3DX12_DESCRIPTOR_RANGE mr_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3);
+    // t4: the reflection probe cubemap, bound once per pass rather than per draw --
+    // one probe serves the whole yard.
+    const CD3DX12_DESCRIPTOR_RANGE probe_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);
 
-    CD3DX12_ROOT_PARAMETER parameters[6];
+    CD3DX12_ROOT_PARAMETER parameters[7];
     parameters[0].InitAsConstants(kConstantDwords, 0);
     parameters[1].InitAsDescriptorTable(1, &base_color_range, D3D12_SHADER_VISIBILITY_PIXEL);
     // b1: the frame constant buffer holding the sun's view-projection and the eye.
@@ -441,6 +472,7 @@ void Renderer::CreatePipeline() {
     parameters[3].InitAsDescriptorTable(1, &shadow_range, D3D12_SHADER_VISIBILITY_PIXEL);
     parameters[4].InitAsDescriptorTable(1, &normal_range, D3D12_SHADER_VISIBILITY_PIXEL);
     parameters[5].InitAsDescriptorTable(1, &mr_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[6].InitAsDescriptorTable(1, &probe_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     // s0: anisotropic because the ground and the patio are seen almost edge on,
@@ -521,6 +553,91 @@ void Renderer::CreatePipeline() {
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pipeline_state_)),
                   "CreateGraphicsPipelineState");
+
+    // The probe-capture variant: the same pipeline, same root signature and vertex
+    // shader, with the capture pixel shader (analytic sky, no cube read) and the
+    // probe's render-target format. It renders the yard into the cubemap faces.
+    const std::vector<std::byte> capture_ps =
+        ReadBinaryFile(shader_dir / "scene_capture.ps.cso");
+    pso.PS = {capture_ps.data(), capture_ps.size()};
+    pso.RTVFormats[0] = kProbeRtvFormat;
+    ThrowIfFailed(
+        device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&scene_capture_pipeline_state_)),
+        "CreateGraphicsPipelineState(capture)");
+}
+
+void Renderer::CreateSkyPipeline() {
+    // One root parameter: the inverse view-projection and the eye, as root
+    // constants. No input layout (the vertices come from SV_VertexID), no
+    // textures, no sampler.
+    CD3DX12_ROOT_PARAMETER parameters[1];
+    parameters[0].InitAsConstants(kSkyConstantDwords, 0);
+
+    CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    root_desc.Init(_countof(parameters), parameters, 0, nullptr,
+                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr =
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr)) {
+        std::string message = error
+                                  ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                                error->GetBufferSize())
+                                  : "unknown error";
+        throw std::runtime_error("D3D12SerializeRootSignature(sky) failed: " + message);
+    }
+    ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                               signature->GetBufferSize(),
+                                               IID_PPV_ARGS(&sky_root_signature_)),
+                  "CreateRootSignature(sky)");
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "sky.vs.cso");
+    const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "sky.ps.cso");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.InputLayout = {nullptr, 0};
+    pso.pRootSignature = sky_root_signature_.Get();
+    pso.VS = {vs.data(), vs.size()};
+    pso.PS = {ps.data(), ps.size()};
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    // The fullscreen triangle's winding is unimportant, so do not risk culling it.
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    // No depth at all: the sky is written flat behind the frame, and the geometry
+    // that follows paints over it wherever the yard stands.
+    pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = kBackBufferFormat;
+    pso.SampleDesc.Count = 1;
+
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sky_pipeline_state_)),
+                  "CreateGraphicsPipelineState(sky)");
+}
+
+void Renderer::DrawSky(const XMMATRIX& view_projection, XMFLOAT3 camera_position) {
+    command_list_->SetPipelineState(sky_pipeline_state_.Get());
+    command_list_->SetGraphicsRootSignature(sky_root_signature_.Get());
+    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    command_list_->IASetVertexBuffers(0, 0, nullptr);
+
+    SkyConstants constants{};
+    XMStoreFloat4x4(&constants.inv_view_projection, XMMatrixInverse(nullptr, view_projection));
+    constants.camera_position = camera_position;
+    command_list_->SetGraphicsRoot32BitConstants(0, kSkyConstantDwords, &constants, 0);
+
+    // Three vertices, no buffer: the vertex shader builds the triangle from the id.
+    command_list_->DrawInstanced(3, 1, 0, 0);
 }
 
 void Renderer::CreateOutlinePipeline() {
@@ -847,8 +964,8 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
 
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
     // The white texture and the flat normal, then every model image, then the HUD
-    // font atlas, then the sun's shadow map last.
-    heap_desc.NumDescriptors = 2 + image_count + 1 + 1;
+    // font atlas, the sun's shadow map, and the reflection probe cubemap last.
+    heap_desc.NumDescriptors = 2 + image_count + 1 + 1 + 1;
     heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(device_->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&texture_heap_)),
@@ -985,12 +1102,165 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
         static_cast<INT>(shadow_descriptor_), texture_size_);
     device_->CreateShaderResourceView(shadow_map_.Get(), &shadow_srv, shadow_handle);
 
+    // The reflection probe's cube SRV takes the descriptor after the shadow map.
+    // The cube itself is created and filled in CaptureReflectionProbe; only the
+    // slot is reserved here so the scene root signature can point at it.
+    probe_descriptor_ = shadow_descriptor_ + 1;
+
     ThrowIfFailed(command_list_->Close(), "CommandList::Close");
     ID3D12CommandList* lists[] = {command_list_.Get()};
     queue_->ExecuteCommandLists(_countof(lists), lists);
 
     // The staging buffers are released when this function returns, so the copies
     // have to have landed before it does.
+    FlushGpu();
+}
+
+void Renderer::CaptureReflectionProbe(const Scene& scene) {
+    // The cube: six square faces, one mip, typeless so it renders as _UNORM (the
+    // capture writes display-space colour, as the scene pass does to the back
+    // buffer) and samples as sRGB (decoded to linear light). A render-target
+    // resource must declare its clear value up front.
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = kProbeRtvFormat;
+    clear.Color[0] = kSkyColor[0];
+    clear.Color[1] = kSkyColor[1];
+    clear.Color[2] = kSkyColor[2];
+    clear.Color[3] = 1.0f;
+
+    const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+    const CD3DX12_RESOURCE_DESC cube_desc =
+        CD3DX12_RESOURCE_DESC::Tex2D(kProbeResourceFormat, kProbeSize, kProbeSize, 6, 1, 1, 0,
+                                     D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &cube_desc,
+                                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear,
+                                                   IID_PPV_ARGS(&probe_cube_)),
+                  "CreateCommittedResource(probe cube)");
+
+    // One render-target view per face.
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc{};
+    rtv_heap_desc.NumDescriptors = 6;
+    rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    ThrowIfFailed(device_->CreateDescriptorHeap(&rtv_heap_desc, IID_PPV_ARGS(&probe_rtv_heap_)),
+                  "CreateDescriptorHeap(probe RTV)");
+    for (UINT face = 0; face < 6; ++face) {
+        D3D12_RENDER_TARGET_VIEW_DESC rtv{};
+        rtv.Format = kProbeRtvFormat;
+        rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+        rtv.Texture2DArray.FirstArraySlice = face;
+        rtv.Texture2DArray.ArraySize = 1;
+        rtv.Texture2DArray.MipSlice = 0;
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(
+            probe_rtv_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(face),
+            rtv_size_);
+        device_->CreateRenderTargetView(probe_cube_.Get(), &rtv, handle);
+    }
+
+    // The square depth buffer the capture tests against, in DSV slot 2.
+    D3D12_CLEAR_VALUE depth_clear{};
+    depth_clear.Format = kDepthFormat;
+    depth_clear.DepthStencil.Depth = 1.0f;
+    const CD3DX12_RESOURCE_DESC depth_desc = CD3DX12_RESOURCE_DESC::Tex2D(
+        kDepthFormat, kProbeSize, kProbeSize, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &depth_desc,
+                                                   D3D12_RESOURCE_STATE_DEPTH_WRITE, &depth_clear,
+                                                   IID_PPV_ARGS(&probe_depth_)),
+                  "CreateCommittedResource(probe depth)");
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
+    dsv.Format = kDepthFormat;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE probe_dsv(dsv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                  static_cast<INT>(kProbeDsvIndex), dsv_size_);
+    device_->CreateDepthStencilView(probe_depth_.Get(), &dsv, probe_dsv);
+
+    // The cube's SRV, in the slot CreateSceneGeometry reserved for it.
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = kProbeSrvFormat;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.TextureCube.MipLevels = 1;
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE srv_handle(texture_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                   static_cast<INT>(probe_descriptor_), texture_size_);
+    device_->CreateShaderResourceView(probe_cube_.Get(), &srv, srv_handle);
+
+    // The capture is lit from the eye at the probe centre; write that into frame
+    // constants region 0 and aim the scene pass's CBV at it. Nothing is in flight
+    // yet, so region 0 is free to borrow.
+    FrameConstants frame{};
+    frame.light_view_projection = light_view_projection_;
+    frame.camera_position = kProbePosition;
+    std::memcpy(frame_constants_mapped_, &frame, sizeof(frame));
+    frame_constants_address_ = frame_constants_->GetGPUVirtualAddress();
+
+    // The six face cameras: the standard cube directions and ups, a 90-degree
+    // frustum. Each is just another left-handed camera, so the same back-face cull
+    // the main view uses renders each face correctly.
+    struct Face {
+        XMVECTOR dir;
+        XMVECTOR up;
+    };
+    const Face faces[6] = {
+        {XMVectorSet(1, 0, 0, 0), XMVectorSet(0, 1, 0, 0)},   // +X
+        {XMVectorSet(-1, 0, 0, 0), XMVectorSet(0, 1, 0, 0)},  // -X
+        {XMVectorSet(0, 1, 0, 0), XMVectorSet(0, 0, -1, 0)},  // +Y
+        {XMVectorSet(0, -1, 0, 0), XMVectorSet(0, 0, 1, 0)},  // -Y
+        {XMVectorSet(0, 0, 1, 0), XMVectorSet(0, 1, 0, 0)},   // +Z
+        {XMVectorSet(0, 0, -1, 0), XMVectorSet(0, 1, 0, 0)},  // -Z
+    };
+    const XMVECTOR eye = XMLoadFloat3(&kProbePosition);
+    const XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV2, 1.0f, 0.05f, 100.0f);
+
+    XMFLOAT3 sun{};
+    XMStoreFloat3(&sun, XMVector3Normalize(XMLoadFloat3(&kSunDirection)));
+
+    // Record the capture on the one-shot command list CreateSceneGeometry left
+    // closed.
+    ThrowIfFailed(allocators_[frame_index_]->Reset(), "CommandAllocator::Reset");
+    ThrowIfFailed(command_list_->Reset(allocators_[frame_index_].Get(), nullptr),
+                  "CommandList::Reset");
+
+    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
+
+    const CD3DX12_VIEWPORT viewport(0.0f, 0.0f, static_cast<float>(kProbeSize),
+                                    static_cast<float>(kProbeSize));
+    const CD3DX12_RECT scissor(0, 0, static_cast<LONG>(kProbeSize), static_cast<LONG>(kProbeSize));
+    command_list_->RSSetViewports(1, &viewport);
+    command_list_->RSSetScissorRects(1, &scissor);
+
+    // Every face from its resting shader-resource state to a render target.
+    const CD3DX12_RESOURCE_BARRIER to_rt = CD3DX12_RESOURCE_BARRIER::Transition(
+        probe_cube_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    command_list_->ResourceBarrier(1, &to_rt);
+
+    for (UINT face = 0; face < 6; ++face) {
+        const XMMATRIX view_projection = XMMatrixLookToLH(eye, faces[face].dir, faces[face].up) * proj;
+
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(
+            probe_rtv_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(face),
+            rtv_size_);
+        command_list_->OMSetRenderTargets(1, &rtv, FALSE, &probe_dsv);
+        command_list_->ClearRenderTargetView(rtv, kSkyColor, 0, nullptr);
+        command_list_->ClearDepthStencilView(probe_dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+        // The gradient sky behind, then the static yard lit by the analytic sky.
+        DrawSky(view_projection, kProbePosition);
+        command_list_->SetGraphicsRootSignature(root_signature_.Get());
+        command_list_->SetPipelineState(scene_capture_pipeline_state_.Get());
+        command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        DrawInstances(scene.Instances(), view_projection, sun, 0.0f, false);
+    }
+
+    // And back to a shader resource for the scene pass to reflect off of.
+    const CD3DX12_RESOURCE_BARRIER to_srv = CD3DX12_RESOURCE_BARRIER::Transition(
+        probe_cube_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    command_list_->ResourceBarrier(1, &to_srv);
+
+    ThrowIfFailed(command_list_->Close(), "CommandList::Close");
+    ID3D12CommandList* lists[] = {command_list_.Get()};
+    queue_->ExecuteCommandLists(_countof(lists), lists);
     FlushGpu();
 }
 
@@ -1216,13 +1486,18 @@ void Renderer::DrawText(std::string_view text) {
 
 void Renderer::DrawInstances(std::span<const MeshInstance> instances,
                              const XMMATRIX& view_projection, XMFLOAT3 sun_direction,
-                             float shadow_receive) {
-    // The two per-frame bindings the scene signature adds for shadows: the sun's
-    // view-projection and the shadow map itself. Bound here, at the top of every
-    // batch, so they survive the root-signature switch the outline pass makes --
-    // setting a root signature clears every argument bound under the old one.
+                             float shadow_receive, bool bind_probe) {
+    // The per-pass bindings the scene signature adds beyond the per-draw tables:
+    // the frame constants (sun matrix + eye), the shadow map, and the reflection
+    // probe. Bound here, at the top of every batch, so they survive the
+    // root-signature switch the outline pass makes -- setting a root signature
+    // clears every argument bound under the old one. The probe is skipped for the
+    // capture pass, which is filling that cube and whose shader never reads it.
     command_list_->SetGraphicsRootConstantBufferView(2, frame_constants_address_);
     command_list_->SetGraphicsRootDescriptorTable(3, TextureHandle(shadow_descriptor_));
+    if (bind_probe) {
+        command_list_->SetGraphicsRootDescriptorTable(6, TextureHandle(probe_descriptor_));
+    }
 
     for (const MeshInstance& instance : instances) {
         const GpuModel& model = models_[instance.model];
@@ -1433,13 +1708,20 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     command_list_->ClearRenderTargetView(rtv, kSkyColor, 0, nullptr);
     command_list_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
+    // The gradient sky, filling the frame behind the yard. Depth is off, so the
+    // geometry that follows paints over it. DrawSky binds its own pipeline and root
+    // signature, so the scene's are restored before the first instance is drawn.
+    DrawSky(view_projection, camera_position);
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    command_list_->SetPipelineState(pipeline_state_.Get());
+
     XMFLOAT3 sun{};
     XMStoreFloat3(&sun, XMVector3Normalize(XMLoadFloat3(&kSunDirection)));
     // The world and the resting props receive the sun's shadow.
-    DrawInstances(scene.Instances(), view_projection, sun, 1.0f);
+    DrawInstances(scene.Instances(), view_projection, sun, 1.0f, true);
     // The resting props take the yard's sun too: they are part of the world, and
     // only pass into the near pass once the player lifts them.
-    DrawInstances(props, view_projection, sun, 1.0f);
+    DrawInstances(props, view_projection, sun, 1.0f, true);
 
     // Paint the glowing halo around the object the player is aiming at. It runs
     // with depth off, so it washes across the object as well as the ground around
@@ -1454,7 +1736,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
         // follow, which are all DrawInstances and assume the scene's are in force.
         command_list_->SetPipelineState(pipeline_state_.Get());
         command_list_->SetGraphicsRootSignature(root_signature_.Get());
-        DrawInstances(highlight, view_projection, sun, 1.0f);
+        DrawInstances(highlight, view_projection, sun, 1.0f, true);
     }
 
     // The arms live about half a metre from the eye, close enough that any wall
@@ -1465,11 +1747,11 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // The arms and anything carried do not receive the sun's shadow: they are lit
     // by a sun bolted to the camera, which the shadow map, built from the world's
     // fixed sun, says nothing about. Hence 0 -- their sun term stays unshadowed.
-    DrawInstances(viewmodel.instances, view_projection, viewmodel.sun_direction, 0.0f);
+    DrawInstances(viewmodel.instances, view_projection, viewmodel.sun_direction, 0.0f, true);
     // A carried object rides in the same pass as the arms, under the same key
     // light bolted to the eye, so it is lit like something in the hand and never
     // clipped by the wall the player is facing.
-    DrawInstances(held_props, view_projection, viewmodel.sun_direction, 0.0f);
+    DrawInstances(held_props, view_projection, viewmodel.sun_direction, 0.0f, true);
 
     // The HUD goes on last, blended over the finished frame with depth off.
     DrawText(hud_prompt);
