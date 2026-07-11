@@ -195,6 +195,7 @@ int Run(HINSTANCE instance, int show_command) {
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
         game.renderer.Render(game.scene, game.props.WorldInstances(),
+                             game.props.HighlightInstances(),
                              game.viewmodel.Pose(camera_to_world), game.props.HeldInstances(),
                              view_projection, game.props.PromptText());
     }

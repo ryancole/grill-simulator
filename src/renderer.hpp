@@ -9,6 +9,7 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
+#include <chrono>
 #include <cstdint>
 #include <span>
 #include <string_view>
@@ -23,12 +24,15 @@ public:
     void Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene);
     void Resize(UINT width, UINT height);
     // `props` are the loose objects resting in the yard, drawn with the scene.
-    // `viewmodel` and `held_props` are drawn last, over a cleared depth buffer,
-    // so the player's arms and whatever they carry are never sliced open by the
-    // wall they are standing against. `hud_prompt` is the one line of HUD text
-    // laid over the finished frame; empty draws nothing.
+    // `highlight` is the one the player is aiming at, ringed with a glowing
+    // outline; empty rings nothing. `viewmodel` and `held_props` are drawn last,
+    // over a cleared depth buffer, so the player's arms and whatever they carry
+    // are never sliced open by the wall they are standing against. `hud_prompt`
+    // is the one line of HUD text laid over the finished frame; empty draws
+    // nothing.
     void Render(const Scene& scene, std::span<const MeshInstance> props,
-                const ViewmodelPose& viewmodel, std::span<const MeshInstance> held_props,
+                std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
+                std::span<const MeshInstance> held_props,
                 const DirectX::XMMATRIX& view_projection, std::string_view hud_prompt);
     void Shutdown();
 
@@ -60,6 +64,10 @@ private:
     void CreateRenderTargetViews();
     void CreateDepthBuffer();
     void CreatePipeline();
+    // The inverted-hull outline pass: its own root signature and PSO that grow a
+    // mesh along its normals, cull the near faces and paint the far shell a flat
+    // glowing colour. Depth-tests against the world but writes no depth.
+    void CreateOutlinePipeline();
     // Uploads every model the scene holds, plus the 1x1 white texture that
     // stands in for a material with no texture of its own.
     void CreateSceneGeometry(const Scene& scene);
@@ -93,6 +101,13 @@ private:
     void DrawInstances(std::span<const MeshInstance> instances,
                        const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction);
 
+    // Paints the glowing halo around each instance, with depth off so it wraps
+    // every side evenly; `seconds` drives the pulse. The caller re-paints the
+    // instance afterward to carve it back out of the halo. Assumes the render
+    // target is still bound.
+    void DrawOutlines(std::span<const MeshInstance> instances,
+                      const DirectX::XMMATRIX& view_projection, float seconds);
+
     // Blocks until the GPU has retired every frame. Only for teardown, resize
     // and the one-off geometry upload; the steady-state path is MoveToNextFrame.
     void FlushGpu();
@@ -117,6 +132,11 @@ private:
 
     ComPtr<ID3D12RootSignature> root_signature_;
     ComPtr<ID3D12PipelineState> pipeline_state_;
+
+    // The pick-up outline pass. Shares the scene's vertex buffers and input
+    // layout; only the root signature and PSO differ.
+    ComPtr<ID3D12RootSignature> outline_root_signature_;
+    ComPtr<ID3D12PipelineState> outline_pipeline_state_;
 
     // The HUD text pass. The atlas SRV lives in the shared texture_heap_ at
     // atlas_descriptor_; the vertex buffer is one upload-heap region per frame in
@@ -143,6 +163,10 @@ private:
     HANDLE fence_event_ = nullptr;
     UINT64 fence_values_[kFrameCount]{};
     UINT frame_index_ = 0;
+
+    // When the renderer came up, so the outline's glow can pulse against a
+    // wall-clock rather than needing a delta threaded through Render.
+    std::chrono::steady_clock::time_point start_time_ = std::chrono::steady_clock::now();
 
     D3D12_VIEWPORT viewport_{};
     D3D12_RECT scissor_{};
