@@ -21,9 +21,9 @@ constexpr float kMasterVolume = 0.5f;
 // How far, in metres, the sizzle carries. X3DAudio normalises the emitter-to-ear
 // distance against this before reading the curve below, so it is both the scale
 // of the falloff and a hard cutoff: past this the curve's last point (silence) is
-// held. The player spawns ~12 m from the grill, so at 11 m they hear nothing and
-// have to walk in a step or two before it fades up.
-constexpr float kAudibleRadius = 11.0f;
+// held. The player spawns ~12 m from the grill; at 7 m they have to be well onto
+// the patio, close to the grill, before it is audible at all.
+constexpr float kAudibleRadius = 7.0f;
 
 // The distance-to-volume curve, from the grate (normalised distance 0, full gain)
 // out to the radius (normalised 1, silent). Without this X3DAudio uses a default
