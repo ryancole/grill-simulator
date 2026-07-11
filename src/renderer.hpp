@@ -63,6 +63,15 @@ private:
     void CreateSwapChain(HWND hwnd, UINT width, UINT height);
     void CreateRenderTargetViews();
     void CreateDepthBuffer();
+    // The sun's depth buffer and everything the shadow pass draws it with: a
+    // square R32_TYPELESS texture with a D32 depth view to render into and an
+    // R32_FLOAT resource view to sample back, plus its own viewport. Fixed size,
+    // so unlike the scene depth buffer it survives a window resize untouched.
+    void CreateShadowMap();
+    // The depth-only pipeline that fills the shadow map, its root signature, the
+    // sun's orthographic light view-projection, and the per-frame constant buffer
+    // that hands that matrix to the scene pass.
+    void CreateShadowPipeline();
     void CreatePipeline();
     // The inverted-hull outline pass: its own root signature and PSO that grow a
     // mesh along its normals, cull the near faces and paint the far shell a flat
@@ -97,9 +106,19 @@ private:
     D3D12_GPU_DESCRIPTOR_HANDLE TextureHandle(UINT descriptor) const;
 
     // One draw per primitive of each instance's model, each under its own root
-    // constants.
+    // constants. `shadow_receive` is 1 for the world, which is shadowed by the
+    // sun, and 0 for the viewmodel, which is not.
     void DrawInstances(std::span<const MeshInstance> instances,
-                       const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction);
+                       const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction,
+                       float shadow_receive);
+
+    // The shadow pass: draws every caster depth-only into the shadow map from the
+    // sun's point of view, wrapped in the barriers that flip the map between
+    // depth target and shader resource.
+    void RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props);
+    // One depth-only draw per primitive, under the shadow pipeline's lone root
+    // constant: the caster's model-to-light-clip matrix.
+    void DrawShadowCasters(std::span<const MeshInstance> instances);
 
     // Paints the glowing halo around each instance, with depth off so it wraps
     // every side evenly; `seconds` drives the pulse. The caller re-paints the
@@ -125,6 +144,7 @@ private:
     ComPtr<ID3D12Resource> render_targets_[kFrameCount];
 
     ComPtr<ID3D12DescriptorHeap> dsv_heap_;
+    UINT dsv_size_ = 0;
     ComPtr<ID3D12Resource> depth_stencil_;
 
     ComPtr<ID3D12CommandAllocator> allocators_[kFrameCount];
@@ -137,6 +157,19 @@ private:
     // layout; only the root signature and PSO differ.
     ComPtr<ID3D12RootSignature> outline_root_signature_;
     ComPtr<ID3D12PipelineState> outline_pipeline_state_;
+
+    // The shadow pass. The map lives in dsv_heap_ slot 1 as a depth view and in
+    // texture_heap_ at shadow_descriptor_ as an SRV; the light view-projection is
+    // fixed (the sun does not move) and rides to the scene pass in frame_constants_.
+    ComPtr<ID3D12RootSignature> shadow_root_signature_;
+    ComPtr<ID3D12PipelineState> shadow_pipeline_state_;
+    ComPtr<ID3D12Resource> shadow_map_;
+    UINT shadow_descriptor_ = 0;
+    DirectX::XMFLOAT4X4 light_view_projection_{};
+    ComPtr<ID3D12Resource> frame_constants_;
+    D3D12_GPU_VIRTUAL_ADDRESS frame_constants_address_ = 0;
+    D3D12_VIEWPORT shadow_viewport_{};
+    D3D12_RECT shadow_scissor_{};
 
     // The HUD text pass. The atlas SRV lives in the shared texture_heap_ at
     // atlas_descriptor_; the vertex buffer is one upload-heap region per frame in

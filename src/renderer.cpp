@@ -40,13 +40,43 @@ struct Constants {
     XMFLOAT3 albedo;
     float checker;
     XMFLOAT3 sun_direction;
-    float padding;
+    // 1 for the world, which the sun's shadow map covers; 0 for the viewmodel,
+    // lit by its own camera-bolted sun. Mirrors g_shadow_receive in scene.hlsl,
+    // and reuses the DWORD that was only padding before shadows existed.
+    float shadow_receive;
 };
 
 static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
-// The descriptor table for the base colour texture costs one more DWORD.
-static_assert(kConstantDwords + 1 <= 64, "A root signature holds at most 64 DWORDs in total");
+// Beyond the root constants the scene signature holds the base-colour table (1),
+// the frame constant buffer (2) and the shadow-map table (1) -- four DWORDs.
+static_assert(kConstantDwords + 4 <= 64, "A root signature holds at most 64 DWORDs in total");
+
+// The shadow map is square and this many texels on a side. Matches kShadowMapSize
+// in scene.hlsl, which sizes one texel for the PCF taps. 2048 gives the fenced
+// yard a little over a centimetre per texel, crisp enough for hard-edged props.
+constexpr UINT kShadowMapSize = 2048;
+// The shadow depth view is the second descriptor in the DSV heap; the scene's own
+// depth buffer is the first.
+constexpr UINT kShadowDsvIndex = 1;
+constexpr DXGI_FORMAT kShadowResourceFormat = DXGI_FORMAT_R32_TYPELESS;
+constexpr DXGI_FORMAT kShadowDepthFormat = DXGI_FORMAT_D32_FLOAT;
+constexpr DXGI_FORMAT kShadowSrvFormat = DXGI_FORMAT_R32_FLOAT;
+
+// Mirrors the ShadowConstants cbuffer in shaders/shadow.hlsl: one matrix, the
+// caster's model-to-light-clip transform.
+struct ShadowConstants {
+    XMFLOAT4X4 light_mvp;
+};
+
+constexpr UINT kShadowConstantDwords = sizeof(ShadowConstants) / sizeof(UINT);
+
+// Mirrors the FrameConstants cbuffer in shaders/scene.hlsl. One matrix now; a
+// constant buffer is 256-byte aligned, so there is room to spare if more per-frame
+// state ever wants to ride along.
+struct FrameConstants {
+    XMFLOAT4X4 light_view_projection;
+};
 
 // Mirrors the OutlineConstants cbuffer in shaders/outline.hlsl. The view-
 // projection stands alone because the mesh is grown in world space before it is
@@ -172,8 +202,10 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene
     CreateSwapChain(hwnd, width, height);
     CreateRenderTargetViews();
     CreateDepthBuffer();
+    CreateShadowMap();
     CreatePipeline();
     CreateOutlinePipeline();
+    CreateShadowPipeline();
     CreateSceneGeometry(scene);
     CreateTextPipeline();
 
@@ -281,11 +313,13 @@ void Renderer::CreateSwapChain(HWND hwnd, UINT width, UINT height) {
                   "CreateDescriptorHeap(RTV)");
     rtv_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
+    // Two: the scene's depth buffer, then the sun's shadow map.
     D3D12_DESCRIPTOR_HEAP_DESC dsv_desc{};
-    dsv_desc.NumDescriptors = 1;
+    dsv_desc.NumDescriptors = 2;
     dsv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
     ThrowIfFailed(device_->CreateDescriptorHeap(&dsv_desc, IID_PPV_ARGS(&dsv_heap_)),
                   "CreateDescriptorHeap(DSV)");
+    dsv_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 }
 
 void Renderer::CreateRenderTargetViews() {
@@ -320,8 +354,45 @@ void Renderer::CreateDepthBuffer() {
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
     dsv.Format = kDepthFormat;
     dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    // Slot 0 of the DSV heap. The shadow map takes slot 1, written once in
+    // CreateShadowMap and untouched by a resize.
     device_->CreateDepthStencilView(depth_stencil_.Get(), &dsv,
                                     dsv_heap_->GetCPUDescriptorHandleForHeapStart());
+}
+
+void Renderer::CreateShadowMap() {
+    // Typeless, so the same memory can be read two ways: a D32 depth view to
+    // render into during the shadow pass, and an R32_FLOAT resource view to
+    // sample in the scene pass. The clear value has to be spelled with the
+    // concrete depth format or the driver drops its fast-clear path.
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = kShadowDepthFormat;
+    clear.DepthStencil.Depth = 1.0f;
+
+    const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+    const CD3DX12_RESOURCE_DESC desc =
+        CD3DX12_RESOURCE_DESC::Tex2D(kShadowResourceFormat, kShadowMapSize, kShadowMapSize, 1, 1, 1,
+                                     0, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    // Created as a shader resource: the render loop's first act each frame is to
+    // transition it to DEPTH_WRITE, so its resting state between frames is the one
+    // the scene pass leaves it in.
+    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear,
+                                                   IID_PPV_ARGS(&shadow_map_)),
+                  "CreateCommittedResource(shadow map)");
+
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
+    dsv.Format = kShadowDepthFormat;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(dsv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                               static_cast<INT>(kShadowDsvIndex), dsv_size_);
+    device_->CreateDepthStencilView(shadow_map_.Get(), &dsv, handle);
+
+    // The shadow pass rasterizes the whole map every frame.
+    shadow_viewport_ = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(kShadowMapSize),
+                                        static_cast<float>(kShadowMapSize));
+    shadow_scissor_ = CD3DX12_RECT(0, 0, static_cast<LONG>(kShadowMapSize),
+                                   static_cast<LONG>(kShadowMapSize));
 }
 
 void Renderer::CreatePipeline() {
@@ -330,19 +401,37 @@ void Renderer::CreatePipeline() {
     // descriptor table, and the sampler that reads it is baked into the root
     // signature -- every texture in the game wants the same one.
     const CD3DX12_DESCRIPTOR_RANGE base_color_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+    // t1: the shadow map, at a fixed slot in the same heap the base colour lives
+    // in, bound once per frame rather than per draw.
+    const CD3DX12_DESCRIPTOR_RANGE shadow_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
 
-    CD3DX12_ROOT_PARAMETER parameters[2];
+    CD3DX12_ROOT_PARAMETER parameters[4];
     parameters[0].InitAsConstants(kConstantDwords, 0);
     parameters[1].InitAsDescriptorTable(1, &base_color_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    // b1: the frame constant buffer holding the sun's view-projection.
+    parameters[2].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[3].InitAsDescriptorTable(1, &shadow_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
-    // Anisotropic because the ground and the patio are seen almost edge on, and
-    // trilinear alone turns them to mush a few metres out.
-    CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_ANISOTROPIC);
-    sampler.MaxAnisotropy = 8;
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    CD3DX12_STATIC_SAMPLER_DESC samplers[2];
+    // s0: anisotropic because the ground and the patio are seen almost edge on,
+    // and trilinear alone turns them to mush a few metres out.
+    samplers[0] = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_ANISOTROPIC);
+    samplers[0].MaxAnisotropy = 8;
+    samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // s1: the shadow comparison sampler. Linear comparison filtering does the 2x2
+    // PCF within each tap; BORDER addressing with a white border means a receiver
+    // sampling off the edge of the map compares against depth 1.0 and reads lit.
+    samplers[1] = CD3DX12_STATIC_SAMPLER_DESC(1, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR,
+                                              D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+                                              D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+                                              D3D12_TEXTURE_ADDRESS_MODE_BORDER);
+    samplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    samplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+    samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     CD3DX12_ROOT_SIGNATURE_DESC root_desc;
-    root_desc.Init(_countof(parameters), parameters, 1, &sampler,
+    root_desc.Init(_countof(parameters), parameters, _countof(samplers), samplers,
                    D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
@@ -498,6 +587,115 @@ void Renderer::CreateOutlinePipeline() {
         "CreateGraphicsPipelineState(outline)");
 }
 
+void Renderer::CreateShadowPipeline() {
+    // The sun does not move, so its view-projection is built once. It is an
+    // orthographic box aimed down the sun's direction and centred on the yard:
+    // the fenced area is about 24 m across, and this half-extent leaves the
+    // corners and the trees comfortably inside the frame. Ground past it simply
+    // falls outside the map and reads as lit, which is right -- nothing out there
+    // casts anything the player can see through the fog.
+    constexpr float kShadowExtent = 40.0f; // Full width/height of the ortho box.
+    constexpr float kShadowDistance = 50.0f; // How far back along the sun the eye sits.
+    constexpr float kShadowNear = 20.0f;
+    constexpr float kShadowFar = 80.0f;
+
+    const XMVECTOR sun = XMVector3Normalize(XMLoadFloat3(&kSunDirection));
+    const XMVECTOR target = XMVectorZero();
+    const XMVECTOR eye = XMVectorScale(sun, kShadowDistance);
+    const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    const XMMATRIX view = XMMatrixLookAtLH(eye, target, up);
+    const XMMATRIX proj =
+        XMMatrixOrthographicLH(kShadowExtent, kShadowExtent, kShadowNear, kShadowFar);
+    XMStoreFloat4x4(&light_view_projection_, view * proj);
+
+    // The per-frame constant buffer that hands that matrix to the scene pass. It
+    // never changes, so it is written once here and left mapped-then-unmapped. A
+    // constant buffer wants a 256-byte-aligned size.
+    const UINT64 cb_size = (sizeof(FrameConstants) + 255) & ~UINT64{255};
+    const CD3DX12_HEAP_PROPERTIES upload_heap(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RESOURCE_DESC cb_desc = CD3DX12_RESOURCE_DESC::Buffer(cb_size);
+    ThrowIfFailed(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &cb_desc,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&frame_constants_)),
+                  "CreateCommittedResource(frame constants)");
+
+    FrameConstants frame{};
+    frame.light_view_projection = light_view_projection_;
+    void* mapped = nullptr;
+    const CD3DX12_RANGE no_read(0, 0);
+    ThrowIfFailed(frame_constants_->Map(0, &no_read, &mapped), "FrameConstants::Map");
+    std::memcpy(mapped, &frame, sizeof(frame));
+    frame_constants_->Unmap(0, nullptr);
+    frame_constants_address_ = frame_constants_->GetGPUVirtualAddress();
+
+    // The pass draws position only, under one root constant: the light MVP. No
+    // texture, no sampler, and -- with no pixel shader at all -- pixel access
+    // denied alongside the geometry stages the scene never uses.
+    CD3DX12_ROOT_PARAMETER parameters[1];
+    parameters[0].InitAsConstants(kShadowConstantDwords, 0);
+
+    CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    root_desc.Init(_countof(parameters), parameters, 0, nullptr,
+                   D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS);
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr =
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr)) {
+        std::string message = error
+                                  ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                                error->GetBufferSize())
+                                  : "unknown error";
+        throw std::runtime_error("D3D12SerializeRootSignature failed: " + message);
+    }
+    ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                               signature->GetBufferSize(),
+                                               IID_PPV_ARGS(&shadow_root_signature_)),
+                  "CreateRootSignature(shadow)");
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "shadow.vs.cso");
+
+    const D3D12_INPUT_ELEMENT_DESC input_layout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.InputLayout = {input_layout, _countof(input_layout)};
+    pso.pRootSignature = shadow_root_signature_.Get();
+    pso.VS = {vs.data(), vs.size()};
+    // No PS: the rasterizer writes depth on its own.
+
+    // A depth-only pass fights shadow acne at the source with a rasterizer bias.
+    // The constant term pushes every caster a hair deeper; the slope-scaled term
+    // pushes grazing faces -- where the acne lives -- deeper still. The receiver
+    // in scene.hlsl adds a normal offset on top. Front faces are kept (default
+    // back-face cull): the yard's slabs are thin, and rendering their far side
+    // into the map would let light leak up through the ground.
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pso.RasterizerState.DepthBias = 4000;
+    pso.RasterizerState.SlopeScaledDepthBias = 2.0f;
+    pso.RasterizerState.DepthBiasClamp = 0.0f;
+
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pso.DSVFormat = kShadowDepthFormat;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    // Depth only: no colour targets at all.
+    pso.NumRenderTargets = 0;
+    pso.SampleDesc.Count = 1;
+
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&shadow_pipeline_state_)),
+                  "CreateGraphicsPipelineState(shadow)");
+}
+
 ComPtr<ID3D12Resource> Renderer::UploadBuffer(const void* data, UINT64 bytes,
                                               D3D12_RESOURCE_STATES final_state,
                                               std::vector<ComPtr<ID3D12Resource>>& staging) {
@@ -609,8 +807,9 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     }
 
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
-    // The white texture, then every model image, then the HUD font atlas last.
-    heap_desc.NumDescriptors = 1 + image_count + 1;
+    // The white texture, then every model image, then the HUD font atlas, then
+    // the sun's shadow map last.
+    heap_desc.NumDescriptors = 1 + image_count + 1 + 1;
     heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(device_->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&texture_heap_)),
@@ -690,6 +889,21 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     // rides the same command list and staging buffers to the GPU.
     atlas_descriptor_ = next_descriptor;
     LoadFontAtlas(staging);
+
+    // The shadow map's resource view takes the descriptor after the atlas. The
+    // texture itself was already created in CreateShadowMap; only its SRV lands
+    // here, in the shader-visible heap the scene pass binds. Writing a descriptor
+    // is immediate, so it needs no command list of its own.
+    shadow_descriptor_ = atlas_descriptor_ + 1;
+    D3D12_SHADER_RESOURCE_VIEW_DESC shadow_srv{};
+    shadow_srv.Format = kShadowSrvFormat;
+    shadow_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    shadow_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    shadow_srv.Texture2D.MipLevels = 1;
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE shadow_handle(
+        texture_heap_->GetCPUDescriptorHandleForHeapStart(),
+        static_cast<INT>(shadow_descriptor_), texture_size_);
+    device_->CreateShaderResourceView(shadow_map_.Get(), &shadow_srv, shadow_handle);
 
     ThrowIfFailed(command_list_->Close(), "CommandList::Close");
     ID3D12CommandList* lists[] = {command_list_.Get()};
@@ -921,7 +1135,15 @@ void Renderer::DrawText(std::string_view text) {
 }
 
 void Renderer::DrawInstances(std::span<const MeshInstance> instances,
-                             const XMMATRIX& view_projection, XMFLOAT3 sun_direction) {
+                             const XMMATRIX& view_projection, XMFLOAT3 sun_direction,
+                             float shadow_receive) {
+    // The two per-frame bindings the scene signature adds for shadows: the sun's
+    // view-projection and the shadow map itself. Bound here, at the top of every
+    // batch, so they survive the root-signature switch the outline pass makes --
+    // setting a root signature clears every argument bound under the old one.
+    command_list_->SetGraphicsRootConstantBufferView(2, frame_constants_address_);
+    command_list_->SetGraphicsRootDescriptorTable(3, TextureHandle(shadow_descriptor_));
+
     for (const MeshInstance& instance : instances) {
         const GpuModel& model = models_[instance.model];
         const XMMATRIX instance_to_world = XMLoadFloat4x4(&instance.transform);
@@ -953,6 +1175,7 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
                           XMVectorMultiply(tint, XMLoadFloat3(&primitive.base_color)));
             constants.checker = instance.checker;
             constants.sun_direction = sun_direction;
+            constants.shadow_receive = shadow_receive;
 
             command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
             command_list_->SetGraphicsRootDescriptorTable(1, primitive.base_color_texture);
@@ -960,6 +1183,61 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
                                                 0);
         }
     }
+}
+
+void Renderer::DrawShadowCasters(std::span<const MeshInstance> instances) {
+    const XMMATRIX light_view_projection = XMLoadFloat4x4(&light_view_projection_);
+
+    for (const MeshInstance& instance : instances) {
+        const GpuModel& model = models_[instance.model];
+        const XMMATRIX instance_to_world = XMLoadFloat4x4(&instance.transform);
+
+        command_list_->IASetVertexBuffers(0, 1, &model.vertex_buffer_view);
+        command_list_->IASetIndexBuffer(&model.index_buffer_view);
+
+        for (const DrawPrimitive& primitive : model.primitives) {
+            const XMMATRIX to_world = XMLoadFloat4x4(&primitive.transform) * instance_to_world;
+
+            ShadowConstants constants{};
+            XMStoreFloat4x4(&constants.light_mvp, to_world * light_view_projection);
+
+            command_list_->SetGraphicsRoot32BitConstants(0, kShadowConstantDwords, &constants, 0);
+            command_list_->DrawIndexedInstanced(primitive.index_count, 1, primitive.first_index, 0,
+                                                0);
+        }
+    }
+}
+
+void Renderer::RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props) {
+    // Flip the map from the shader resource the scene pass left it as into a depth
+    // target to write.
+    const CD3DX12_RESOURCE_BARRIER to_depth = CD3DX12_RESOURCE_BARRIER::Transition(
+        shadow_map_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    command_list_->ResourceBarrier(1, &to_depth);
+
+    command_list_->RSSetViewports(1, &shadow_viewport_);
+    command_list_->RSSetScissorRects(1, &shadow_scissor_);
+
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE shadow_dsv(dsv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                   static_cast<INT>(kShadowDsvIndex), dsv_size_);
+    // No colour target: depth only.
+    command_list_->OMSetRenderTargets(0, nullptr, FALSE, &shadow_dsv);
+    command_list_->ClearDepthStencilView(shadow_dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+    command_list_->SetPipelineState(shadow_pipeline_state_.Get());
+    command_list_->SetGraphicsRootSignature(shadow_root_signature_.Get());
+
+    // The world and the resting props cast; the viewmodel and anything carried do
+    // not -- they are lit by the camera's own sun and never enter this pass.
+    DrawShadowCasters(scene.Instances());
+    DrawShadowCasters(props);
+
+    // And back to a shader resource for the scene pass to sample.
+    const CD3DX12_RESOURCE_BARRIER to_srv = CD3DX12_RESOURCE_BARRIER::Transition(
+        shadow_map_.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    command_list_->ResourceBarrier(1, &to_srv);
 }
 
 void Renderer::DrawOutlines(std::span<const MeshInstance> instances,
@@ -1027,13 +1305,20 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
 
-    command_list_->SetGraphicsRootSignature(root_signature_.Get());
-
     // The only heap the game binds, and it must be bound before any root
     // descriptor table that points into it.
     ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
 
+    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // The shadow map comes first: the scene pass samples it, so every caster has
+    // to be drawn into it before a single lit pixel is shaded. It binds its own
+    // pipeline, root signature and viewport, all replaced below for the main pass.
+    RenderShadowMap(scene, props);
+
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    command_list_->SetPipelineState(pipeline_state_.Get());
     command_list_->RSSetViewports(1, &viewport_);
     command_list_->RSSetScissorRects(1, &scissor_);
 
@@ -1044,20 +1329,20 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
 
     const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
                                             static_cast<INT>(frame_index_), rtv_size_);
+    // Slot 0 of the DSV heap: the scene's depth buffer, not the shadow map's.
     const CD3DX12_CPU_DESCRIPTOR_HANDLE dsv(dsv_heap_->GetCPUDescriptorHandleForHeapStart());
     command_list_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
 
     command_list_->ClearRenderTargetView(rtv, kSkyColor, 0, nullptr);
     command_list_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
     XMFLOAT3 sun{};
     XMStoreFloat3(&sun, XMVector3Normalize(XMLoadFloat3(&kSunDirection)));
-    DrawInstances(scene.Instances(), view_projection, sun);
+    // The world and the resting props receive the sun's shadow.
+    DrawInstances(scene.Instances(), view_projection, sun, 1.0f);
     // The resting props take the yard's sun too: they are part of the world, and
     // only pass into the near pass once the player lifts them.
-    DrawInstances(props, view_projection, sun);
+    DrawInstances(props, view_projection, sun, 1.0f);
 
     // Paint the glowing halo around the object the player is aiming at. It runs
     // with depth off, so it washes across the object as well as the ground around
@@ -1072,7 +1357,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
         // follow, which are all DrawInstances and assume the scene's are in force.
         command_list_->SetPipelineState(pipeline_state_.Get());
         command_list_->SetGraphicsRootSignature(root_signature_.Get());
-        DrawInstances(highlight, view_projection, sun);
+        DrawInstances(highlight, view_projection, sun, 1.0f);
     }
 
     // The arms live about half a metre from the eye, close enough that any wall
@@ -1080,11 +1365,14 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // depth buffer away first is the usual answer: it costs one clear, and the
     // arms still occlude each other because they keep writing depth as they go.
     command_list_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-    DrawInstances(viewmodel.instances, view_projection, viewmodel.sun_direction);
+    // The arms and anything carried do not receive the sun's shadow: they are lit
+    // by a sun bolted to the camera, which the shadow map, built from the world's
+    // fixed sun, says nothing about. Hence 0 -- their sun term stays unshadowed.
+    DrawInstances(viewmodel.instances, view_projection, viewmodel.sun_direction, 0.0f);
     // A carried object rides in the same pass as the arms, under the same key
     // light bolted to the eye, so it is lit like something in the hand and never
     // clipped by the wall the player is facing.
-    DrawInstances(held_props, view_projection, viewmodel.sun_direction);
+    DrawInstances(held_props, view_projection, viewmodel.sun_direction, 0.0f);
 
     // The HUD goes on last, blended over the finished frame with depth off.
     DrawText(hud_prompt);
