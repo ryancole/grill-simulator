@@ -29,6 +29,12 @@ constexpr float kDropRadius = 0.06f;
 // gets its own key, the shooter convention.
 constexpr int kInteractKey = 'E';
 
+// Rough density used to turn a box's volume into a mass. The absolute value
+// barely matters -- gravity is mass-independent, and a bounce off the static
+// world (infinite mass) does not depend on it either -- but it keeps the inertia
+// tensor sensibly scaled for when props start knocking into each other.
+constexpr float kDensity = 500.0f; // kg/m^3, a bit lighter than water.
+
 // A carried object hangs by the right hand -- see the viewmodel's wrist, which
 // sits near (0.27, -0.35, 0.78) in this same eye space. Flat things are tipped
 // up so the player sees a face rather than an edge; the tongs are turned to
@@ -53,28 +59,109 @@ MeshInstance MakeInstance(std::uint32_t model, FXMMATRIX transform) {
 
 } // namespace
 
-Props::Props(const PropModels& models) {
+Props::Props(const Scene& scene) {
+    const PropModels& models = scene.PropModelIds();
+    const std::vector<Model>& pool = scene.Models();
+
     // The tongs lie across the grill's side shelf; the meat waits on the picnic
-    // table. All four sit in the player's view from the spawn point.
-    Add(models.tongs, "tongs", {1.15f, 0.78f, 5.0f}, 90.0f, TongsInHand());
-    Add(models.steak, "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand());
-    Add(models.patty, "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand());
-    Add(models.patty, "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand());
+    // table. All four sit in the player's view from the spawn point. Each carries
+    // the Model it was loaded from so its box collider can be measured off the
+    // mesh bounds.
+    Add(models.tongs, pool[models.tongs], "tongs", {1.15f, 0.78f, 5.0f}, 90.0f, TongsInHand());
+    Add(models.steak, pool[models.steak], "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand());
+    Add(models.patty, pool[models.patty], "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand());
+    Add(models.patty, pool[models.patty], "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand());
 }
 
-void Props::Add(std::uint32_t model, std::string name, XMFLOAT3 position, float yaw_degrees,
-                FXMMATRIX held_local) {
+void Props::DeriveBodyShape(Item& item, const Model& model) {
+    // Union every primitive's vertex bounds, each carried through its own node
+    // transform, into one model-space box. glTF hands us those bounds directly
+    // (Primitive::bounds), so no vertex is touched here.
+    XMVECTOR box_min = XMVectorReplicate(FLT_MAX);
+    XMVECTOR box_max = XMVectorReplicate(-FLT_MAX);
+    for (const Primitive& primitive : model.primitives) {
+        const XMMATRIX transform = XMLoadFloat4x4(&primitive.transform);
+        const XMVECTOR lo = XMLoadFloat3(&primitive.bounds.min);
+        const XMVECTOR hi = XMLoadFloat3(&primitive.bounds.max);
+        // A node transform can rotate the bounds, so all eight corners are carried
+        // across and re-bounded rather than just min and max.
+        for (int corner = 0; corner < 8; ++corner) {
+            const XMVECTOR point = XMVectorSelect(lo, hi, XMVectorSelectControl(corner & 1,
+                                                                                (corner >> 1) & 1,
+                                                                                (corner >> 2) & 1, 0));
+            const XMVECTOR world = XMVector3TransformCoord(point, transform);
+            box_min = XMVectorMin(box_min, world);
+            box_max = XMVectorMax(box_max, world);
+        }
+    }
+
+    const XMVECTOR half = XMVectorScale(XMVectorSubtract(box_max, box_min), 0.5f);
+    const XMVECTOR center = XMVectorScale(XMVectorAdd(box_max, box_min), 0.5f);
+    XMStoreFloat3(&item.half_extents, half);
+    XMStoreFloat3(&item.com_offset, center);
+
+    // Mass and inertia of a solid box. A degenerate extent (a perfectly flat
+    // patty) is floored so the tensor stays invertible.
+    XMFLOAT3 h;
+    XMStoreFloat3(&h, XMVectorMax(half, XMVectorReplicate(1e-3f)));
+    const float mass = kDensity * (2.0f * h.x) * (2.0f * h.y) * (2.0f * h.z);
+    item.inv_mass = 1.0f / mass;
+    // Solid box: I = (1/3) m (h_a^2 + h_b^2) about each axis, in half-extents.
+    item.inv_inertia = {
+        1.0f / ((mass / 3.0f) * (h.y * h.y + h.z * h.z)),
+        1.0f / ((mass / 3.0f) * (h.x * h.x + h.z * h.z)),
+        1.0f / ((mass / 3.0f) * (h.x * h.x + h.y * h.y)),
+    };
+}
+
+void Props::RebuildTransform(Item& item) {
+    // The body is stored about its centre of mass, but the model draws about its
+    // own origin (on the underside). Undo the COM offset, rotate, then place:
+    //   world(v) = (v - com_offset) * R(orientation) + position.
+    const XMVECTOR com = XMLoadFloat3(&item.com_offset);
+    const XMVECTOR q = XMLoadFloat4(&item.orientation);
+    const XMVECTOR position = XMLoadFloat3(&item.position);
+    const XMMATRIX m = XMMatrixTranslationFromVector(XMVectorNegate(com)) *
+                       XMMatrixRotationQuaternion(q) *
+                       XMMatrixTranslationFromVector(position);
+    XMStoreFloat4x4(&item.resting, m);
+}
+
+void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XMFLOAT3 position,
+                float yaw_degrees, FXMMATRIX held_local) {
     Item item{};
-    item.model = model;
+    item.model = model_id;
     item.name = std::move(name);
-    XMStoreFloat4x4(&item.resting, XMMatrixRotationY(XMConvertToRadians(yaw_degrees)) *
-                                       XMMatrixTranslation(position.x, position.y, position.z));
     XMStoreFloat4x4(&item.held_local, held_local);
-    items_.push_back(item);
+    DeriveBodyShape(item, model);
+
+    // Seed the rigid state to match the old yaw-and-translate placement exactly:
+    // the model origin lands at `position`, so the centre of mass lands at
+    // com_offset carried through the yaw.
+    const XMVECTOR q = XMQuaternionRotationRollPitchYaw(0.0f, XMConvertToRadians(yaw_degrees), 0.0f);
+    const XMVECTOR com = XMLoadFloat3(&item.com_offset);
+    const XMVECTOR origin = XMVectorSet(position.x, position.y, position.z, 0.0f);
+    const XMVECTOR com_world =
+        XMVectorAdd(XMVector3TransformNormal(com, XMMatrixRotationQuaternion(q)), origin);
+    XMStoreFloat4(&item.orientation, q);
+    XMStoreFloat3(&item.position, com_world);
+    item.asleep = true;
+    RebuildTransform(item);
+
+    items_.push_back(std::move(item));
+}
+
+void Props::Simulate(float dt, std::span<const Aabb> colliders) {
+    // Phase 1: every item spawns, and is dropped, asleep -- so the solver has
+    // nothing to advance yet. Phase 2 replaces this body with gravity,
+    // integration and contact resolution against `colliders`, waking an item when
+    // it is dropped.
+    (void)dt;
+    (void)colliders;
 }
 
 void Props::Update(const XMMATRIX& camera_to_world, const Input& input,
-                   std::span<const Aabb> colliders) {
+                   std::span<const Aabb> colliders, float dt) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
@@ -96,6 +183,11 @@ void Props::Update(const XMMATRIX& camera_to_world, const Input& input,
     // whatever is in reach and looked at. Cheap enough to recompute outright for
     // a handful of items.
     hovered_ = carried_ >= 0 ? -1 : PickTarget(eye, forward);
+
+    // Fall, bounce and settle any loose object that is in motion. Runs after the
+    // grab so a just-dropped item is already awake, and before the draw lists so
+    // they read its stepped pose.
+    Simulate(dt, colliders);
 
     // Rebuild the draw lists from the current state. There are a handful of
     // items, so this is cheaper than tracking which one moved.
@@ -179,7 +271,22 @@ void Props::Drop(FXMVECTOR eye, FXMVECTOR forward, std::span<const Aabb> collide
 
     // Face the object along the gaze, upright, so it lands the way it was held.
     const float yaw = std::atan2(XMVectorGetX(flat), XMVectorGetZ(flat));
-    XMStoreFloat4x4(&items_[carried_].resting,
-                    XMMatrixRotationY(yaw) * XMMatrixTranslation(x, y, z));
+
+    // Seed the rigid state so the model origin lands at (x, y, z), matching the
+    // old snap exactly. Phase 1 leaves it asleep and motionless; Phase 2 will
+    // wake it here with a small toss so it can fall and tumble.
+    Item& item = items_[carried_];
+    const XMVECTOR q = XMQuaternionRotationRollPitchYaw(0.0f, yaw, 0.0f);
+    const XMVECTOR com = XMLoadFloat3(&item.com_offset);
+    const XMVECTOR origin = XMVectorSet(x, y, z, 0.0f);
+    const XMVECTOR com_world =
+        XMVectorAdd(XMVector3TransformNormal(com, XMMatrixRotationQuaternion(q)), origin);
+    XMStoreFloat4(&item.orientation, q);
+    XMStoreFloat3(&item.position, com_world);
+    item.linear_velocity = {0.0f, 0.0f, 0.0f};
+    item.angular_velocity = {0.0f, 0.0f, 0.0f};
+    item.asleep = true;
+    RebuildTransform(item);
+
     carried_ = -1;
 }

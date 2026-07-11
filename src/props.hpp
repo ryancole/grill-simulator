@@ -22,14 +22,18 @@ class Input;
 // a wall.
 class Props {
 public:
-    explicit Props(const PropModels& models);
+    // Takes the whole scene, not just the model ids, because each prop's box
+    // collider is derived from its model's vertex bounds (Primitive::bounds), and
+    // those live on the Models the scene loaded.
+    explicit Props(const Scene& scene);
 
-    // Advances pick-up and drop for one frame from the E key. `camera_to_world`
+    // Advances pick-up, drop and the falling of loose objects for one frame. `dt`
+    // is the frame time the rigid-body step integrates over. `camera_to_world`
     // carries the eye's position in its fourth row and its gaze in the third, so
     // both the reach test and a carried object's pose come from it. `colliders`
-    // is what a dropped object comes to rest on.
+    // is what a dropped object falls onto and comes to rest on.
     void Update(const DirectX::XMMATRIX& camera_to_world, const Input& input,
-                std::span<const Aabb> colliders);
+                std::span<const Aabb> colliders, float dt);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -50,18 +54,60 @@ public:
     std::string PromptText() const;
 
 private:
-    // One loose object. `resting` is its world transform when set down;
-    // `held_local` is its pose in eye space while carried, lifted into the world
-    // every frame by the camera's basis.
+    // One loose object, modelled as a single oriented box (an approximation --
+    // the meshes are not perfectly boxy, but these things are small). The rigid
+    // state is the box centred on its centre of mass; the render transform,
+    // `resting`, is rebuilt from it every frame so the draw list, PickTarget and
+    // the highlight all read the same pose.
+    //
+    // `held_local` is the pose in eye space while carried, lifted into the world
+    // every frame by the camera's basis -- carrying is kinematic, so the solver
+    // leaves a carried item alone.
     struct Item {
         std::uint32_t model;
-        DirectX::XMFLOAT4X4 resting;
-        DirectX::XMFLOAT4X4 held_local;
         std::string name; // As it reads in the pick-up prompt.
+
+        // Box shape, in the model's own space. `half_extents` are half the box's
+        // side lengths; `com_offset` is the centre of the box measured from the
+        // model origin, which sits on the object's underside -- so com_offset.y is
+        // roughly half the object's height.
+        DirectX::XMFLOAT3 half_extents;
+        DirectX::XMFLOAT3 com_offset;
+
+        // Rigid-body state. `position` is the centre of mass in world space;
+        // `orientation` is the box's rotation as a unit quaternion.
+        DirectX::XMFLOAT3 position;
+        DirectX::XMFLOAT4 orientation;
+        DirectX::XMFLOAT3 linear_velocity{0.0f, 0.0f, 0.0f};
+        DirectX::XMFLOAT3 angular_velocity{0.0f, 0.0f, 0.0f};
+
+        // Mass and the diagonal of the inverse inertia tensor, both in body space.
+        // Precomputed from the box dimensions; the solver in Phase 2 reads them.
+        float inv_mass{1.0f};
+        DirectX::XMFLOAT3 inv_inertia{0.0f, 0.0f, 0.0f};
+
+        // A settled object is skipped by the solver until something disturbs it,
+        // which is both cheaper and what keeps a resting box from jittering.
+        bool asleep{true};
+
+        // Rebuilt from position/orientation/com_offset each frame: the model-to-
+        // world transform the renderer draws this item under.
+        DirectX::XMFLOAT4X4 resting;
+
+        DirectX::XMFLOAT4X4 held_local;
     };
 
-    void Add(std::uint32_t model, std::string name, DirectX::XMFLOAT3 position, float yaw_degrees,
-             DirectX::FXMMATRIX held_local);
+    void Add(std::uint32_t model_id, const Model& model, std::string name,
+             DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local);
+    // Fills an item's box shape (half_extents, com_offset) and mass properties
+    // (inv_mass, inv_inertia) from the union of its model's primitive bounds.
+    static void DeriveBodyShape(Item& item, const Model& model);
+    // Recomputes `resting` from the item's rigid state, so drawing and picking see
+    // where the body currently is.
+    static void RebuildTransform(Item& item);
+    // Steps every awake item forward by dt: gravity, integration, collision
+    // against `colliders`. A no-op in Phase 1, where everything spawns asleep.
+    void Simulate(float dt, std::span<const Aabb> colliders);
     // The item the player is looking at within reach, or -1. Nearest to the
     // centre of the gaze wins.
     int PickTarget(DirectX::FXMVECTOR eye, DirectX::FXMVECTOR forward) const;
