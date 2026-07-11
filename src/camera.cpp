@@ -60,6 +60,36 @@ constexpr float kFieldOfView = XMConvertToRadians(70.0f);
 constexpr float kNearPlane = 0.05f;
 constexpr float kFarPlane = 250.0f;
 
+// How hard the player shoves a loose prop they walk into: the target horizontal
+// speed imparted, made independent of the prop's mass by scaling the impulse by
+// that mass.
+constexpr float kPushSpeed = 1.2f; // m/s
+
+// Lets the walking player nudge props aside. The controller collides with
+// dynamic actors on its own but never moves them; this applies a gentle impulse
+// along the direction of travel so a steak or crate scoots rather than standing
+// there like a wall. The vertical component is dropped, so a downward hit --
+// stepping up onto a prop -- never scoops it into the air.
+class ControllerHitReport : public PxUserControllerHitReport {
+public:
+    void onShapeHit(const PxControllerShapeHit& hit) override {
+        PxRigidDynamic* body = hit.actor->is<PxRigidDynamic>();
+        if (body == nullptr || body->getRigidBodyFlags().isSet(PxRigidBodyFlag::eKINEMATIC)) {
+            return;
+        }
+        PxVec3 dir(hit.dir.x, 0.0f, hit.dir.z);
+        const float length_sq = dir.magnitudeSquared();
+        if (length_sq < 1e-6f) {
+            return; // a purely vertical hit: standing on it, not walking into it.
+        }
+        dir *= 1.0f / PxSqrt(length_sq);
+        PxRigidBodyExt::addForceAtPos(*body, dir * (kPushSpeed * body->getMass()),
+                                      toVec3(hit.worldPos), PxForceMode::eIMPULSE);
+    }
+    void onControllerHit(const PxControllersHit&) override {}
+    void onObstacleHit(const PxControllerObstacleHit&) override {}
+};
+
 } // namespace
 
 Camera::Camera(Physics& physics) {
@@ -73,6 +103,8 @@ Camera::Camera(Physics& physics) {
     desc.stepOffset = kStepHeight; // a curb within a step is climbed, not walled off.
     desc.contactOffset = kContactOffset;
     desc.material = &physics.DefaultMaterial();
+    report_ = new ControllerHitReport();
+    desc.reportCallback = report_;
 
     const float foot = position_.y - kEyeHeight;
     const float center = foot + 0.5f * kCapsuleHeight + kBodyRadius;
@@ -85,6 +117,9 @@ Camera::~Camera() {
     if (controller_) {
         controller_->release();
     }
+    // After the controller, which held the pointer to it. Down to the concrete
+    // type: the PhysX base's destructor is protected, deliberately not deletable.
+    delete static_cast<ControllerHitReport*>(report_);
 }
 
 void Camera::Look(float dx, float dy) {

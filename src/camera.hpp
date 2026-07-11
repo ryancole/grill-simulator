@@ -4,6 +4,7 @@
 
 namespace physx {
 class PxController;
+class PxUserControllerHitReport;
 }
 class Input;
 class Physics;
@@ -46,6 +47,9 @@ private:
     // The capsule in the physics scene. Owned by the controller manager (in
     // Physics); released here, before that manager tears down.
     physx::PxController* controller_ = nullptr;
+    // Applies the shove to a prop the capsule walks into. Owned here; must outlive
+    // the controller that calls it.
+    physx::PxUserControllerHitReport* report_ = nullptr;
 
     // The eye, in world space: read back from the controller's foot each frame.
     DirectX::XMFLOAT3 position_{0.0f, 1.7f, -7.0f};
