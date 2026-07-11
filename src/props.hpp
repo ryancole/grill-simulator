@@ -108,20 +108,20 @@ private:
     // Recomputes `resting` from the item's rigid state, so drawing and picking see
     // where the body currently is.
     static void RebuildTransform(Item& item);
-    // Steps every awake item forward by dt: gravity, integration, collision
-    // against `colliders`. A no-op in Phase 1, where everything spawns asleep.
+    // Advances the simulation over `dt` in fixed substeps, banking the remainder.
     void Simulate(float dt, std::span<const Aabb> colliders);
+    // One fixed substep of length h across every awake, uncarried body at once:
+    // wake sleepers a moving body has bumped, integrate, gather every contact
+    // (each body against the static `colliders` and against every other body),
+    // resolve them together with two-body impulses, correct penetration, and put
+    // settled bodies back to sleep.
+    void Step(float h, std::span<const Aabb> colliders);
     // The item the player is looking at within reach, or -1. Nearest to the
     // centre of the gaze wins.
     int PickTarget(DirectX::FXMVECTOR eye, DirectX::FXMVECTOR forward) const;
     // Releases the carried item into the simulation: it detaches at the exact
     // pose it was held, takes a gentle toss along the gaze, and falls from there.
     void Drop(DirectX::FXMMATRIX camera_to_world);
-    // Advances one awake body by a single fixed substep of length h: gravity and
-    // integration, then impulse resolution of its contacts with the static world
-    // `colliders`. Returns the number of contacts, so the caller knows whether the
-    // body is resting on something (and may be put to sleep).
-    int StepBody(Item& item, float h, std::span<const Aabb> colliders) const;
 
     std::vector<Item> items_;
     int carried_ = -1; // index into items_, or -1
