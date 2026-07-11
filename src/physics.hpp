@@ -1,5 +1,9 @@
 #pragma once
 
+#include "collision.hpp"
+
+#include <span>
+
 // PhysX owns the simulation from here on. This class brings the SDK up, holds
 // the one scene every rigid body lives in, and steps it on a fixed clock. The
 // hand-rolled sequential-impulse solver in props.cpp and the AABB character
@@ -40,6 +44,12 @@ public:
     // used (see Props::Simulate), which is what keeps the contact solve stable
     // however long a rendered frame took.
     void Step(float dt);
+
+    // Builds the immovable world: one static box actor per collider, sized and
+    // placed to match. Called once after the scene loads; these actors never
+    // move and live for the rest of the session -- they are what a dropped prop
+    // falls onto and what the player's controller slides along.
+    void AddStaticWorld(std::span<const Aabb> colliders);
 
     // The scene every actor is added to, the factory that creates them, the
     // shared surface material, and the manager that will own the player's

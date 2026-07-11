@@ -35,7 +35,7 @@ struct Game {
     Physics physics;
     Camera camera;
     Viewmodel viewmodel{scene.CubeModel()};
-    Props props{scene};
+    Props props{scene, physics};
     Input input;
     Audio audio;
 };
@@ -158,6 +158,9 @@ int Run(HINSTANCE instance, int show_command) {
 
     RegisterRawMouse(hwnd);
     game.renderer.Initialize(hwnd, kDefaultWidth, kDefaultHeight, game.scene);
+    // The yard's static colliders become immovable PhysX actors, once, before the
+    // first step. Dropped props fall onto these.
+    game.physics.AddStaticWorld(game.scene.Colliders());
     ShowWindow(hwnd, show_command);
 
     LARGE_INTEGER frequency{};
@@ -199,7 +202,7 @@ int Run(HINSTANCE instance, int show_command) {
         // once and shared.
         const XMMATRIX camera_to_world = game.camera.CameraToWorldMatrix();
         game.audio.Update(camera_to_world, dt);
-        game.props.Update(camera_to_world, game.input, game.scene.Colliders(), dt);
+        game.props.Update(camera_to_world, game.input);
 
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());

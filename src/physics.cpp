@@ -2,6 +2,8 @@
 
 #include <PxPhysicsAPI.h>
 
+#include <algorithm>
+
 using namespace physx;
 
 namespace {
@@ -76,6 +78,21 @@ Physics::~Physics() {
     }
     delete error_callback_;
     delete allocator_;
+}
+
+void Physics::AddStaticWorld(std::span<const Aabb> colliders) {
+    for (const Aabb& box : colliders) {
+        const PxVec3 center(0.5f * (box.min.x + box.max.x), 0.5f * (box.min.y + box.max.y),
+                            0.5f * (box.min.z + box.max.z));
+        // A collider can be arbitrarily thin (the ground slab, a shelf); PhysX
+        // rejects a non-positive box extent, so floor each half to a hair.
+        const PxVec3 half(std::max(0.5f * (box.max.x - box.min.x), 1e-3f),
+                          std::max(0.5f * (box.max.y - box.min.y), 1e-3f),
+                          std::max(0.5f * (box.max.z - box.min.z), 1e-3f));
+        PxRigidStatic* actor = physics_->createRigidStatic(PxTransform(center));
+        PxRigidActorExt::createExclusiveShape(*actor, PxBoxGeometry(half), *material_);
+        scene_->addActor(*actor);
+    }
 }
 
 void Physics::Step(float dt) {
