@@ -67,6 +67,14 @@ SamplerComparisonState g_shadow_sampler : register(s1);
 static const float3 kSunColor = float3(1.0f, 0.96f, 0.88f);
 static const float3 kSkyColor = float3(0.52f, 0.62f, 0.76f);
 static const float3 kGroundBounce = float3(0.20f, 0.18f, 0.16f);
+
+// The analytic sky the specular IBL reflects: a deeper blue overhead fading to a
+// pale band at the horizon, over the same dull bounce below. The two sky tones
+// straddle kSkyColor so the reflection stays of a piece with the flat sky the
+// frame is cleared to and the fog fades into. All display-space, linearised where
+// they are used.
+static const float3 kSkyZenith = float3(0.40f, 0.54f, 0.76f);
+static const float3 kSkyHorizon = float3(0.70f, 0.76f, 0.82f);
 // Without a shadow term the only thing keeping unlit faces off pure black is
 // the ambient, so it carries more weight here than it would with real bounce.
 static const float kAmbientStrength = 0.65f;
@@ -206,6 +214,42 @@ float3 FresnelSchlick(float v_dot_h, float3 f0) {
     return f0 + (1.0f - f0) * pow(saturate(1.0f - v_dot_h), 5.0f);
 }
 
+// The radiance of the analytic sky along a world-space direction, in linear light.
+// A horizon band brightens toward it and darkens into the ground below. This is
+// the sky only -- the sun is left out, because the direct term already accounts
+// for it and its GGX lobe already broadens with roughness, so adding a sun disc
+// here would count it twice.
+float3 SampleSky(float3 dir) {
+    const float3 zenith = SrgbToLinear(kSkyZenith);
+    const float3 horizon = SrgbToLinear(kSkyHorizon);
+    const float3 ground = SrgbToLinear(kGroundBounce);
+    // Above the horizon fade horizon->zenith; below, fall off to the ground colour
+    // over a short span so the reflection has a floor rather than a hard seam.
+    const float3 sky = lerp(horizon, zenith, saturate(dir.y));
+    return lerp(sky, ground, saturate(-dir.y * 4.0f));
+}
+
+// The prefiltered environment: a rough surface reflects a blurred sky, which the
+// real split-sum approximation bakes into mip levels of a cubemap. With an
+// analytic sky there is nothing to prebake, so the blur is faked by fading the
+// sharp reflection toward the sky's rough average as roughness climbs -- cheap,
+// and on a smooth gradient close to what a convolution would give.
+float3 PrefilteredSky(float3 r, float roughness) {
+    const float3 average = lerp(SrgbToLinear(kSkyHorizon), SrgbToLinear(kSkyZenith), 0.5f);
+    return lerp(SampleSky(r), average, roughness);
+}
+
+// The environment half of the split-sum: the integral of the specular BRDF over
+// the hemisphere, as a scale and bias on f0. Karis's analytic fit, so no
+// precomputed BRDF lookup texture is needed.
+float2 EnvBRDFApprox(float roughness, float n_dot_v) {
+    const float4 c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
+    const float4 c1 = float4(1.0f, 0.0425f, 1.04f, -0.04f);
+    const float4 r = roughness * c0 + c1;
+    const float a004 = min(r.x * r.x, exp2(-9.28f * n_dot_v)) * r.x + r.y;
+    return float2(-1.04f, 1.04f) * a004 + r.zw;
+}
+
 float4 PSMain(PSInput input) : SV_TARGET {
     // Rebuild the tangent frame and perturb the geometric normal by the map. The
     // tangent is re-orthogonalized against the interpolated normal (Gram-Schmidt),
@@ -266,14 +310,25 @@ float4 PSMain(PSInput input) : SV_TARGET {
     const float3 sun =
         (diffuse + specular) * n_dot_l * SrgbToLinear(kSunColor) * kSunIntensity * shadow;
 
-    // A hemisphere term stands in for the sky's irradiance: sky above, dirt below.
-    // It lights the diffuse, and a crude ambient specular (just f0 times the same
-    // irradiance) keeps metals -- which have no diffuse -- from going black in the
-    // shade until real image-based lighting lands.
+    // Image-based ambient, split into its two halves. The diffuse half is a
+    // hemisphere term standing in for the sky's cosine-convolved irradiance: sky
+    // above, dirt below, lighting the diffuse albedo.
     const float3 irradiance =
         lerp(SrgbToLinear(kGroundBounce), SrgbToLinear(kSkyColor),
              saturate(normal.y * 0.5f + 0.5f)) * kAmbientStrength;
-    const float3 ambient = irradiance * (diffuse_color + f0);
+    const float3 ambient_diffuse = irradiance * diffuse_color;
+
+    // The specular half reflects the sky itself: sampled along the reflection
+    // vector so it swings with the view, blurred by roughness, and weighted by the
+    // split-sum environment BRDF -- which brightens the rim at grazing angles and
+    // tints the reflection by f0. This is what makes a metal read as metal even
+    // where the sun is not glinting off it.
+    const float3 reflection = reflect(-view, normal);
+    const float2 env_brdf = EnvBRDFApprox(roughness, n_dot_v);
+    const float3 ambient_specular =
+        PrefilteredSky(reflection, roughness) * (f0 * env_brdf.x + env_brdf.y);
+
+    const float3 ambient = ambient_diffuse + ambient_specular;
 
     // A dim fill from behind the sun, diffuse only, so faces turned away read brown
     // rather than as holes.
