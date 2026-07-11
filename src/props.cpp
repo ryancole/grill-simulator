@@ -282,30 +282,56 @@ int Props::StepBody(Item& item, float h, std::span<const Aabb> colliders) const 
                 p.z <= box.min.z || p.z >= box.max.z) {
                 continue;
             }
-            // Leave through the nearest face; that face's outward normal is the
-            // push direction and its distance is the penetration depth.
-            const float px = std::min(box.max.x - p.x, p.x - box.min.x);
-            const float py = std::min(box.max.y - p.y, p.y - box.min.y);
-            const float pz = std::min(box.max.z - p.z, p.z - box.min.z);
+            // Pick the face to push the corner out of, one axis at a time, then
+            // take the shallowest across the three axes. On each axis the corner
+            // is sent back out the face it came IN through -- the one it is moving
+            // away from into the box -- not the nearer face. This is what keeps a
+            // thin patty that has sunk into the thick patio slab from being shoved
+            // out the slab's *bottom*: it fell in through the top, so it is lifted
+            // back out the top, however deep it got. Resolving per axis (rather
+            // than over all six faces at once) means a prop sliding flat along the
+            // floor can never be flung out a far side wall it happens to be moving
+            // toward -- only the near, shallow floor face wins.
+            const XMVECTOR r = XMVectorSubtract(point, position);
+            XMFLOAT3 cv;
+            XMStoreFloat3(&cv, XMVectorAdd(velocity, XMVector3Cross(omega, r)));
 
-            XMVECTOR normal;
-            float depth;
-            if (px <= py && px <= pz) {
-                depth = px;
-                normal = XMVectorSet((box.max.x - p.x) < (p.x - box.min.x) ? 1.0f : -1.0f, 0.0f,
-                                     0.0f, 0.0f);
-            } else if (py <= pz) {
-                depth = py;
-                normal = XMVectorSet(0.0f, (box.max.y - p.y) < (p.y - box.min.y) ? 1.0f : -1.0f,
-                                     0.0f, 0.0f);
-            } else {
-                depth = pz;
-                normal = XMVectorSet(0.0f, 0.0f,
-                                     (box.max.z - p.z) < (p.z - box.min.z) ? 1.0f : -1.0f, 0.0f);
+            const float box_min[3] = {box.min.x, box.min.y, box.min.z};
+            const float box_max[3] = {box.max.x, box.max.y, box.max.z};
+            const float pc[3] = {p.x, p.y, p.z};
+            const float vc[3] = {cv.x, cv.y, cv.z};
+
+            int best_axis = -1;
+            float best_depth = FLT_MAX;
+            float best_sign = 0.0f;
+            for (int a = 0; a < 3; ++a) {
+                float sign;
+                float depth;
+                if (vc[a] < -1e-4f) { // moving toward -a: entered through the +a face
+                    sign = 1.0f;
+                    depth = box_max[a] - pc[a];
+                } else if (vc[a] > 1e-4f) { // moving toward +a: entered through -a
+                    sign = -1.0f;
+                    depth = pc[a] - box_min[a];
+                } else if (box_max[a] - pc[a] < pc[a] - box_min[a]) { // still: nearer face
+                    sign = 1.0f;
+                    depth = box_max[a] - pc[a];
+                } else {
+                    sign = -1.0f;
+                    depth = pc[a] - box_min[a];
+                }
+                if (depth < best_depth) {
+                    best_depth = depth;
+                    best_axis = a;
+                    best_sign = sign;
+                }
             }
 
-            if (contact_count < 64) {
-                contacts[contact_count++] = {normal, XMVectorSubtract(point, position), depth};
+            if (best_axis >= 0 && contact_count < 64) {
+                const XMVECTOR normal =
+                    XMVectorSet(best_axis == 0 ? best_sign : 0.0f, best_axis == 1 ? best_sign : 0.0f,
+                                best_axis == 2 ? best_sign : 0.0f, 0.0f);
+                contacts[contact_count++] = {normal, r, best_depth};
             }
         }
     }
