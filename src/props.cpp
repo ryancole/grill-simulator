@@ -6,7 +6,6 @@
 #include <PxPhysicsAPI.h>
 
 #include <cfloat>
-#include <cmath>
 
 using namespace DirectX;
 using namespace physx;
