@@ -72,6 +72,8 @@ add_hlsl_shader(grill SOURCE shaders/text.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPU
 add_hlsl_shader(grill SOURCE shaders/text.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT text.ps.cso)
 add_hlsl_shader(grill SOURCE shaders/outline.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT outline.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/outline.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT outline.ps.cso)
+# Depth only, so the shadow pass has a vertex shader and no pixel shader.
+add_hlsl_shader(grill SOURCE shaders/shadow.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT shadow.vs.cso)
 
 stage_assets(grill DIRECTORY assets/models
   FILES grill.glb tree.glb table.glb crate.glb cooler.glb tongs.glb patty.glb steak.glb)
