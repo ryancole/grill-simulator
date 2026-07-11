@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+  "name": "grill-simulator",
+  "version": "0.1.0",
+  "description": "A 3D grill game on raw Direct3D 12.",
+  "builtin-baseline": "03e366fb91e38b9432ebd5f8cc79f7c8f55e96ab",
+  "dependencies": [
+    "physx"
+  ],
+  "overrides": [
+    {
+      "name": "physx",
+      "version": "5.5.0"
+    }
+  ]
+}

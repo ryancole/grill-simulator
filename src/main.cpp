@@ -2,6 +2,7 @@
 #include "camera.hpp"
 #include "dx_common.hpp"
 #include "input.hpp"
+#include "physics.hpp"
 #include "props.hpp"
 #include "renderer.hpp"
 #include "scene.hpp"
@@ -29,6 +30,9 @@ constexpr float kMaxFrameSeconds = 0.1f;
 struct Game {
     Renderer renderer;
     Scene scene;
+    // Physics comes up before anything that will register bodies with it (the
+    // props and, later, the player controller), and tears down after them.
+    Physics physics;
     Camera camera;
     Viewmodel viewmodel{scene.CubeModel()};
     Props props{scene};
@@ -178,6 +182,11 @@ int Run(HINSTANCE instance, int show_command) {
                                         static_cast<double>(frequency.QuadPart)),
                      kMaxFrameSeconds);
         previous = now;
+
+        // Advance the physics scene on its fixed clock. Nothing is registered
+        // with it yet -- the props and player move onto it next -- so this is a
+        // no-op for now, but it fixes the step order: simulate, then read poses.
+        game.physics.Step(dt);
 
         float mouse_dx = 0.0f;
         float mouse_dy = 0.0f;
