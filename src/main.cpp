@@ -1,3 +1,4 @@
+#include "audio.hpp"
 #include "camera.hpp"
 #include "dx_common.hpp"
 #include "input.hpp"
@@ -30,6 +31,7 @@ struct Game {
     Camera camera;
     Viewmodel viewmodel{scene.CubeModel()};
     Input input;
+    Audio audio;
 };
 
 // WIC decodes the textures inside a glTF, and WIC is COM. Uninitialising is left
@@ -180,10 +182,14 @@ int Run(HINSTANCE instance, int show_command) {
         game.camera.Look(mouse_dx, mouse_dy);
         game.camera.Update(game.input, game.scene.Colliders(), dt);
 
+        // The camera-to-world matrix is both the viewmodel's pose and the
+        // listener's ear and facing, so it is built once and shared.
+        const XMMATRIX camera_to_world = game.camera.CameraToWorldMatrix();
+        game.audio.Update(camera_to_world, dt);
+
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
-        game.renderer.Render(game.scene, game.viewmodel.Pose(game.camera.CameraToWorldMatrix()),
-                             view_projection);
+        game.renderer.Render(game.scene, game.viewmodel.Pose(camera_to_world), view_projection);
     }
 
     game.renderer.Shutdown();
