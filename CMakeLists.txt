@@ -26,10 +26,12 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(AgilitySDK)
 include(Shaders)
 include(FastGltf)
+include(DirectXTK12Audio)
 include(Assets)
 
 add_executable(grill WIN32
   src/main.cpp
+  src/audio.cpp
   src/camera.cpp
   src/collision.cpp
   src/image.cpp
@@ -43,7 +45,7 @@ add_executable(grill WIN32
 target_include_directories(grill PRIVATE src)
 # windowscodecs is WIC, which decodes the PNG and JPEG images glTF embeds. It
 # ships with Windows, so it costs the project no third-party dependency.
-target_link_libraries(grill PRIVATE Agility::SDK fastgltf::fastgltf windowscodecs)
+target_link_libraries(grill PRIVATE Agility::SDK fastgltf::fastgltf DirectXTK12::Audio windowscodecs)
 
 target_compile_definitions(grill PRIVATE
   UNICODE _UNICODE
@@ -66,3 +68,6 @@ add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMain PROFILE ps_6_6 OUTP
 
 stage_assets(grill DIRECTORY assets/models
   FILES grill.glb tree.glb table.glb crate.glb cooler.glb)
+
+stage_assets(grill DIRECTORY assets/audio
+  FILES sizzle.wav)
