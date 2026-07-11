@@ -41,7 +41,7 @@ public:
 
     const std::vector<Model>& Models() const { return models_; }
     const std::vector<MeshInstance>& Instances() const { return instances_; }
-    const std::vector<Aabb>& Colliders() const { return colliders_; }
+    const std::vector<OrientedBox>& Colliders() const { return colliders_; }
 
     // The shared unit cube. The viewmodel builds its arms out of it too, and
     // needs to name it in the instances it hands the renderer.
@@ -67,7 +67,7 @@ private:
 
     std::vector<Model> models_;
     std::vector<MeshInstance> instances_;
-    std::vector<Aabb> colliders_;
+    std::vector<OrientedBox> colliders_;
 
     std::uint32_t cube_ = 0;
     PropModels prop_models_{};

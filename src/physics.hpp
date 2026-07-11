@@ -42,11 +42,11 @@ public:
     // stable however long a rendered frame took.
     void Step(float dt);
 
-    // Builds the immovable world: one static box actor per collider, sized and
-    // placed to match. Called once after the scene loads; these actors never
-    // move and live for the rest of the session -- they are what a dropped prop
-    // falls onto and what the player's controller slides along.
-    void AddStaticWorld(std::span<const Aabb> colliders);
+    // Builds the immovable world: one static box actor per collider, sized,
+    // placed and turned to match. Called once after the scene loads; these actors
+    // never move and live for the rest of the session -- they are what a dropped
+    // prop falls onto and what the player's controller slides along.
+    void AddStaticWorld(std::span<const OrientedBox> colliders);
 
     // The scene every actor is added to, the factory that creates them, the
     // shared surface material, and the manager that will own the player's

@@ -105,8 +105,9 @@ private:
     // Recomputes `resting` from the body's current global pose, so drawing and
     // picking see where the body actually is.
     static void RebuildTransform(Item& item);
-    // The item the player is looking at within reach, or -1. Nearest to the
-    // centre of the gaze wins.
+    // The item the player is looking at within reach, or -1. A sphere swept down
+    // the gaze picks the nearest prop it meets; the query is filtered to prop
+    // bodies, so the static world and the player's own capsule are ignored.
     int PickTarget(DirectX::FXMVECTOR eye, DirectX::FXMVECTOR forward) const;
     // Releases the carried item back into the simulation: it re-enters at the
     // exact pose it was held, takes a gentle toss along the gaze, and falls from

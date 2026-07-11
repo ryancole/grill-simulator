@@ -16,11 +16,12 @@ namespace {
 // white -- exactly as the yard's glTF furniture does.
 constexpr XMFLOAT3 kWhite{1.0f, 1.0f, 1.0f};
 
-// How far the player can reach to grab, and how far off the centre of the gaze a
-// prop may sit and still be grabbed. 0.80 is about 37 degrees, forgiving enough
-// that a small object on the ground does not have to be pixel-centred.
+// How far the player can reach to grab, and the radius of the sphere swept down
+// the gaze to find what they are aiming at. The sphere is a forgiving aim -- a
+// small object on the ground need not be pixel-centred -- standing in for the old
+// alignment cone.
 constexpr float kReach = 2.4f;
-constexpr float kMinAlignment = 0.80f;
+constexpr float kPickRadius = 0.2f;
 
 // The interact key. Left-click is already the mouse-look toggle, so grabbing
 // gets its own key, the shooter convention.
@@ -70,6 +71,23 @@ PxTransform ToPxTransform(FXMMATRIX m) {
     XMStoreFloat4(&q, XMQuaternionRotationMatrix(m));
     return PxTransform(PxVec3(p.x, p.y, p.z), PxQuat(q.x, q.y, q.z, q.w));
 }
+
+// A scene-query filter that keeps only the props. Every prop body is tagged with
+// its item index in userData (see Add); the yard's static actors and the player's
+// own capsule -- which the gaze sweep starts *inside*, so it would otherwise be
+// the nearest hit every frame -- leave userData null and are rejected here. The
+// sweep then reports the first prop along the gaze rather than the body the eye
+// sits in.
+struct PropQueryFilter : PxQueryFilterCallback {
+    PxQueryHitType::Enum preFilter(const PxFilterData&, const PxShape*, const PxRigidActor* actor,
+                                   PxHitFlags&) override {
+        return actor->userData != nullptr ? PxQueryHitType::eBLOCK : PxQueryHitType::eNONE;
+    }
+    PxQueryHitType::Enum postFilter(const PxFilterData&, const PxQueryHit&, const PxShape*,
+                                    const PxRigidActor*) override {
+        return PxQueryHitType::eBLOCK; // Never invoked: ePOSTFILTER is not requested.
+    }
+};
 
 } // namespace
 
@@ -153,6 +171,11 @@ void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XM
     CreateBody(item, pose);
     RebuildTransform(item);
 
+    // Tag the body with this item's index (offset by one, so a null userData --
+    // every static-world actor -- reads as "not a prop"). A gaze sweep hit carries
+    // the actor back, and this is how PickTarget turns it into an item.
+    item.body->userData = reinterpret_cast<void*>(static_cast<std::uintptr_t>(items_.size() + 1));
+
     items_.push_back(std::move(item));
 }
 
@@ -228,27 +251,31 @@ std::string Props::PromptText() const {
 }
 
 int Props::PickTarget(FXMVECTOR eye, FXMVECTOR forward) const {
-    int best = -1;
-    float best_alignment = kMinAlignment;
-    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-        // The object's origin sits on its underside; lift the aim point a little
-        // so a thing lying on the ground is not looked straight past.
-        const XMVECTOR origin = XMLoadFloat4x4(&items_[i].resting).r[3];
-        const XMVECTOR target = XMVectorAdd(origin, XMVectorSet(0.0f, 0.06f, 0.0f, 0.0f));
-        const XMVECTOR to_target = XMVectorSubtract(target, eye);
+    XMFLOAT3 origin;
+    XMFLOAT3 direction;
+    XMStoreFloat3(&origin, eye);
+    XMStoreFloat3(&direction, forward);
 
-        const float distance = XMVectorGetX(XMVector3Length(to_target));
-        if (distance > kReach || distance < 1e-3f) {
-            continue;
-        }
-        const float alignment =
-            XMVectorGetX(XMVector3Dot(XMVector3Normalize(to_target), forward));
-        if (alignment > best_alignment) {
-            best_alignment = alignment;
-            best = i;
-        }
+    // Sweep a small sphere down the gaze and take the nearest prop it meets. The
+    // filter restricts the query to prop bodies, so neither the yard's static
+    // geometry nor the player's own capsule -- which the sweep starts inside --
+    // can shadow the pick. The carried prop, if any, is eDISABLE_SIMULATION and so
+    // is out of the query too.
+    PropQueryFilter filter;
+    const PxQueryFilterData filter_data(PxQueryFlag::eDYNAMIC | PxQueryFlag::ePREFILTER);
+    PxSweepBuffer hit;
+    const bool blocked = physics_->Scene().sweep(
+        PxSphereGeometry(kPickRadius), PxTransform(PxVec3(origin.x, origin.y, origin.z)),
+        PxVec3(direction.x, direction.y, direction.z), kReach, hit, PxHitFlag::eDEFAULT,
+        filter_data, &filter);
+    if (!blocked) {
+        return -1;
     }
-    return best;
+
+    // Only prop bodies pass the filter, and each carries its item index (offset by
+    // one) in userData -- so the nearest hit decodes straight back to an item.
+    const std::uintptr_t tag = reinterpret_cast<std::uintptr_t>(hit.block.actor->userData);
+    return static_cast<int>(tag) - 1;
 }
 
 void Props::Drop(FXMMATRIX camera_to_world) {

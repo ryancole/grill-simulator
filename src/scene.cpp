@@ -73,10 +73,9 @@ Scene::Scene() {
     // trunk, and the two do not line up with each other.
     //
     // Each canopy starts above head height, so the collider pass skips it and the
-    // player can walk underneath. Turning a tree does turn its trunk, whose
-    // collider is the world bound of a box no longer axis aligned -- a few
-    // centimetres wider than the trunk really is. Nobody has ever noticed a tree
-    // being slightly too solid.
+    // player can walk underneath. Turning a tree turns its trunk's collider with
+    // it -- the static actor is an oriented box now, so the trunk is as solid as
+    // it looks rather than a few centimetres wider at the corners.
     AddInstance(tree,
                 XMMatrixRotationY(XMConvertToRadians(25.0f)) *
                     XMMatrixTranslation(-8.0f, 0.0f, 7.5f),
@@ -114,7 +113,7 @@ void Scene::AddInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
             continue;
         }
         const XMMATRIX to_world = XMLoadFloat4x4(&primitive.transform) * transform;
-        colliders_.push_back(TransformBounds(primitive.bounds, to_world));
+        colliders_.push_back(TransformBox(primitive.bounds, to_world));
     }
 }
 
