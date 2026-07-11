@@ -8,10 +8,12 @@
       "description": "clang-cl and lld-link against the MSVC STL and Windows SDK. Debug and Release are both configured; pick one at build time.",
       "generator": "Ninja Multi-Config",
       "binaryDir": "${sourceDir}/build",
-      "toolchainFile": "${sourceDir}/cmake/toolchains/clang-cl-x64.cmake",
+      "toolchainFile": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
         "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/clang-cl-x64.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md"
       }
     }
   ],

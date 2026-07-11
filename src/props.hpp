@@ -10,30 +10,35 @@
 #include <string>
 #include <vector>
 
+namespace physx {
+class PxRigidDynamic;
+}
 class Input;
+class Physics;
 
 // The loose objects in the yard the player can pick up, carry and set back down:
 // a pair of tongs, a steak, a couple of patties. Each is an instance of a prop
-// model the Scene loaded; Props owns their transforms and the one-at-a-time
-// "held" state, so the yard itself stays static.
+// model the Scene loaded, backed by a PhysX rigid body. Props owns the bodies
+// and the one-at-a-time "held" state; the yard itself stays static.
 //
-// There is no collider on any of them. A dropped steak is something to walk
-// through, not to trip over, and a carried one must never wedge the player into
-// a wall.
+// The falling, tumbling and stacking are PhysX's job now -- Props just seeds each
+// body, drives the carried one, and reads poses back into the draw list. The
+// hand-rolled impulse solver that used to live here is gone.
 class Props {
 public:
     // Takes the whole scene, not just the model ids, because each prop's box
     // collider is derived from its model's vertex bounds (Primitive::bounds), and
-    // those live on the Models the scene loaded.
-    explicit Props(const Scene& scene);
+    // those live on the Models the scene loaded. `physics` is where the bodies
+    // are created and stepped.
+    Props(const Scene& scene, Physics& physics);
 
-    // Advances pick-up, drop and the falling of loose objects for one frame. `dt`
-    // is the frame time the rigid-body step integrates over. `camera_to_world`
-    // carries the eye's position in its fourth row and its gaze in the third, so
-    // both the reach test and a carried object's pose come from it. `colliders`
-    // is what a dropped object falls onto and comes to rest on.
-    void Update(const DirectX::XMMATRIX& camera_to_world, const Input& input,
-                std::span<const Aabb> colliders, float dt);
+    // Advances pick-up and drop for one frame and rebuilds the draw lists from the
+    // current body poses. The simulation itself is stepped by Physics in the game
+    // loop before this runs, so the poses read here are already current.
+    // `camera_to_world` carries the eye's position in its fourth row and its gaze
+    // in the third, so both the reach test and a carried object's pose come from
+    // it.
+    void Update(const DirectX::XMMATRIX& camera_to_world, const Input& input);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -55,14 +60,18 @@ public:
 
 private:
     // One loose object, modelled as a single oriented box (an approximation --
-    // the meshes are not perfectly boxy, but these things are small). The rigid
-    // state is the box centred on its centre of mass; the render transform,
-    // `resting`, is rebuilt from it every frame so the draw list, PickTarget and
-    // the highlight all read the same pose.
+    // the meshes are not perfectly boxy, but these things are small).
+    //
+    // The PhysX body's frame is the model's own frame: its origin sits on the
+    // object's underside, and the box shape is offset up to `com_offset`, so the
+    // body's global pose is exactly the model-to-world transform the renderer
+    // draws under. `resting` is that pose, cached each frame for the draw list,
+    // PickTarget and the highlight to share.
     //
     // `held_local` is the pose in eye space while carried, lifted into the world
-    // every frame by the camera's basis -- carrying is kinematic, so the solver
-    // leaves a carried item alone.
+    // every frame by the camera's basis. A carried body is taken out of the
+    // simulation (eDISABLE_SIMULATION) so it neither falls nor shoves anything
+    // while it hangs in the hand.
     struct Item {
         std::uint32_t model;
         std::string name; // As it reads in the pick-up prompt.
@@ -74,27 +83,11 @@ private:
         DirectX::XMFLOAT3 half_extents;
         DirectX::XMFLOAT3 com_offset;
 
-        // Rigid-body state. `position` is the centre of mass in world space;
-        // `orientation` is the box's rotation as a unit quaternion.
-        DirectX::XMFLOAT3 position;
-        DirectX::XMFLOAT4 orientation;
-        DirectX::XMFLOAT3 linear_velocity{0.0f, 0.0f, 0.0f};
-        DirectX::XMFLOAT3 angular_velocity{0.0f, 0.0f, 0.0f};
+        // The rigid body in the PhysX scene. Owned by the scene, not by Item.
+        physx::PxRigidDynamic* body;
 
-        // Mass and the diagonal of the inverse inertia tensor, both in body space.
-        // Precomputed from the box dimensions; the solver in Phase 2 reads them.
-        float inv_mass{1.0f};
-        DirectX::XMFLOAT3 inv_inertia{0.0f, 0.0f, 0.0f};
-
-        // A settled object is skipped by the solver until something disturbs it,
-        // which is both cheaper and what keeps a resting box from jittering.
-        bool asleep{true};
-        // Seconds this body has been slow and in contact. Once it passes the
-        // sleep threshold the body is put to sleep; any motion resets it.
-        float rest_timer{0.0f};
-
-        // Rebuilt from position/orientation/com_offset each frame: the model-to-
-        // world transform the renderer draws this item under.
+        // Rebuilt from the body's pose each frame: the model-to-world transform
+        // the renderer draws this item under.
         DirectX::XMFLOAT4X4 resting;
 
         DirectX::XMFLOAT4X4 held_local;
@@ -102,32 +95,27 @@ private:
 
     void Add(std::uint32_t model_id, const Model& model, std::string name,
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local);
-    // Fills an item's box shape (half_extents, com_offset) and mass properties
-    // (inv_mass, inv_inertia) from the union of its model's primitive bounds.
+    // Fills an item's box shape (half_extents, com_offset) from the union of its
+    // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);
-    // Recomputes `resting` from the item's rigid state, so drawing and picking see
-    // where the body currently is.
+    // Creates the PhysX body for `item` at `initial_pose` (a model-to-world
+    // transform), attaches its box shape offset to com_offset, and lets PhysX
+    // compute the mass properties from the shape.
+    void CreateBody(Item& item, DirectX::FXMMATRIX initial_pose);
+    // Recomputes `resting` from the body's current global pose, so drawing and
+    // picking see where the body actually is.
     static void RebuildTransform(Item& item);
-    // Advances the simulation over `dt` in fixed substeps, banking the remainder.
-    void Simulate(float dt, std::span<const Aabb> colliders);
-    // One fixed substep of length h across every awake, uncarried body at once:
-    // wake sleepers a moving body has bumped, integrate, gather every contact
-    // (each body against the static `colliders` and against every other body),
-    // resolve them together with two-body impulses, correct penetration, and put
-    // settled bodies back to sleep.
-    void Step(float h, std::span<const Aabb> colliders);
     // The item the player is looking at within reach, or -1. Nearest to the
     // centre of the gaze wins.
     int PickTarget(DirectX::FXMVECTOR eye, DirectX::FXMVECTOR forward) const;
-    // Releases the carried item into the simulation: it detaches at the exact
-    // pose it was held, takes a gentle toss along the gaze, and falls from there.
+    // Releases the carried item back into the simulation: it re-enters at the
+    // exact pose it was held, takes a gentle toss along the gaze, and falls from
+    // there.
     void Drop(DirectX::FXMMATRIX camera_to_world);
 
+    Physics* physics_;
     std::vector<Item> items_;
     int carried_ = -1; // index into items_, or -1
-    // Leftover real time not yet consumed by a fixed physics substep. The solver
-    // runs on a fixed step for stability and banks the remainder here.
-    float physics_accumulator_ = 0.0f;
     int hovered_ = -1; // item in reach and looked at this frame, or -1
     bool interact_was_down_ = false;
 

@@ -27,6 +27,7 @@ include(AgilitySDK)
 include(Shaders)
 include(FastGltf)
 include(DirectXTK12Audio)
+include(PhysX)
 include(Fonts)
 include(Assets)
 
@@ -39,6 +40,7 @@ add_executable(grill WIN32
   src/input.cpp
   src/model.cpp
   src/scene.cpp
+  src/physics.cpp
   src/props.cpp
   src/viewmodel.cpp
   src/font.cpp
@@ -48,7 +50,7 @@ add_executable(grill WIN32
 target_include_directories(grill PRIVATE src)
 # windowscodecs is WIC, which decodes the PNG and JPEG images glTF embeds. It
 # ships with Windows, so it costs the project no third-party dependency.
-target_link_libraries(grill PRIVATE Agility::SDK fastgltf::fastgltf DirectXTK12::Audio windowscodecs)
+target_link_libraries(grill PRIVATE Agility::SDK fastgltf::fastgltf DirectXTK12::Audio PhysX::PhysX windowscodecs)
 
 target_compile_definitions(grill PRIVATE
   UNICODE _UNICODE

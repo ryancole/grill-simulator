@@ -2,6 +2,7 @@
 #include "camera.hpp"
 #include "dx_common.hpp"
 #include "input.hpp"
+#include "physics.hpp"
 #include "props.hpp"
 #include "renderer.hpp"
 #include "scene.hpp"
@@ -29,9 +30,12 @@ constexpr float kMaxFrameSeconds = 0.1f;
 struct Game {
     Renderer renderer;
     Scene scene;
-    Camera camera;
+    // Physics comes up before anything that will register bodies with it (the
+    // props and, later, the player controller), and tears down after them.
+    Physics physics;
+    Camera camera{physics};
     Viewmodel viewmodel{scene.CubeModel()};
-    Props props{scene};
+    Props props{scene, physics};
     Input input;
     Audio audio;
 };
@@ -154,6 +158,9 @@ int Run(HINSTANCE instance, int show_command) {
 
     RegisterRawMouse(hwnd);
     game.renderer.Initialize(hwnd, kDefaultWidth, kDefaultHeight, game.scene);
+    // The yard's static colliders become immovable PhysX actors, once, before the
+    // first step. Dropped props fall onto these.
+    game.physics.AddStaticWorld(game.scene.Colliders());
     ShowWindow(hwnd, show_command);
 
     LARGE_INTEGER frequency{};
@@ -179,18 +186,23 @@ int Run(HINSTANCE instance, int show_command) {
                      kMaxFrameSeconds);
         previous = now;
 
+        // Advance the physics scene on its fixed clock. Nothing is registered
+        // with it yet -- the props and player move onto it next -- so this is a
+        // no-op for now, but it fixes the step order: simulate, then read poses.
+        game.physics.Step(dt);
+
         float mouse_dx = 0.0f;
         float mouse_dy = 0.0f;
         game.input.ConsumeMouseDelta(mouse_dx, mouse_dy);
         game.camera.Look(mouse_dx, mouse_dy);
-        game.camera.Update(game.input, game.scene.Colliders(), dt);
+        game.camera.Update(game.input, dt);
 
         // The camera-to-world matrix is the viewmodel's pose, the listener's ear
         // and facing, and the reach a grab is measured along, so it is built
         // once and shared.
         const XMMATRIX camera_to_world = game.camera.CameraToWorldMatrix();
         game.audio.Update(camera_to_world, dt);
-        game.props.Update(camera_to_world, game.input, game.scene.Colliders(), dt);
+        game.props.Update(camera_to_world, game.input);
 
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
