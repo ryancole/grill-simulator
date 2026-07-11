@@ -66,7 +66,8 @@ Audio::Audio() {
     emitter_.CurveDistanceScaler = kAudibleRadius;
     emitter_.SetPosition(kGrillEmitter);
 
-    sizzle_instance_->Play(true); // Loop for as long as the grill is lit -- which is always, for now.
+    // Playback deliberately does not start here -- see started_ in the header and
+    // the first-frame handling in Update.
 }
 
 void Audio::Update(FXMMATRIX camera_to_world, float dt) {
@@ -87,6 +88,15 @@ void Audio::Update(FXMMATRIX camera_to_world, float dt) {
     // The world is left-handed (+X right, +Y up, +Z forward), so X3DAudio must be
     // told not to assume right-handed coordinates or the stereo image is mirrored.
     sizzle_instance_->Apply3D(listener_, emitter_, /*rhcoords=*/false);
+
+    // Begin the loop only now that Apply3D has shaped this frame's voice, so the
+    // sizzle's first sample already carries the correct distance attenuation and
+    // pan rather than a full-volume blast. Loops for as long as the grill is lit
+    // -- which is always, for now.
+    if (!started_) {
+        sizzle_instance_->Play(true);
+        started_ = true;
+    }
 
     // XAudio2 mixes on its own thread; this hands the engine the frame in which to
     // recycle finished voices and act on a device change. A false return with no

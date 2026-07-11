@@ -32,4 +32,12 @@ private:
     // hardware at all, say. The game then runs on in silence rather than paying
     // to re-solve 3D audio for a device that is never coming back.
     bool silent_ = false;
+
+    // The loop is not started in the constructor: at that point there is no
+    // listener yet, so Apply3D has not run and the voice would sound for a frame
+    // or two at full, un-attenuated gain from no particular direction -- a blast
+    // from everywhere on load. Instead the first Update poses the emitter first
+    // and only then begins playback, so the sizzle is already distance-shaped
+    // before its first sample is heard.
+    bool started_ = false;
 };
