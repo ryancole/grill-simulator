@@ -166,6 +166,8 @@ void LoadMaterials(const fastgltf::Asset& asset, Model& model) {
         material.base_color = {source.pbrData.baseColorFactor.x(),
                                source.pbrData.baseColorFactor.y(),
                                source.pbrData.baseColorFactor.z()};
+        material.metallic = source.pbrData.metallicFactor;
+        material.roughness = source.pbrData.roughnessFactor;
 
         if (source.pbrData.baseColorTexture) {
             const fastgltf::Texture& texture =
@@ -185,6 +187,15 @@ void LoadMaterials(const fastgltf::Asset& asset, Model& model) {
             material.normal_image = static_cast<int>(*texture.imageIndex);
             // normalTexture.scale would attenuate the map's XY; the game does not
             // read it yet, and no asset it loads sets it to anything but 1.
+        }
+
+        if (source.pbrData.metallicRoughnessTexture) {
+            const fastgltf::Texture& texture =
+                asset.textures[source.pbrData.metallicRoughnessTexture->textureIndex];
+            if (!texture.imageIndex) {
+                throw std::runtime_error("glTF metallic-roughness texture names no image");
+            }
+            material.metallic_roughness_image = static_cast<int>(*texture.imageIndex);
         }
 
         model.materials.push_back(material);

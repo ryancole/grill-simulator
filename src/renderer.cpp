@@ -44,14 +44,22 @@ struct Constants {
     // lit by its own camera-bolted sun. Mirrors g_shadow_receive in scene.hlsl,
     // and reuses the DWORD that was only padding before shadows existed.
     float shadow_receive;
+    // The glTF metallic-roughness factors, each multiplying its channel of the
+    // metallic-roughness texture. They open a fresh cbuffer row, so two DWORDs of
+    // padding follow to keep the C++ size a whole 16-byte multiple like the HLSL
+    // side.
+    float metallic;
+    float roughness;
+    float pad0;
+    float pad1;
 };
 
 static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
 // Beyond the root constants the scene signature holds the base-colour table (1),
-// the frame constant buffer (2), the shadow-map table (1) and the normal-map
-// table (1) -- five DWORDs.
-static_assert(kConstantDwords + 5 <= 64, "A root signature holds at most 64 DWORDs in total");
+// the frame constant buffer (2), the shadow-map table (1), the normal-map table
+// (1) and the metallic-roughness table (1) -- six DWORDs.
+static_assert(kConstantDwords + 6 <= 64, "A root signature holds at most 64 DWORDs in total");
 
 // The shadow map is square and this many texels on a side. Matches kShadowMapSize
 // in scene.hlsl, which sizes one texel for the PCF taps. 2048 gives the fenced
@@ -72,11 +80,14 @@ struct ShadowConstants {
 
 constexpr UINT kShadowConstantDwords = sizeof(ShadowConstants) / sizeof(UINT);
 
-// Mirrors the FrameConstants cbuffer in shaders/scene.hlsl. One matrix now; a
-// constant buffer is 256-byte aligned, so there is room to spare if more per-frame
-// state ever wants to ride along.
+// Mirrors the FrameConstants cbuffer in shaders/scene.hlsl: state shared by every
+// scene draw in a frame. The sun's view-projection never changes; the camera
+// position does, which is why this buffer is now written per frame (see
+// frame_constants_mapped_) rather than once at startup.
 struct FrameConstants {
     XMFLOAT4X4 light_view_projection;
+    XMFLOAT3 camera_position;
+    float pad0;
 };
 
 // Mirrors the OutlineConstants cbuffer in shaders/outline.hlsl. The view-
@@ -121,13 +132,18 @@ constexpr float kOutlinePulseHz = 1.4f;
 constexpr float kOutlinePulseMin = 0.65f;
 constexpr float kOutlinePulseMax = 1.0f;
 
-// _UNORM rather than _UNORM_SRGB, and deliberately. Nothing in this renderer
-// converts to linear light: the flat colours in scene.cpp, the constants in the
-// shader, the box filter that builds the mips and the back buffer are all in
-// whatever space they were written. Decoding only the textures would leave them
-// the one linear thing in the frame, reading darker than the flat colour beside
-// them. Fixing it is a single change that has to touch all five.
+// The linear texture format, for data that is not colour: normal maps, the
+// metallic-roughness map, the font's distance field, and the 1x1 defaults.
 constexpr DXGI_FORMAT kTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+// The sRGB texture format, for base-colour images. Sampling through an sRGB view
+// decodes the texel to linear light in hardware, which is where the BRDF wants
+// it. The scene pixel shader re-encodes to sRGB on the way out (LinearToSrgb),
+// and it linearises the flat colours in scene.cpp itself -- so base colour,
+// factors and lighting all meet in linear space. The back buffer stays plain
+// _UNORM: the encode is done in the shader, which keeps the outline and text
+// passes, which still write display-space colour, untouched.
+constexpr DXGI_FORMAT kSrgbTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 
 // Slot 0 of the texture heap. A material with no base colour texture points
 // here, which spares the shader a branch and the pipeline a second variant.
@@ -410,18 +426,21 @@ void Renderer::CreatePipeline() {
     // t1: the shadow map, at a fixed slot in the same heap the base colour lives
     // in, bound once per frame rather than per draw.
     const CD3DX12_DESCRIPTOR_RANGE shadow_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
-    // t2: the base colour's normal map, its own one-entry table bound per draw
-    // exactly like the base colour. A separate table rather than widening the base
-    // colour's, so the two need not sit next to each other in the heap.
+    // t2, t3: the base colour's normal and metallic-roughness maps, each its own
+    // one-entry table bound per draw exactly like the base colour. Separate tables
+    // rather than one widened range, so the three need not sit next to each other
+    // in the heap.
     const CD3DX12_DESCRIPTOR_RANGE normal_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
+    const CD3DX12_DESCRIPTOR_RANGE mr_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3);
 
-    CD3DX12_ROOT_PARAMETER parameters[5];
+    CD3DX12_ROOT_PARAMETER parameters[6];
     parameters[0].InitAsConstants(kConstantDwords, 0);
     parameters[1].InitAsDescriptorTable(1, &base_color_range, D3D12_SHADER_VISIBILITY_PIXEL);
-    // b1: the frame constant buffer holding the sun's view-projection.
+    // b1: the frame constant buffer holding the sun's view-projection and the eye.
     parameters[2].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
     parameters[3].InitAsDescriptorTable(1, &shadow_range, D3D12_SHADER_VISIBILITY_PIXEL);
     parameters[4].InitAsDescriptorTable(1, &normal_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[5].InitAsDescriptorTable(1, &mr_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     // s0: anisotropic because the ground and the patio are seen almost edge on,
@@ -622,25 +641,30 @@ void Renderer::CreateShadowPipeline() {
         XMMatrixOrthographicLH(kShadowExtent, kShadowExtent, kShadowNear, kShadowFar);
     XMStoreFloat4x4(&light_view_projection_, view * proj);
 
-    // The per-frame constant buffer that hands that matrix to the scene pass. It
-    // never changes, so it is written once here and left mapped-then-unmapped. A
-    // constant buffer wants a 256-byte-aligned size.
-    const UINT64 cb_size = (sizeof(FrameConstants) + 255) & ~UINT64{255};
+    // The per-frame constant buffer that hands that matrix, and the eye position,
+    // to the scene pass. One 256-byte-aligned region per frame in flight, kept
+    // mapped: Render rewrites the current frame's region and never touches the one
+    // the GPU may still be reading for the frame before it. The sun matrix is
+    // static, so it is stamped into every region here; only the eye is refreshed.
+    frame_constants_stride_ = static_cast<UINT>((sizeof(FrameConstants) + 255) & ~UINT64{255});
     const CD3DX12_HEAP_PROPERTIES upload_heap(D3D12_HEAP_TYPE_UPLOAD);
-    const CD3DX12_RESOURCE_DESC cb_desc = CD3DX12_RESOURCE_DESC::Buffer(cb_size);
+    const CD3DX12_RESOURCE_DESC cb_desc =
+        CD3DX12_RESOURCE_DESC::Buffer(static_cast<UINT64>(frame_constants_stride_) * kFrameCount);
     ThrowIfFailed(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &cb_desc,
                                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                                    IID_PPV_ARGS(&frame_constants_)),
                   "CreateCommittedResource(frame constants)");
 
-    FrameConstants frame{};
-    frame.light_view_projection = light_view_projection_;
-    void* mapped = nullptr;
     const CD3DX12_RANGE no_read(0, 0);
+    void* mapped = nullptr;
     ThrowIfFailed(frame_constants_->Map(0, &no_read, &mapped), "FrameConstants::Map");
-    std::memcpy(mapped, &frame, sizeof(frame));
-    frame_constants_->Unmap(0, nullptr);
-    frame_constants_address_ = frame_constants_->GetGPUVirtualAddress();
+    frame_constants_mapped_ = static_cast<std::byte*>(mapped);
+    for (UINT i = 0; i < kFrameCount; ++i) {
+        FrameConstants frame{};
+        frame.light_view_projection = light_view_projection_;
+        std::memcpy(frame_constants_mapped_ + static_cast<size_t>(i) * frame_constants_stride_,
+                    &frame, sizeof(frame));
+    }
 
     // The pass draws position only, under one root constant: the light MVP. No
     // texture, no sampler, and -- with no pixel shader at all -- pixel access
@@ -750,12 +774,13 @@ ComPtr<ID3D12Resource> Renderer::UploadBuffer(const void* data, UINT64 bytes,
 }
 
 ComPtr<ID3D12Resource> Renderer::UploadTexture(const Image& image, UINT descriptor,
+                                               DXGI_FORMAT format,
                                                std::vector<ComPtr<ID3D12Resource>>& staging) {
     const auto mip_levels = static_cast<UINT16>(image.levels.size());
 
     const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
     const CD3DX12_RESOURCE_DESC desc =
-        CD3DX12_RESOURCE_DESC::Tex2D(kTextureFormat, image.width, image.height, 1, mip_levels);
+        CD3DX12_RESOURCE_DESC::Tex2D(format, image.width, image.height, 1, mip_levels);
 
     ComPtr<ID3D12Resource> texture;
     ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
@@ -794,7 +819,7 @@ ComPtr<ID3D12Resource> Renderer::UploadTexture(const Image& image, UINT descript
     command_list_->ResourceBarrier(1, &barrier);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = kTextureFormat;
+    srv.Format = format;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = mip_levels;
@@ -838,11 +863,14 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     // Every staging resource stays alive until the copies have landed.
     std::vector<ComPtr<ID3D12Resource>> staging;
 
+    // Linear white: it stands in for both a missing base colour (tint only) and a
+    // missing metallic-roughness map (the factors act alone, since 1 leaves each
+    // channel untouched). It is data, not colour, so it is not sRGB.
     Image white{};
     white.width = 1;
     white.height = 1;
     white.levels.push_back(std::vector<std::byte>(4, std::byte{0xff}));
-    textures_.push_back(UploadTexture(white, kWhiteTexture, staging));
+    textures_.push_back(UploadTexture(white, kWhiteTexture, kTextureFormat, staging));
 
     // The flat normal: tangent-space (0,0,1) encoded as (128,128,255,255). A
     // material with no normal map samples this and perturbs its normal by nothing.
@@ -851,7 +879,7 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     flat_normal.height = 1;
     flat_normal.levels.push_back(
         std::vector<std::byte>{std::byte{0x80}, std::byte{0x80}, std::byte{0xff}, std::byte{0xff}});
-    textures_.push_back(UploadTexture(flat_normal, kFlatNormalTexture, staging));
+    textures_.push_back(UploadTexture(flat_normal, kFlatNormalTexture, kTextureFormat, staging));
 
     UINT next_descriptor = kFlatNormalTexture + 1;
     models_.resize(models.size());
@@ -875,11 +903,23 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
         gpu.index_buffer_view.Format = DXGI_FORMAT_R32_UINT;
         gpu.index_buffer_view.SizeInBytes = static_cast<UINT>(index_bytes);
 
+        // An image is sRGB only where a material uses it as base colour; the same
+        // bytes read as a normal or metallic-roughness map are linear data. No
+        // asset here reuses one image as both, so a single flag per image is safe.
+        std::vector<bool> is_srgb(model.images.size(), false);
+        for (const Material& material : model.materials) {
+            if (material.base_color_image >= 0) {
+                is_srgb[material.base_color_image] = true;
+            }
+        }
+
         // Where each of this model's images landed in the shared heap.
         std::vector<UINT> descriptors;
         descriptors.reserve(model.images.size());
-        for (const Image& image : model.images) {
-            textures_.push_back(UploadTexture(image, next_descriptor, staging));
+        for (size_t image_index = 0; image_index < model.images.size(); ++image_index) {
+            const DXGI_FORMAT format = is_srgb[image_index] ? kSrgbTextureFormat : kTextureFormat;
+            textures_.push_back(
+                UploadTexture(model.images[image_index], next_descriptor, format, staging));
             descriptors.push_back(next_descriptor++);
         }
 
@@ -894,20 +934,32 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
             // the only thing colouring the draw. That is how every box in the
             // yard gets its colour.
             draw.base_color = {1.0f, 1.0f, 1.0f};
+            // Defaults for a primitive with no material at all -- the unit cube.
+            // Fully rough and non-metal is a plain matte surface, which is what the
+            // yard's flat-coloured boxes want.
+            draw.metallic = 0.0f;
+            draw.roughness = 1.0f;
             UINT descriptor = kWhiteTexture;
             UINT normal_descriptor = kFlatNormalTexture;
+            UINT mr_descriptor = kWhiteTexture;
             if (primitive.material >= 0) {
                 const Material& material = model.materials[primitive.material];
                 draw.base_color = material.base_color;
+                draw.metallic = material.metallic;
+                draw.roughness = material.roughness;
                 if (material.base_color_image >= 0) {
                     descriptor = descriptors[material.base_color_image];
                 }
                 if (material.normal_image >= 0) {
                     normal_descriptor = descriptors[material.normal_image];
                 }
+                if (material.metallic_roughness_image >= 0) {
+                    mr_descriptor = descriptors[material.metallic_roughness_image];
+                }
             }
             draw.base_color_texture = TextureHandle(descriptor);
             draw.normal_texture = TextureHandle(normal_descriptor);
+            draw.metallic_roughness_texture = TextureHandle(mr_descriptor);
 
             gpu.primitives.push_back(draw);
         }
@@ -956,7 +1008,7 @@ void Renderer::LoadFontAtlas(std::vector<ComPtr<ID3D12Resource>>& staging) {
     // turns to mush the moment it is minified. DecodeImage built the chain; drop
     // all but the full-resolution level before the upload.
     atlas.levels.resize(1);
-    atlas_texture_ = UploadTexture(atlas, atlas_descriptor_, staging);
+    atlas_texture_ = UploadTexture(atlas, atlas_descriptor_, kTextureFormat, staging);
 }
 
 void Renderer::CreateTextPipeline() {
@@ -1204,10 +1256,13 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
             constants.checker = instance.checker;
             constants.sun_direction = sun_direction;
             constants.shadow_receive = shadow_receive;
+            constants.metallic = primitive.metallic;
+            constants.roughness = primitive.roughness;
 
             command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
             command_list_->SetGraphicsRootDescriptorTable(1, primitive.base_color_texture);
             command_list_->SetGraphicsRootDescriptorTable(4, primitive.normal_texture);
+            command_list_->SetGraphicsRootDescriptorTable(5, primitive.metallic_roughness_texture);
             command_list_->DrawIndexedInstanced(primitive.index_count, 1, primitive.first_index, 0,
                                                 0);
         }
@@ -1329,10 +1384,23 @@ void Renderer::DrawOutlines(std::span<const MeshInstance> instances,
 void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                       std::span<const MeshInstance> held_props, const XMMATRIX& view_projection,
-                      std::string_view hud_prompt) {
+                      XMFLOAT3 camera_position, std::string_view hud_prompt) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
+
+    // Refresh this frame's slice of the frame constants -- the eye moved -- and
+    // point the scene pass's CBV at it. Its own region, so the write cannot race
+    // the GPU still reading the previous frame's.
+    std::byte* frame_region =
+        frame_constants_mapped_ + static_cast<size_t>(frame_index_) * frame_constants_stride_;
+    FrameConstants frame{};
+    frame.light_view_projection = light_view_projection_;
+    frame.camera_position = camera_position;
+    std::memcpy(frame_region, &frame, sizeof(frame));
+    frame_constants_address_ =
+        frame_constants_->GetGPUVirtualAddress() +
+        static_cast<UINT64>(frame_index_) * frame_constants_stride_;
 
     // The only heap the game binds, and it must be bound before any root
     // descriptor table that points into it.

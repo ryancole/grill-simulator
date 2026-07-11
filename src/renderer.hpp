@@ -33,7 +33,8 @@ public:
     void Render(const Scene& scene, std::span<const MeshInstance> props,
                 std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                 std::span<const MeshInstance> held_props,
-                const DirectX::XMMATRIX& view_projection, std::string_view hud_prompt);
+                const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
+                std::string_view hud_prompt);
     void Shutdown();
 
     float AspectRatio() const;
@@ -48,8 +49,11 @@ private:
         UINT first_index;
         UINT index_count;
         DirectX::XMFLOAT3 base_color;
+        float metallic;
+        float roughness;
         D3D12_GPU_DESCRIPTOR_HANDLE base_color_texture;
         D3D12_GPU_DESCRIPTOR_HANDLE normal_texture;
+        D3D12_GPU_DESCRIPTOR_HANDLE metallic_roughness_texture;
     };
 
     // A Model, uploaded. The CPU-side Model that produced it is not needed again.
@@ -103,8 +107,9 @@ private:
                                         D3D12_RESOURCE_STATES final_state,
                                         std::vector<ComPtr<ID3D12Resource>>& staging);
     // Uploads a mip chain and writes its shader resource view into slot
-    // `descriptor` of the texture heap.
-    ComPtr<ID3D12Resource> UploadTexture(const Image& image, UINT descriptor,
+    // `descriptor` of the texture heap. `format` is sRGB for base-colour images
+    // and plain _UNORM for data textures (normal, metallic-roughness, atlas).
+    ComPtr<ID3D12Resource> UploadTexture(const Image& image, UINT descriptor, DXGI_FORMAT format,
                                          std::vector<ComPtr<ID3D12Resource>>& staging);
     D3D12_GPU_DESCRIPTOR_HANDLE TextureHandle(UINT descriptor) const;
 
@@ -169,7 +174,13 @@ private:
     ComPtr<ID3D12Resource> shadow_map_;
     UINT shadow_descriptor_ = 0;
     DirectX::XMFLOAT4X4 light_view_projection_{};
+    // One aligned FrameConstants region per frame in flight, kept mapped and
+    // rewritten each frame with the sun matrix and the current eye position. Per
+    // frame because the camera moves, and buffered per frame so writing this
+    // frame's copy cannot trample the one the GPU is still reading for the last.
     ComPtr<ID3D12Resource> frame_constants_;
+    std::byte* frame_constants_mapped_ = nullptr;
+    UINT frame_constants_stride_ = 0;
     D3D12_GPU_VIRTUAL_ADDRESS frame_constants_address_ = 0;
     D3D12_VIEWPORT shadow_viewport_{};
     D3D12_RECT shadow_scissor_{};

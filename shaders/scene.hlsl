@@ -26,6 +26,12 @@ cbuffer Constants : register(b0) {
     // the viewmodel, which is lit by a camera-bolted sun the shadow map knows
     // nothing about. Kept a float so it folds into the arithmetic without a cast.
     float g_shadow_receive;
+    // The glTF metallic-roughness factors, each scaling its channel of the
+    // metallic-roughness map. Padded out to a full row to match the C++ mirror.
+    float g_metallic;
+    float g_roughness;
+    float g_pad0;
+    float g_pad1;
 };
 
 // Per-frame, shared by every scene draw: the sun's world-to-clip matrix, the one
@@ -34,6 +40,9 @@ cbuffer Constants : register(b0) {
 // is nearly full.
 cbuffer FrameConstants : register(b1) {
     row_major float4x4 g_light_view_projection;
+    // The eye, in world space, for the view vector the specular term needs.
+    float3 g_camera_position;
+    float g_frame_pad0;
 };
 
 // A material with no texture of its own is pointed at a 1x1 white texel, so
@@ -46,6 +55,9 @@ Texture2D<float> g_shadow_map : register(t1);
 // flat 1x1 (0,0,1), so there is no branch and no second pipeline state -- exactly
 // as the base colour handles a textureless material with a 1x1 white.
 Texture2D<float4> g_normal_map : register(t2);
+// The metallic-roughness map: glTF packs roughness in G and metallic in B. A
+// material with none samples a 1x1 white, so the factors above stand alone.
+Texture2D<float4> g_metallic_roughness : register(t3);
 SamplerState g_sampler : register(s0);
 // Hardware PCF. SampleCmp compares the receiver's depth against the stored one
 // and bilinearly filters the 0/1 results, so a single tap already softens across
@@ -147,6 +159,53 @@ float SunVisibility(float3 world, float3 normal) {
     return lit / 9.0f;
 }
 
+static const float kPi = 3.14159265f;
+// The dielectric reflectance at normal incidence: about 4% for everything that is
+// not a metal. Metals have no such fixed value -- their F0 is their base colour.
+static const float3 kDielectricF0 = float3(0.04f, 0.04f, 0.04f);
+
+// The sun's radiance. The diffuse BRDF carries a 1/pi that a real light's
+// intensity would swallow; folding a pi back into the sun here keeps a lit matte
+// surface about as bright as it was before the BRDF, and gives the speculars room
+// to punch above it.
+static const float kSunIntensity = kPi;
+
+// The colour constants above are written the way they should look on screen, i.e.
+// in sRGB. Lighting has to happen in linear light, so they are decoded on the way
+// in and the whole frame is encoded again on the way out. Base-colour textures
+// are decoded in hardware by their sRGB view; these do it by hand.
+float3 SrgbToLinear(float3 c) {
+    return select(c <= 0.04045f, c / 12.92f, pow((c + 0.055f) / 1.055f, 2.4f));
+}
+
+float3 LinearToSrgb(float3 c) {
+    return select(c <= 0.0031308f, c * 12.92f, 1.055f * pow(c, 1.0f / 2.4f) - 0.055f);
+}
+
+// The GGX/Trowbridge-Reitz normal distribution: how much of the surface's
+// microfacets face exactly the half vector. `a` is the roughness squared.
+float DistributionGGX(float n_dot_h, float a) {
+    const float a2 = a * a;
+    const float d = n_dot_h * n_dot_h * (a2 - 1.0f) + 1.0f;
+    return a2 / max(kPi * d * d, 1e-7f);
+}
+
+// Height-correlated Smith visibility: the geometry (self-shadowing/masking) term
+// with the specular denominator 1 / (4 n.l n.v) already folded in, so the caller
+// multiplies D * Vis * F and nothing else.
+float VisibilitySmith(float n_dot_v, float n_dot_l, float a) {
+    const float a2 = a * a;
+    const float v = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0f - a2) + a2);
+    const float l = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0f - a2) + a2);
+    return 0.5f / max(v + l, 1e-5f);
+}
+
+// Schlick's approximation of Fresnel: reflectance climbing from f0 at face-on to
+// white at grazing.
+float3 FresnelSchlick(float v_dot_h, float3 f0) {
+    return f0 + (1.0f - f0) * pow(saturate(1.0f - v_dot_h), 5.0f);
+}
+
 float4 PSMain(PSInput input) : SV_TARGET {
     // Rebuild the tangent frame and perturb the geometric normal by the map. The
     // tangent is re-orthogonalized against the interpolated normal (Gram-Schmidt),
@@ -161,29 +220,71 @@ float4 PSMain(PSInput input) : SV_TARGET {
     const float3 normal = normalize(tangent_normal.x * tangent + tangent_normal.y * bitangent +
                                     tangent_normal.z * geometric_normal);
 
-    float3 albedo = g_albedo * g_base_color.Sample(g_sampler, input.uv).rgb;
+    // The base colour, in linear light: the texture is decoded by its sRGB view,
+    // the flat factor/tint in g_albedo is decoded here.
+    float3 base_color = SrgbToLinear(g_albedo) * g_base_color.Sample(g_sampler, input.uv).rgb;
     if (g_checker > 0.0f) {
         const float2 cell = floor(input.world.xz / g_checker);
         const float tile = frac((cell.x + cell.y) * 0.5f) * 2.0f; // 0 or 1
-        albedo *= lerp(0.84f, 1.0f, tile);
+        base_color *= lerp(0.84f, 1.0f, tile);
     }
 
-    // A hemisphere ambient term stands in for bounced light: sky above, dirt
-    // below. Surfaces facing up read cool, undersides read warm and dark.
-    const float3 ambient =
-        lerp(kGroundBounce, kSkyColor, saturate(normal.y * 0.5f + 0.5f)) * kAmbientStrength;
-    const float sun = saturate(dot(normal, g_sun_direction));
-    // Only the direct sun is shadowed; the ambient and the fill stand in for
-    // bounced light and keep unlit faces off pure black. The branch is on a root
-    // constant, uniform across the draw, so it is coherent and free -- and it
-    // spares the viewmodel a shadow lookup it would only throw away.
+    // glTF packs roughness in G and metallic in B; the factors scale each. A floor
+    // on roughness keeps the specular lobe from collapsing to a point the size of
+    // one pixel, which aliases into a crawling sparkle as the camera moves.
+    const float2 mr = g_metallic_roughness.Sample(g_sampler, input.uv).gb;
+    const float roughness = clamp(g_roughness * mr.x, 0.045f, 1.0f);
+    const float metallic = saturate(g_metallic * mr.y);
+    const float a = roughness * roughness;
+
+    // Metals have no diffuse and reflect their own colour; dielectrics diffuse
+    // their base colour and reflect a dim white.
+    const float3 diffuse_color = base_color * (1.0f - metallic);
+    const float3 f0 = lerp(kDielectricF0, base_color, metallic);
+
+    const float3 view = normalize(g_camera_position - input.world);
+    const float n_dot_v = saturate(dot(normal, view)) + 1e-5f;
+
+    // The direct sun, through the Cook-Torrance specular BRDF plus a Lambert
+    // diffuse. Only the sun is shadowed; the branch is on a root constant, uniform
+    // across the draw, so it is coherent and free.
+    const float3 half_vector = normalize(view + g_sun_direction);
+    const float n_dot_l = saturate(dot(normal, g_sun_direction));
+    const float n_dot_h = saturate(dot(normal, half_vector));
+    const float v_dot_h = saturate(dot(view, half_vector));
+
+    const float3 fresnel = FresnelSchlick(v_dot_h, f0);
+    const float3 specular =
+        DistributionGGX(n_dot_h, a) * VisibilitySmith(n_dot_v, n_dot_l, a) * fresnel;
+    // Energy the specular reflection did not take is left for the diffuse.
+    const float3 diffuse = (1.0f - fresnel) * diffuse_color * (1.0f / kPi);
+
     float shadow = 1.0f;
     if (g_shadow_receive > 0.5f) {
         shadow = SunVisibility(input.world, normal);
     }
-    const float fill = saturate(dot(normal, -g_sun_direction)) * kFillStrength;
-    const float3 lit = albedo * (ambient + kSunColor * sun * shadow + kSkyColor * fill);
+    const float3 sun =
+        (diffuse + specular) * n_dot_l * SrgbToLinear(kSunColor) * kSunIntensity * shadow;
+
+    // A hemisphere term stands in for the sky's irradiance: sky above, dirt below.
+    // It lights the diffuse, and a crude ambient specular (just f0 times the same
+    // irradiance) keeps metals -- which have no diffuse -- from going black in the
+    // shade until real image-based lighting lands.
+    const float3 irradiance =
+        lerp(SrgbToLinear(kGroundBounce), SrgbToLinear(kSkyColor),
+             saturate(normal.y * 0.5f + 0.5f)) * kAmbientStrength;
+    const float3 ambient = irradiance * (diffuse_color + f0);
+
+    // A dim fill from behind the sun, diffuse only, so faces turned away read brown
+    // rather than as holes.
+    const float3 fill = SrgbToLinear(kSkyColor) * saturate(dot(normal, -g_sun_direction)) *
+                        kFillStrength * diffuse_color;
+
+    const float3 lit = ambient + sun + fill;
 
     const float fog = saturate((input.view_depth - kFogStart) / (kFogEnd - kFogStart));
-    return float4(lerp(lit, kSkyColor, fog * 0.9f), 1.0f);
+    const float3 color = lerp(lit, SrgbToLinear(kSkyColor), fog * 0.9f);
+    // Back to sRGB for the plain _UNORM back buffer the outline and text passes
+    // also write to in display space.
+    return float4(LinearToSrgb(color), 1.0f);
 }

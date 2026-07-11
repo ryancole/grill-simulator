@@ -35,19 +35,25 @@ struct SkinVertex {
     DirectX::XMFLOAT4 weights;
 };
 
-// glTF materials describe a full metallic-roughness BRDF. This renderer consumes
-// the base colour (factor and texture) and the normal map; the rest of the
-// metallic-roughness set -- metallic, roughness, emissive, occlusion -- is still
-// read past and dropped, because the lighting is a hemisphere ambient plus one
-// directional term with no specular yet.
+// glTF materials describe a metallic-roughness BRDF, and this renderer now runs
+// one: base colour, normal map, and the metallic-roughness pair (factors and
+// their shared texture). Emissive and occlusion are still read past and dropped.
 struct Material {
     DirectX::XMFLOAT3 base_color{1.0f, 1.0f, 1.0f};
+    // Multiplies the metallic-roughness texture, or stands alone when there is
+    // none. glTF's defaults: fully rough, non-metal.
+    float metallic = 1.0f;
+    float roughness = 1.0f;
     // Index into Model::images, or -1 when the material is a flat colour.
     int base_color_image = -1;
     // Index into Model::images for the tangent-space normal map, or -1 when the
     // material has none -- in which case the renderer points the draw at a flat
     // 1x1 normal and the geometric normal is used unperturbed.
     int normal_image = -1;
+    // Index into Model::images for the metallic-roughness map (glTF packs
+    // roughness in G and metallic in B), or -1 -- then a 1x1 white stands in and
+    // the factors above act alone.
+    int metallic_roughness_image = -1;
 };
 
 // One draw. `transform` places the primitive's vertices into model space, having
