@@ -33,7 +33,7 @@ struct Game {
     // Physics comes up before anything that will register bodies with it (the
     // props and, later, the player controller), and tears down after them.
     Physics physics;
-    Camera camera;
+    Camera camera{physics};
     Viewmodel viewmodel{scene.CubeModel()};
     Props props{scene, physics};
     Input input;
@@ -195,7 +195,7 @@ int Run(HINSTANCE instance, int show_command) {
         float mouse_dy = 0.0f;
         game.input.ConsumeMouseDelta(mouse_dx, mouse_dy);
         game.camera.Look(mouse_dx, mouse_dy);
-        game.camera.Update(game.input, game.scene.Colliders(), dt);
+        game.camera.Update(game.input, dt);
 
         // The camera-to-world matrix is the viewmodel's pose, the listener's ear
         // and facing, and the reach a grab is measured along, so it is built

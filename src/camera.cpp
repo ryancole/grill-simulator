@@ -1,11 +1,16 @@
 #include "camera.hpp"
 
+#include "collision.hpp" // kStepHeight
 #include "input.hpp"
+#include "physics.hpp"
+
+#include <PxPhysicsAPI.h>
 
 #include <algorithm>
 #include <cmath>
 
 using namespace DirectX;
+using namespace physx;
 
 namespace {
 
@@ -13,6 +18,14 @@ constexpr float kEyeHeight = 1.7f;
 constexpr float kBodyRadius = 0.35f;
 constexpr float kWalkSpeed = 3.4f;   // metres per second
 constexpr float kSprintSpeed = 6.4f; // metres per second
+
+// The capsule: a 0.35 m radius cylinder segment capped by two hemispheres, sized
+// so foot-to-crown is exactly the eye height. The eye then rides at the crown.
+//   total height = kCapsuleHeight + 2*radius = 1.0 + 0.7 = 1.7 = kEyeHeight
+constexpr float kCapsuleHeight = kEyeHeight - 2.0f * kBodyRadius; // cylinder part
+// A thin skin PhysX keeps between the capsule and what it touches, so contact is
+// detected a hair early rather than after interpenetrating.
+constexpr float kContactOffset = 0.05f;
 
 // Real gravity makes a jump feel like a moon landing: the player hangs at the
 // apex for far too long. Games solve this by falling much harder than 9.8, and
@@ -49,6 +62,31 @@ constexpr float kFarPlane = 250.0f;
 
 } // namespace
 
+Camera::Camera(Physics& physics) {
+    // A capsule stood upright at the spawn point. The controller position is the
+    // capsule centre, which sits kCapsuleHeight/2 + radius above the feet.
+    PxCapsuleControllerDesc desc;
+    desc.radius = kBodyRadius;
+    desc.height = kCapsuleHeight;
+    desc.upDirection = PxVec3(0.0f, 1.0f, 0.0f);
+    desc.slopeLimit = 0.0f; // no slope is too steep; the yard is boxes and flats.
+    desc.stepOffset = kStepHeight; // a curb within a step is climbed, not walled off.
+    desc.contactOffset = kContactOffset;
+    desc.material = &physics.DefaultMaterial();
+
+    const float foot = position_.y - kEyeHeight;
+    const float center = foot + 0.5f * kCapsuleHeight + kBodyRadius;
+    desc.position = PxExtendedVec3(position_.x, center, position_.z);
+
+    controller_ = physics.Controllers().createController(desc);
+}
+
+Camera::~Camera() {
+    if (controller_) {
+        controller_->release();
+    }
+}
+
 void Camera::Look(float dx, float dy) {
     yaw_ += dx * kRadiansPerCount;
     // Screen coordinates grow downward, so a downward flick has to lower pitch.
@@ -58,12 +96,7 @@ void Camera::Look(float dx, float dy) {
     yaw_ = std::remainder(yaw_, XM_2PI);
 }
 
-void Camera::Update(const Input& input, std::span<const Aabb> colliders, float dt) {
-    // Where the feet started the frame. The landing test measures against this
-    // rather than against where they end up, so a fast fall lands on the highest
-    // surface it crossed instead of dropping straight through it.
-    const float feet_before = position_.y - kEyeHeight;
-
+void Camera::Update(const Input& input, float dt) {
     if (grounded_ && input.IsKeyDown(VK_SPACE)) {
         vertical_speed_ = kJumpSpeed;
         grounded_ = false;
@@ -109,42 +142,51 @@ void Camera::Update(const Input& input, std::span<const Aabb> colliders, float d
     // is conserved exactly. Releasing the keys mid-jump must not stop the player
     // in the air, which is the entire point of holding a velocity at all.
 
-    const XMVECTOR moved_from = XMLoadFloat3(&position_);
-    XMStoreFloat3(&position_, XMVectorAdd(moved_from, XMVectorScale(velocity, dt)));
-
     vertical_speed_ -= kGravity * dt;
-    position_.y += vertical_speed_ * dt;
 
-    // Resolved after the vertical step, so that a body which has risen above a
-    // crate is free to move across it. There is no ceiling test: jumping into
-    // the underside of a tree canopy passes through it.
-    position_ = ResolveCollision(position_, kBodyRadius, kEyeHeight, colliders);
+    // The move the controller is asked to make this frame: the horizontal walk
+    // plus the vertical fall/jump. It slides this along whatever it hits.
+    XMFLOAT3 v;
+    XMStoreFloat3(&v, velocity);
+    const PxVec3 displacement(v.x * dt, vertical_speed_ * dt, v.z * dt);
 
-    // Whatever the resolver refused to let us travel, we were never really
-    // carrying. Re-deriving the velocity from the distance actually covered kills
-    // the component pushed into a wall and keeps the component sliding along it.
-    // The resolver also *ejects* a body wedged into a corner, and that shove is
-    // not momentum, so a speed-up is never adopted.
+    const PxExtendedVec3 before = controller_->getFootPosition();
+    const PxControllerCollisionFlags flags =
+        controller_->move(displacement, 0.001f, dt, PxControllerFilters());
+    const PxExtendedVec3 after = controller_->getFootPosition();
+
+    // Ride the eye on the capsule's crown, foot plus eye height.
+    position_ = {static_cast<float>(after.x), static_cast<float>(after.y) + kEyeHeight,
+                 static_cast<float>(after.z)};
+
+    // A contact below is ground: stop falling and allow the next jump. A contact
+    // above is a bonked head: kill the climb so the player does not cling there.
+    if (flags.isSet(PxControllerCollisionFlag::eCOLLISION_DOWN)) {
+        vertical_speed_ = 0.0f;
+        grounded_ = true;
+    } else {
+        grounded_ = false;
+    }
+    if (flags.isSet(PxControllerCollisionFlag::eCOLLISION_UP) && vertical_speed_ > 0.0f) {
+        vertical_speed_ = 0.0f;
+    }
+
+    // Whatever the controller refused to let us travel, we were never really
+    // carrying. Re-deriving the horizontal velocity from the distance actually
+    // covered kills the component pushed into a wall and keeps the component
+    // sliding along it, so a held key never builds pressure into a corner.
     if (dt > 1e-5f) {
-        const XMVECTOR travelled =
-            XMVectorScale(XMVectorSubtract(XMLoadFloat3(&position_), moved_from), 1.0f / dt);
-        const XMVECTOR flat = XMVectorSetY(travelled, 0.0f);
-        if (XMVector3Less(XMVector3LengthSq(flat), XMVector3LengthSq(velocity))) {
+        const XMVECTOR flat =
+            XMVectorSet(static_cast<float>(after.x - before.x) / dt, 0.0f,
+                        static_cast<float>(after.z - before.z) / dt, 0.0f);
+        const XMVECTOR wanted_flat = XMVectorSet(v.x, 0.0f, v.z, 0.0f);
+        if (XMVector3Less(XMVector3LengthSq(flat), XMVector3LengthSq(wanted_flat))) {
             velocity = flat;
+        } else {
+            velocity = wanted_flat;
         }
     }
     velocity_ = {XMVectorGetX(velocity), XMVectorGetZ(velocity)};
-
-    // A surface within a step of where the feet began is a floor to stand on --
-    // which is also what turns a curb into a step rather than a wall.
-    const float support = HighestSupportUnder(position_.x, position_.z, kBodyRadius,
-                                              feet_before + kStepHeight, colliders);
-    const bool landed = vertical_speed_ <= 0.0f && position_.y - kEyeHeight <= support;
-    if (landed) {
-        position_.y = support + kEyeHeight;
-        vertical_speed_ = 0.0f;
-    }
-    grounded_ = landed;
 }
 
 XMMATRIX Camera::ViewMatrix() const {

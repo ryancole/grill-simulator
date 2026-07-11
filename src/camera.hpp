@@ -1,23 +1,34 @@
 #pragma once
 
-#include "collision.hpp"
-
 #include <DirectXMath.h>
 
-#include <span>
-
+namespace physx {
+class PxController;
+}
 class Input;
+class Physics;
 
 // A first person camera standing at eye height on a left-handed world: +X right,
 // +Y up, +Z forward. Yaw and pitch only -- there is no roll, and horizontal
 // movement ignores pitch, so looking at the sky never walks the player upward.
+//
+// The body is a PhysX capsule character controller: the walk/jump/air-control
+// feel is still owned here, but the collide-and-slide against the world is the
+// controller's job. The eye rides on top of the capsule.
 class Camera {
 public:
+    // Creates the capsule controller in the physics scene at the spawn point.
+    explicit Camera(Physics& physics);
+    ~Camera();
+
+    Camera(const Camera&) = delete;
+    Camera& operator=(const Camera&) = delete;
+
     // Turns the camera by a raw mouse delta, in mouse counts.
     void Look(float dx, float dy);
-    // Walks, jumps and falls the camera, then slides it out of the scene's
-    // colliders.
-    void Update(const Input& input, std::span<const Aabb> colliders, float dt);
+    // Walks, jumps and falls the player by moving the capsule controller, which
+    // slides it along the world's surfaces, then rides the eye on top.
+    void Update(const Input& input, float dt);
 
     DirectX::XMMATRIX ViewMatrix() const;
     DirectX::XMMATRIX ProjectionMatrix(float aspect) const;
@@ -32,6 +43,11 @@ private:
     // The unit vector the eye is looking down, yaw and pitch applied.
     DirectX::XMVECTOR Forward() const;
 
+    // The capsule in the physics scene. Owned by the controller manager (in
+    // Physics); released here, before that manager tears down.
+    physx::PxController* controller_ = nullptr;
+
+    // The eye, in world space: read back from the controller's foot each frame.
     DirectX::XMFLOAT3 position_{0.0f, 1.7f, -7.0f};
     // Radians. A yaw of zero looks straight down +Z; positive pitch looks up.
     float yaw_ = 0.0f;
