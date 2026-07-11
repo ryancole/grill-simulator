@@ -8,15 +8,13 @@ using namespace physx;
 
 namespace {
 
-// Tuned to match the old solver so the port is a like-for-like swap, not a
-// re-feel. See the constants at the top of props.cpp for where these come from.
 constexpr float kGravity = 20.0f;         // m/s^2 down; punchier than 9.81.
 constexpr float kSubstep = 1.0f / 120.0f; // fixed physics tick.
 constexpr int kMaxSubsteps = 8;           // catch-up cap, so a stall never bursts.
 
-// The shared surface material. Coulomb friction and restitution mirror kFriction
-// (0.55) and kRestitution (0.30) from the retired solver; PhysX applies its own
-// restitution-velocity threshold, so the settling props still stop bouncing.
+// The shared surface material. A little friction and a low restitution so the
+// props grip when they land; PhysX applies its own restitution-velocity
+// threshold, so the settling props still stop bouncing rather than jittering.
 constexpr float kStaticFriction = 0.55f;
 constexpr float kDynamicFriction = 0.55f;
 constexpr float kRestitution = 0.30f;
@@ -99,7 +97,7 @@ void Physics::Step(float dt) {
     // Fixed ticks with the leftover time banked for next frame -- a fixed step is
     // what keeps the solver stable. A long stall is spent, not hoarded: once the
     // catch-up cap is hit the remainder is dropped so the sim never sprints to
-    // catch up after a hitch, exactly as Props::Simulate did.
+    // catch up after a hitch.
     accumulator_ += dt;
     int ticks = 0;
     while (accumulator_ >= kSubstep && ticks < kMaxSubsteps) {

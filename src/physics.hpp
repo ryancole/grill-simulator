@@ -4,12 +4,10 @@
 
 #include <span>
 
-// PhysX owns the simulation from here on. This class brings the SDK up, holds
-// the one scene every rigid body lives in, and steps it on a fixed clock. The
-// hand-rolled sequential-impulse solver in props.cpp and the AABB character
-// sweep in collision.cpp are both being retired onto it; this is the empty shell
-// they will hang off (step 1 of that migration -- nothing is added to the scene
-// yet).
+// PhysX owns the simulation. This class brings the SDK up, holds the one scene
+// every rigid body lives in, and steps it on a fixed clock. The props (dynamic
+// bodies), the yard (static box actors) and the player (a capsule character
+// controller) all register with the scene it holds.
 //
 // PhysX types are forward-declared so this header stays cheap to include: only a
 // translation unit that actually touches the scene, a material or an actor pulls
@@ -40,9 +38,8 @@ public:
     Physics& operator=(const Physics&) = delete;
 
     // Advances the simulation over `dt` seconds in fixed substeps, banking the
-    // remainder for next frame -- the same fixed-clock discipline the old solver
-    // used (see Props::Simulate), which is what keeps the contact solve stable
-    // however long a rendered frame took.
+    // remainder for next frame -- a fixed clock is what keeps the contact solve
+    // stable however long a rendered frame took.
     void Step(float dt);
 
     // Builds the immovable world: one static box actor per collider, sized and

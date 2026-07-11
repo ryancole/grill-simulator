@@ -268,18 +268,18 @@ than as one loose box around the whole thing.
 **A node whose name ends in `_nocollide` is drawn and never collided with.**
 
 One box per node is exactly what a prop assembled from parts wants — until two
-of those parts are *stacked*. `HighestSupportUnder` will stand the player on any
-box's top face, and the lower part's top face is buried inside the prop where
-nobody can see it.
+of those parts are *stacked*. The player's capsule controller stands on any box's
+top face, and the lower part's top face is buried inside the prop where nobody
+can see it.
 
 The cooler is where this bit. Building it as a short body under a lid put a
 standable surface at 0.45 m, inside the cooler, at exactly the height of the lid.
 A player descending past its corner landed on that surface and hovered there.
-Porting `collision.cpp` to a script and sweeping every reachable state — every
-position around the cooler, every `feet_before`, every downward velocity — turned
-up **63,960** states where `landed` flipped. Insetting the body so the lid
-overhangs it only reduced the count; nothing short of *one collider* fixes it,
-because there is no inset that puts a lower box's top out of reach in every case.
+Sweeping every reachable state — every position around the cooler, every falling
+approach — turned up tens of thousands of spots where the player caught on that
+buried face. Insetting the body so the lid overhangs it only reduced the count;
+nothing short of *one collider* fixes it, because there is no inset that puts a
+lower box's top out of reach in every case.
 
 So the cooler's body is the whole cooler — the same 0.9 × 0.6 × 0.6 box the yard
 used to draw, and the only thing that collides — and the lid is a lip that laps
@@ -312,7 +312,8 @@ src/
   main.cpp                        window, message loop, timing, file helpers
   camera.cpp/.hpp                 yaw/pitch eye, WASD movement, view + projection
   input.cpp/.hpp                  key state, raw mouse, cursor capture
-  collision.cpp/.hpp              slide a cylinder out of axis-aligned boxes
+  collision.cpp/.hpp              Aabb, TransformBounds, the player's step height
+  physics.cpp/.hpp                PhysX 5: the scene, the fixed step, the static world
   model.cpp/.hpp                  glTF via fastgltf, and the unit cube
   image.cpp/.hpp                  PNG/JPEG through WIC, plus a mip chain
   scene.cpp/.hpp                  the models, the instances, the colliders
@@ -381,7 +382,7 @@ and a model matrix that scales unevenly does not carry a normal.
   conversion, not a bug.** Column-major in, row-major out, which is the transpose
   that carries `p' = M*p` to `p' = p*M`. See [Models](#models).
 - **Stacking two colliding nodes buries a standable surface inside a prop.**
-  `HighestSupportUnder` stands the player on any box's top face, seen or not.
-  Hence `_nocollide`.
+  The player's capsule stands on any box's top face, seen or not. Hence
+  `_nocollide`.
 - **`PW_RENDERFULLCONTENT` is mandatory to screenshot this window.** A flip-model
   swapchain prints solid black under a plain `PrintWindow`.
