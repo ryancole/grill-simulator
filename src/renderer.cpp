@@ -7,6 +7,7 @@
 #include <DirectXMath.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 using namespace DirectX;
@@ -46,6 +47,48 @@ static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
 // The descriptor table for the base colour texture costs one more DWORD.
 static_assert(kConstantDwords + 1 <= 64, "A root signature holds at most 64 DWORDs in total");
+
+// Mirrors the OutlineConstants cbuffer in shaders/outline.hlsl. The view-
+// projection stands alone because the mesh is grown in world space before it is
+// projected. HLSL packs each float4 into its own row and never straddles one, so
+// this C++ order maps 1:1 onto the cbuffer rows -- do not reorder one side.
+struct OutlineConstants {
+    XMFLOAT4X4 view_projection;
+    XMFLOAT4X4 model;
+    XMFLOAT4 normal_rows[3];
+    XMFLOAT4 color; // rgb, plus this layer's strength in a.
+    float width;
+};
+
+static_assert(sizeof(OutlineConstants) % sizeof(UINT) == 0);
+constexpr UINT kOutlineConstantDwords = sizeof(OutlineConstants) / sizeof(UINT);
+static_assert(kOutlineConstantDwords <= 64, "A root signature holds at most 64 DWORDs in total");
+
+// The pick-up glow: a warm amber that reads as heat, breathing so it draws the
+// eye without strobing.
+//
+// It is several concentric enlarged copies of the mesh (see outline.hlsl) blended
+// *additively*: a tight bright one at the silhouette out to a wide faint one, so
+// where they stack near the object the light is hot and it falls off smoothly
+// outward into a soft halo. The pass runs with depth off and the object is
+// re-painted over it, so the halo wraps every side the same no matter where the
+// player stands. Each copy is one draw, so a handful of layers.
+constexpr XMFLOAT3 kOutlineColor{1.0f, 0.66f, 0.24f};
+constexpr int kOutlineLayers = 6;
+// How far, in metres, the innermost and outermost copies are pushed out along
+// the normal. The props are small, so even the outer halo is only centimetres.
+constexpr float kOutlineInnerWidth = 0.003f;
+constexpr float kOutlineOuterWidth = 0.026f;
+// Per-layer additive strength at the inner and outer ends. The inner copy carries
+// the most; the outer layers only breathe a faint wash past the edge. Kept low
+// because with depth off every layer now reaches all the way around, so their
+// sum near the edge is what sets the brightness.
+constexpr float kOutlineInnerAlpha = 0.22f;
+constexpr float kOutlineOuterAlpha = 0.03f;
+constexpr float kOutlinePulseHz = 1.4f;
+// The pulse never fully darkens the rim -- it breathes between these.
+constexpr float kOutlinePulseMin = 0.65f;
+constexpr float kOutlinePulseMax = 1.0f;
 
 // _UNORM rather than _UNORM_SRGB, and deliberately. Nothing in this renderer
 // converts to linear light: the flat colours in scene.cpp, the constants in the
@@ -130,6 +173,7 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene
     CreateRenderTargetViews();
     CreateDepthBuffer();
     CreatePipeline();
+    CreateOutlinePipeline();
     CreateSceneGeometry(scene);
     CreateTextPipeline();
 
@@ -356,6 +400,102 @@ void Renderer::CreatePipeline() {
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pipeline_state_)),
                   "CreateGraphicsPipelineState");
+}
+
+void Renderer::CreateOutlinePipeline() {
+    // Everything the outline needs -- the transforms, the rim colour and the
+    // push-out width -- travels as root constants. There is no texture, so this
+    // root signature has none of the scene's descriptor table or sampler.
+    CD3DX12_ROOT_PARAMETER parameters[1];
+    parameters[0].InitAsConstants(kOutlineConstantDwords, 0);
+
+    CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    // The pixel shader reads the rim colour from b0, so pixel access stays open;
+    // only the stages the pass never uses are denied.
+    root_desc.Init(_countof(parameters), parameters, 0, nullptr,
+                   D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr =
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr)) {
+        std::string message = error
+                                  ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                                error->GetBufferSize())
+                                  : "unknown error";
+        throw std::runtime_error("D3D12SerializeRootSignature(outline) failed: " + message);
+    }
+    ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                               signature->GetBufferSize(),
+                                               IID_PPV_ARGS(&outline_root_signature_)),
+                  "CreateRootSignature(outline)");
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "outline.vs.cso");
+    const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "outline.ps.cso");
+
+    // The same vertex stream the scene uses; the VS only reads POSITION and
+    // NORMAL, but the layout has to describe the whole 32-byte Vertex.
+    const D3D12_INPUT_ELEMENT_DESC input_layout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.InputLayout = {input_layout, _countof(input_layout)};
+    pso.pRootSignature = outline_root_signature_.Get();
+    pso.VS = {vs.data(), vs.size()};
+    pso.PS = {ps.data(), ps.size()};
+
+    // Cull the front faces: the enlarged copy's near shell would just double the
+    // fill, so only the far shell is kept, which paints the enlarged silhouette
+    // once. The object re-paint afterward carves the object back out of it.
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
+
+    // Additive blend: each hull adds its alpha-weighted colour to the frame, so
+    // the concentric shells accumulate into a hot core near the object and a soft
+    // wash outward -- light being emitted, not a band being painted. The source
+    // colour is pre-weighted by its own alpha (SRC_ALPHA) so a layer's strength
+    // travels in that alpha; the destination is kept whole (ONE).
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    D3D12_RENDER_TARGET_BLEND_DESC& blend = pso.BlendState.RenderTarget[0];
+    blend.BlendEnable = TRUE;
+    blend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    blend.DestBlend = D3D12_BLEND_ONE;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ZERO;
+    blend.DestBlendAlpha = D3D12_BLEND_ONE;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    // No depth test at all: the halo pokes a little past the silhouette, and on
+    // the near side that margin sits over ground closer to the eye than the
+    // object. A depth test would clip it there and nowhere else, so the glow
+    // would favour the faces turned away from the player. Off, it wraps evenly;
+    // the object re-paint that follows is what keeps it from washing the object.
+    pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = kBackBufferFormat;
+    pso.SampleDesc.Count = 1;
+
+    ThrowIfFailed(
+        device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&outline_pipeline_state_)),
+        "CreateGraphicsPipelineState(outline)");
 }
 
 ComPtr<ID3D12Resource> Renderer::UploadBuffer(const void* data, UINT64 bytes,
@@ -822,9 +962,67 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
     }
 }
 
+void Renderer::DrawOutlines(std::span<const MeshInstance> instances,
+                            const XMMATRIX& view_projection, float seconds) {
+    if (instances.empty()) {
+        return;
+    }
+
+    // Breathe the whole rim on a cosine, kept above kOutlinePulseMin so it never
+    // vanishes -- it is at full strength the instant an object becomes the target
+    // and eases from there rather than starting mid-fade.
+    const float breath = 0.5f + 0.5f * std::cos(seconds * kOutlinePulseHz * XM_2PI);
+    const float pulse = kOutlinePulseMin + (kOutlinePulseMax - kOutlinePulseMin) * breath;
+
+    command_list_->SetPipelineState(outline_pipeline_state_.Get());
+    command_list_->SetGraphicsRootSignature(outline_root_signature_.Get());
+
+    for (const MeshInstance& instance : instances) {
+        const GpuModel& model = models_[instance.model];
+        const XMMATRIX instance_to_world = XMLoadFloat4x4(&instance.transform);
+
+        command_list_->IASetVertexBuffers(0, 1, &model.vertex_buffer_view);
+        command_list_->IASetIndexBuffer(&model.index_buffer_view);
+
+        for (const DrawPrimitive& primitive : model.primitives) {
+            const XMMATRIX to_world = XMLoadFloat4x4(&primitive.transform) * instance_to_world;
+
+            OutlineConstants constants{};
+            XMStoreFloat4x4(&constants.view_projection, view_projection);
+            XMStoreFloat4x4(&constants.model, to_world);
+
+            // Same inverse-transpose the scene uses, so the push-out follows the
+            // true surface normal even where the model matrix scales unevenly.
+            const XMMATRIX normal_matrix = XMMatrixTranspose(XMMatrixInverse(nullptr, to_world));
+            for (int row = 0; row < 3; ++row) {
+                XMStoreFloat4(&constants.normal_rows[row], normal_matrix.r[row]);
+            }
+
+            // Concentric enlarged copies from the tight bright inner rim out to
+            // the wide faint halo. Additive blending sums them, so the overlap
+            // near the edge is the brightest and the light falls off outward.
+            for (int layer = 0; layer < kOutlineLayers; ++layer) {
+                const float t = kOutlineLayers > 1
+                                    ? static_cast<float>(layer) / (kOutlineLayers - 1)
+                                    : 0.0f;
+                constants.width = kOutlineInnerWidth + (kOutlineOuterWidth - kOutlineInnerWidth) * t;
+                const float alpha =
+                    (kOutlineInnerAlpha + (kOutlineOuterAlpha - kOutlineInnerAlpha) * t) * pulse;
+                constants.color = {kOutlineColor.x, kOutlineColor.y, kOutlineColor.z, alpha};
+
+                command_list_->SetGraphicsRoot32BitConstants(0, kOutlineConstantDwords, &constants,
+                                                             0);
+                command_list_->DrawIndexedInstanced(primitive.index_count, 1, primitive.first_index,
+                                                     0, 0);
+            }
+        }
+    }
+}
+
 void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
-                      const ViewmodelPose& viewmodel, std::span<const MeshInstance> held_props,
-                      const XMMATRIX& view_projection, std::string_view hud_prompt) {
+                      std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
+                      std::span<const MeshInstance> held_props, const XMMATRIX& view_projection,
+                      std::string_view hud_prompt) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
@@ -860,6 +1058,22 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // The resting props take the yard's sun too: they are part of the world, and
     // only pass into the near pass once the player lifts them.
     DrawInstances(props, view_projection, sun);
+
+    // Paint the glowing halo around the object the player is aiming at. It runs
+    // with depth off, so it washes across the object as well as the ground around
+    // it; re-painting the object on top afterward leaves only the ring outside
+    // its silhouette, and does so evenly on every side.
+    const float seconds =
+        std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time_).count();
+    DrawOutlines(highlight, view_projection, seconds);
+    if (!highlight.empty()) {
+        // DrawOutlines left its own PSO and root signature bound; restore the
+        // scene's, both to re-paint the object here and for the passes that
+        // follow, which are all DrawInstances and assume the scene's are in force.
+        command_list_->SetPipelineState(pipeline_state_.Get());
+        command_list_->SetGraphicsRootSignature(root_signature_.Get());
+        DrawInstances(highlight, view_projection, sun);
+    }
 
     // The arms live about half a metre from the eye, close enough that any wall
     // the player leans against would be drawn in front of them. Throwing the

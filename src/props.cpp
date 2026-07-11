@@ -97,10 +97,11 @@ void Props::Update(const XMMATRIX& camera_to_world, const Input& input,
     // a handful of items.
     hovered_ = carried_ >= 0 ? -1 : PickTarget(eye, forward);
 
-    // Rebuild the two draw lists from the current state. There are a handful of
+    // Rebuild the draw lists from the current state. There are a handful of
     // items, so this is cheaper than tracking which one moved.
     world_.clear();
     held_.clear();
+    highlight_.clear();
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
         if (i == carried_) {
             continue;
@@ -111,6 +112,12 @@ void Props::Update(const XMMATRIX& camera_to_world, const Input& input,
         held_.push_back(MakeInstance(items_[carried_].model,
                                      XMLoadFloat4x4(&items_[carried_].held_local) *
                                          camera_to_world));
+    }
+    // The outline draws the hovered item a second time at its resting pose, so
+    // it lines up exactly with the world copy above.
+    if (hovered_ >= 0) {
+        highlight_.push_back(
+            MakeInstance(items_[hovered_].model, XMLoadFloat4x4(&items_[hovered_].resting)));
     }
 }
 

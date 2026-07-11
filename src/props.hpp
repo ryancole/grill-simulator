@@ -38,6 +38,11 @@ public:
     // world space in front of the eye. Drawn in the viewmodel pass over the
     // cleared depth buffer, so a wall never slices it, exactly like the arms.
     std::span<const MeshInstance> HeldInstances() const { return held_; }
+    // The object in reach and looked at this frame -- zero or one instance, the
+    // same placement it draws at in the world pass. The renderer rings it with a
+    // glowing outline so the player sees which one an E press would grab. Empty
+    // while carrying, since nothing is being aimed at then.
+    std::span<const MeshInstance> HighlightInstances() const { return highlight_; }
 
     // The HUD hint for what the E key would do right now: "[E] Pick up tongs"
     // when a loose object is in reach and looked at, "[E] Drop" while carrying,
@@ -70,7 +75,9 @@ private:
     int hovered_ = -1; // item in reach and looked at this frame, or -1
     bool interact_was_down_ = false;
 
-    // Rebuilt each Update: every resting item, and the carried one.
+    // Rebuilt each Update: every resting item, the carried one, and the one the
+    // outline glows around.
     std::vector<MeshInstance> world_;
     std::vector<MeshInstance> held_;
+    std::vector<MeshInstance> highlight_;
 };
