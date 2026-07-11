@@ -40,13 +40,16 @@ public:
 
 private:
     // One draw: a slice of its model's index buffer, the base colour the glTF
-    // material asked for, and the descriptor of the texture that modulates it.
+    // material asked for, the descriptor of the texture that modulates it, and the
+    // descriptor of its tangent-space normal map (the flat 1x1 default when the
+    // material has none).
     struct DrawPrimitive {
         DirectX::XMFLOAT4X4 transform;
         UINT first_index;
         UINT index_count;
         DirectX::XMFLOAT3 base_color;
         D3D12_GPU_DESCRIPTOR_HANDLE base_color_texture;
+        D3D12_GPU_DESCRIPTOR_HANDLE normal_texture;
     };
 
     // A Model, uploaded. The CPU-side Model that produced it is not needed again.

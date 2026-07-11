@@ -42,6 +42,10 @@ Texture2D<float4> g_base_color : register(t0);
 // The sun's depth buffer from the shadow pass: one channel, the light-space depth
 // of the nearest caster at each texel.
 Texture2D<float> g_shadow_map : register(t1);
+// The material's tangent-space normal map. A material with none is pointed at a
+// flat 1x1 (0,0,1), so there is no branch and no second pipeline state -- exactly
+// as the base colour handles a textureless material with a 1x1 white.
+Texture2D<float4> g_normal_map : register(t2);
 SamplerState g_sampler : register(s0);
 // Hardware PCF. SampleCmp compares the receiver's depth against the stored one
 // and bilinearly filters the 0/1 results, so a single tap already softens across
@@ -80,6 +84,8 @@ struct VSInput {
     float3 position : POSITION;
     float3 normal : NORMAL;
     float2 uv : TEXCOORD0;
+    // xyz is the surface tangent; w is the handedness of the bitangent.
+    float4 tangent : TANGENT;
 };
 
 struct PSInput {
@@ -88,6 +94,8 @@ struct PSInput {
     float3 normal : NORMAL;
     float2 uv : TEXCOORD0;
     float view_depth : TEXCOORD1;
+    // World-space tangent; w carries the handedness through untouched.
+    float4 tangent : TANGENT;
 };
 
 PSInput VSMain(VSInput input) {
@@ -100,6 +108,10 @@ PSInput VSMain(VSInput input) {
     const float3x3 normal_matrix =
         float3x3(g_normal_rows[0].xyz, g_normal_rows[1].xyz, g_normal_rows[2].xyz);
     output.normal = mul(input.normal, normal_matrix);
+    // A tangent is carried by the model matrix itself, not its inverse transpose:
+    // it lies in the surface and stretches with it, where the normal stays
+    // perpendicular. The handedness in w rides along unchanged.
+    output.tangent = float4(mul(input.tangent.xyz, (float3x3)g_model), input.tangent.w);
     output.uv = input.uv;
     // Under a left-handed perspective projection the clip-space w is the
     // view-space depth, which is what the fog wants.
@@ -136,7 +148,18 @@ float SunVisibility(float3 world, float3 normal) {
 }
 
 float4 PSMain(PSInput input) : SV_TARGET {
-    const float3 normal = normalize(input.normal);
+    // Rebuild the tangent frame and perturb the geometric normal by the map. The
+    // tangent is re-orthogonalized against the interpolated normal (Gram-Schmidt),
+    // which absorbs the small drift interpolation leaves between them; the
+    // bitangent's handedness comes from the w the vertex carried. A flat (0,0,1)
+    // sample -- what a material with no map reads -- leaves the normal untouched.
+    const float3 geometric_normal = normalize(input.normal);
+    const float3 tangent =
+        normalize(input.tangent.xyz - geometric_normal * dot(geometric_normal, input.tangent.xyz));
+    const float3 bitangent = cross(geometric_normal, tangent) * input.tangent.w;
+    const float3 tangent_normal = g_normal_map.Sample(g_sampler, input.uv).xyz * 2.0f - 1.0f;
+    const float3 normal = normalize(tangent_normal.x * tangent + tangent_normal.y * bitangent +
+                                    tangent_normal.z * geometric_normal);
 
     float3 albedo = g_albedo * g_base_color.Sample(g_sampler, input.uv).rgb;
     if (g_checker > 0.0f) {

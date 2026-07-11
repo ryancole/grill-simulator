@@ -30,6 +30,10 @@ Scene::Scene() {
     const std::uint32_t table = LoadModel("table.glb");
     const std::uint32_t crate = LoadModel("crate.glb");
     const std::uint32_t cooler = LoadModel("cooler.glb");
+    // A test rig for normal mapping: a bump-mapped panel, placed near the spawn
+    // below. Not part of the yard -- remove this and its instance once the effect
+    // is trusted. See build_normaltest in tools/gen_models.py.
+    const std::uint32_t normaltest = LoadModel("normaltest.glb");
 
     // The loose props are loaded so the renderer uploads them, but the scene
     // places no instances of them: Props sets out the starting handful and owns
@@ -55,6 +59,13 @@ Scene::Scene() {
     AddInstance(grill, XMMatrixTranslation(0.0f, 0.0f, 5.0f), kWhite);
     AddInstance(table, XMMatrixTranslation(-4.5f, 0.0f, 1.5f), kWhite);
     AddInstance(cooler, XMMatrixTranslation(3.6f, 0.0f, 6.5f), kWhite);
+
+    // The normal-mapping test panel, set just off the spawn's line of sight to the
+    // grill and turned to face the player so the sun rakes across its bumps.
+    AddInstance(normaltest,
+                XMMatrixRotationY(XMConvertToRadians(-30.0f)) *
+                    XMMatrixTranslation(2.8f, 0.0f, 2.5f),
+                kWhite);
 
     // Two crates, the upper one knocked askew. The smaller is the same box at
     // 0.875 -- an exact scale, unlike the trees', because these two always were

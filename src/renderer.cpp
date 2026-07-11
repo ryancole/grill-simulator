@@ -49,8 +49,9 @@ struct Constants {
 static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
 // Beyond the root constants the scene signature holds the base-colour table (1),
-// the frame constant buffer (2) and the shadow-map table (1) -- four DWORDs.
-static_assert(kConstantDwords + 4 <= 64, "A root signature holds at most 64 DWORDs in total");
+// the frame constant buffer (2), the shadow-map table (1) and the normal-map
+// table (1) -- five DWORDs.
+static_assert(kConstantDwords + 5 <= 64, "A root signature holds at most 64 DWORDs in total");
 
 // The shadow map is square and this many texels on a side. Matches kShadowMapSize
 // in scene.hlsl, which sizes one texel for the PCF taps. 2048 gives the fenced
@@ -131,6 +132,11 @@ constexpr DXGI_FORMAT kTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 // Slot 0 of the texture heap. A material with no base colour texture points
 // here, which spares the shader a branch and the pipeline a second variant.
 constexpr UINT kWhiteTexture = 0;
+
+// Slot 1: the flat tangent-space normal (0,0,1), encoded (128,128,255). A
+// material with no normal map points here, so the shader always samples a normal
+// map and a textureless surface simply reconstructs its geometric normal.
+constexpr UINT kFlatNormalTexture = 1;
 
 // One corner of a glyph quad, in the HUD text pass. Position is already in
 // normalized device coordinates, so the vertex shader is a pass-through.
@@ -404,13 +410,18 @@ void Renderer::CreatePipeline() {
     // t1: the shadow map, at a fixed slot in the same heap the base colour lives
     // in, bound once per frame rather than per draw.
     const CD3DX12_DESCRIPTOR_RANGE shadow_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
+    // t2: the base colour's normal map, its own one-entry table bound per draw
+    // exactly like the base colour. A separate table rather than widening the base
+    // colour's, so the two need not sit next to each other in the heap.
+    const CD3DX12_DESCRIPTOR_RANGE normal_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
 
-    CD3DX12_ROOT_PARAMETER parameters[4];
+    CD3DX12_ROOT_PARAMETER parameters[5];
     parameters[0].InitAsConstants(kConstantDwords, 0);
     parameters[1].InitAsDescriptorTable(1, &base_color_range, D3D12_SHADER_VISIBILITY_PIXEL);
     // b1: the frame constant buffer holding the sun's view-projection.
     parameters[2].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
     parameters[3].InitAsDescriptorTable(1, &shadow_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[4].InitAsDescriptorTable(1, &normal_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     // s0: anisotropic because the ground and the patio are seen almost edge on,
@@ -467,8 +478,10 @@ void Renderer::CreatePipeline() {
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24,
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
-    static_assert(sizeof(Vertex) == 32, "The input layout above spells out Vertex's offsets");
+    static_assert(sizeof(Vertex) == 48, "The input layout above spells out Vertex's offsets");
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
     pso.InputLayout = {input_layout, _countof(input_layout)};
@@ -527,8 +540,9 @@ void Renderer::CreateOutlinePipeline() {
     const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "outline.vs.cso");
     const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "outline.ps.cso");
 
-    // The same vertex stream the scene uses; the VS only reads POSITION and
-    // NORMAL, but the layout has to describe the whole 32-byte Vertex.
+    // The same 48-byte vertex stream the scene uses. The VS only reads POSITION
+    // and NORMAL, so the layout lists just what it consumes; the stride comes from
+    // the vertex buffer view and steps past the UV and tangent this pass ignores.
     const D3D12_INPUT_ELEMENT_DESC input_layout[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -807,9 +821,9 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     }
 
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
-    // The white texture, then every model image, then the HUD font atlas, then
-    // the sun's shadow map last.
-    heap_desc.NumDescriptors = 1 + image_count + 1 + 1;
+    // The white texture and the flat normal, then every model image, then the HUD
+    // font atlas, then the sun's shadow map last.
+    heap_desc.NumDescriptors = 2 + image_count + 1 + 1;
     heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(device_->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&texture_heap_)),
@@ -830,7 +844,16 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     white.levels.push_back(std::vector<std::byte>(4, std::byte{0xff}));
     textures_.push_back(UploadTexture(white, kWhiteTexture, staging));
 
-    UINT next_descriptor = kWhiteTexture + 1;
+    // The flat normal: tangent-space (0,0,1) encoded as (128,128,255,255). A
+    // material with no normal map samples this and perturbs its normal by nothing.
+    Image flat_normal{};
+    flat_normal.width = 1;
+    flat_normal.height = 1;
+    flat_normal.levels.push_back(
+        std::vector<std::byte>{std::byte{0x80}, std::byte{0x80}, std::byte{0xff}, std::byte{0xff}});
+    textures_.push_back(UploadTexture(flat_normal, kFlatNormalTexture, staging));
+
+    UINT next_descriptor = kFlatNormalTexture + 1;
     models_.resize(models.size());
 
     for (size_t i = 0; i < models.size(); ++i) {
@@ -872,14 +895,19 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
             // yard gets its colour.
             draw.base_color = {1.0f, 1.0f, 1.0f};
             UINT descriptor = kWhiteTexture;
+            UINT normal_descriptor = kFlatNormalTexture;
             if (primitive.material >= 0) {
                 const Material& material = model.materials[primitive.material];
                 draw.base_color = material.base_color;
                 if (material.base_color_image >= 0) {
                     descriptor = descriptors[material.base_color_image];
                 }
+                if (material.normal_image >= 0) {
+                    normal_descriptor = descriptors[material.normal_image];
+                }
             }
             draw.base_color_texture = TextureHandle(descriptor);
+            draw.normal_texture = TextureHandle(normal_descriptor);
 
             gpu.primitives.push_back(draw);
         }
@@ -1179,6 +1207,7 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
 
             command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
             command_list_->SetGraphicsRootDescriptorTable(1, primitive.base_color_texture);
+            command_list_->SetGraphicsRootDescriptorTable(4, primitive.normal_texture);
             command_list_->DrawIndexedInstanced(primitive.index_count, 1, primitive.first_index, 0,
                                                 0);
         }
