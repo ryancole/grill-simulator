@@ -562,7 +562,8 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
     }
 }
 
-void Renderer::Render(const Scene& scene, const ViewmodelPose& viewmodel,
+void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
+                      const ViewmodelPose& viewmodel, std::span<const MeshInstance> held_props,
                       const XMMATRIX& view_projection) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
@@ -596,6 +597,9 @@ void Renderer::Render(const Scene& scene, const ViewmodelPose& viewmodel,
     XMFLOAT3 sun{};
     XMStoreFloat3(&sun, XMVector3Normalize(XMLoadFloat3(&kSunDirection)));
     DrawInstances(scene.Instances(), view_projection, sun);
+    // The resting props take the yard's sun too: they are part of the world, and
+    // only pass into the near pass once the player lifts them.
+    DrawInstances(props, view_projection, sun);
 
     // The arms live about half a metre from the eye, close enough that any wall
     // the player leans against would be drawn in front of them. Throwing the
@@ -603,6 +607,10 @@ void Renderer::Render(const Scene& scene, const ViewmodelPose& viewmodel,
     // arms still occlude each other because they keep writing depth as they go.
     command_list_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
     DrawInstances(viewmodel.instances, view_projection, viewmodel.sun_direction);
+    // A carried object rides in the same pass as the arms, under the same key
+    // light bolted to the eye, so it is lit like something in the hand and never
+    // clipped by the wall the player is facing.
+    DrawInstances(held_props, view_projection, viewmodel.sun_direction);
 
     const CD3DX12_RESOURCE_BARRIER to_present = CD3DX12_RESOURCE_BARRIER::Transition(
         render_targets_[frame_index_].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,

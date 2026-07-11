@@ -25,6 +25,15 @@ struct MeshInstance {
     float checker;
 };
 
+// The models of the loose objects the player carries. The scene loads them like
+// any other prop so the renderer uploads them once, but it places no instances
+// of its own -- Props owns their placements and their movement.
+struct PropModels {
+    std::uint32_t tongs = 0;
+    std::uint32_t patty = 0;
+    std::uint32_t steak = 0;
+};
+
 // A backyard: a grill loaded from glTF, and everything else still a box.
 class Scene {
 public:
@@ -37,6 +46,9 @@ public:
     // The shared unit cube. The viewmodel builds its arms out of it too, and
     // needs to name it in the instances it hands the renderer.
     std::uint32_t CubeModel() const { return cube_; }
+
+    // The models Props places and moves. Loaded here, drawn there.
+    const PropModels& PropModelIds() const { return prop_models_; }
 
 private:
     std::uint32_t AddModel(Model model);
@@ -58,4 +70,5 @@ private:
     std::vector<Aabb> colliders_;
 
     std::uint32_t cube_ = 0;
+    PropModels prop_models_{};
 };

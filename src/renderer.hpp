@@ -20,9 +20,12 @@ public:
 
     void Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene);
     void Resize(UINT width, UINT height);
-    // `viewmodel` is drawn last, over a cleared depth buffer, so the player's
-    // arms are never sliced open by the wall they are standing against.
-    void Render(const Scene& scene, const ViewmodelPose& viewmodel,
+    // `props` are the loose objects resting in the yard, drawn with the scene.
+    // `viewmodel` and `held_props` are drawn last, over a cleared depth buffer,
+    // so the player's arms and whatever they carry are never sliced open by the
+    // wall they are standing against.
+    void Render(const Scene& scene, std::span<const MeshInstance> props,
+                const ViewmodelPose& viewmodel, std::span<const MeshInstance> held_props,
                 const DirectX::XMMATRIX& view_projection);
     void Shutdown();
 
