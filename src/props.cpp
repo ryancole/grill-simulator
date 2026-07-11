@@ -42,9 +42,13 @@ constexpr float kRestitutionThreshold = 0.6f;  // below this closing speed, no
                                                // bounce -- keeps a settling box
                                                // from buzzing on the surface.
 constexpr float kFriction = 0.55f;             // Coulomb coefficient at contacts.
-constexpr float kBaumgarte = 0.2f;             // fraction of penetration pushed
-                                               // out per tick, via a velocity bias.
-constexpr float kPenetrationSlop = 0.005f;     // overlap left uncorrected, so a
+constexpr float kBaumgarte = 0.8f;             // fraction of penetration worked off
+                                               // per tick by the pseudo-velocity.
+                                               // High is fine -- it is pose-only and
+                                               // adds no energy -- and keeps a fast
+                                               // impact from clipping through before
+                                               // it is pushed back out.
+constexpr float kPenetrationSlop = 0.002f;     // overlap left uncorrected, so a
                                                // resting box does not jitter.
 
 // A body slower than these for kSleepTime while touching something is parked, so
