@@ -38,6 +38,7 @@ add_executable(grill WIN32
   src/input.cpp
   src/model.cpp
   src/scene.cpp
+  src/props.cpp
   src/viewmodel.cpp
   src/renderer.cpp
   src/agility_exports.cpp)
@@ -67,7 +68,7 @@ add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY VSMain PROFILE vs_6_6 OUTP
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT scene.ps.cso)
 
 stage_assets(grill DIRECTORY assets/models
-  FILES grill.glb tree.glb table.glb crate.glb cooler.glb)
+  FILES grill.glb tree.glb table.glb crate.glb cooler.glb tongs.glb patty.glb steak.glb)
 
 stage_assets(grill DIRECTORY assets/audio
   FILES sizzle.wav)

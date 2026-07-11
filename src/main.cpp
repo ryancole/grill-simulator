@@ -2,6 +2,7 @@
 #include "camera.hpp"
 #include "dx_common.hpp"
 #include "input.hpp"
+#include "props.hpp"
 #include "renderer.hpp"
 #include "scene.hpp"
 #include "viewmodel.hpp"
@@ -30,6 +31,7 @@ struct Game {
     Scene scene;
     Camera camera;
     Viewmodel viewmodel{scene.CubeModel()};
+    Props props{scene.PropModelIds()};
     Input input;
     Audio audio;
 };
@@ -141,7 +143,8 @@ int Run(HINSTANCE instance, int show_command) {
     RECT bounds = {0, 0, static_cast<LONG>(kDefaultWidth), static_cast<LONG>(kDefaultHeight)};
     AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
 
-    HWND hwnd = CreateWindowExW(0, kWindowClass, L"Grill Simulator - click to look, WASD to walk",
+    HWND hwnd = CreateWindowExW(0, kWindowClass,
+                                L"Grill Simulator - click to look, WASD to walk, E to grab",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                 bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr,
                                 nullptr, instance, &game);
@@ -182,14 +185,18 @@ int Run(HINSTANCE instance, int show_command) {
         game.camera.Look(mouse_dx, mouse_dy);
         game.camera.Update(game.input, game.scene.Colliders(), dt);
 
-        // The camera-to-world matrix is both the viewmodel's pose and the
-        // listener's ear and facing, so it is built once and shared.
+        // The camera-to-world matrix is the viewmodel's pose, the listener's ear
+        // and facing, and the reach a grab is measured along, so it is built
+        // once and shared.
         const XMMATRIX camera_to_world = game.camera.CameraToWorldMatrix();
         game.audio.Update(camera_to_world, dt);
+        game.props.Update(camera_to_world, game.input, game.scene.Colliders());
 
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
-        game.renderer.Render(game.scene, game.viewmodel.Pose(camera_to_world), view_projection);
+        game.renderer.Render(game.scene, game.props.WorldInstances(),
+                             game.viewmodel.Pose(camera_to_world), game.props.HeldInstances(),
+                             view_projection);
     }
 
     game.renderer.Shutdown();
