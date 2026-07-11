@@ -12,6 +12,12 @@ struct Aabb {
     DirectX::XMFLOAT3 max;
 };
 
+// The axis-aligned bound of `bounds` carried through `transform`. All eight
+// corners are transformed and re-bounded, so a rotated box gives a loose but
+// correct fit. The scene builds its colliders with this; the props measure their
+// own box shape with it.
+Aabb TransformBounds(const Aabb& bounds, DirectX::FXMMATRIX transform);
+
 // How far above its feet the player can rise without jumping. A box whose top is
 // within a step is climbed rather than collided with, which is what lets the
 // player walk onto the patio slab instead of being stopped by its 6 cm lip.

@@ -108,30 +108,23 @@ void Props::DeriveBodyShape(Item& item, const Model& model) {
     XMVECTOR box_min = XMVectorReplicate(FLT_MAX);
     XMVECTOR box_max = XMVectorReplicate(-FLT_MAX);
     for (const Primitive& primitive : model.primitives) {
-        const XMMATRIX transform = XMLoadFloat4x4(&primitive.transform);
-        const XMVECTOR lo = XMLoadFloat3(&primitive.bounds.min);
-        const XMVECTOR hi = XMLoadFloat3(&primitive.bounds.max);
-        // A node transform can rotate the bounds, so all eight corners are carried
-        // across and re-bounded rather than just min and max.
-        for (int corner = 0; corner < 8; ++corner) {
-            const XMVECTOR point = XMVectorSelect(lo, hi, XMVectorSelectControl(corner & 1,
-                                                                                (corner >> 1) & 1,
-                                                                                (corner >> 2) & 1, 0));
-            const XMVECTOR world = XMVector3TransformCoord(point, transform);
-            box_min = XMVectorMin(box_min, world);
-            box_max = XMVectorMax(box_max, world);
-        }
+        const Aabb bounds = TransformBounds(primitive.bounds, XMLoadFloat4x4(&primitive.transform));
+        box_min = XMVectorMin(box_min, XMLoadFloat3(&bounds.min));
+        box_max = XMVectorMax(box_max, XMLoadFloat3(&bounds.max));
     }
 
-    const XMVECTOR half = XMVectorScale(XMVectorSubtract(box_max, box_min), 0.5f);
+    // Floor every extent so a perfectly flat mesh (or, defensively, a model with
+    // no primitives at all) still gives a non-degenerate box: an invertible
+    // inertia tensor and finite collision corners. The stored half-extents use
+    // the same floored value, so the collider and the inertia agree.
+    XMFLOAT3 h;
+    XMStoreFloat3(&h, XMVectorMax(XMVectorScale(XMVectorSubtract(box_max, box_min), 0.5f),
+                                  XMVectorReplicate(1e-3f)));
     const XMVECTOR center = XMVectorScale(XMVectorAdd(box_max, box_min), 0.5f);
-    XMStoreFloat3(&item.half_extents, half);
+    item.half_extents = h;
     XMStoreFloat3(&item.com_offset, center);
 
-    // Mass and inertia of a solid box. A degenerate extent (a perfectly flat
-    // patty) is floored so the tensor stays invertible.
-    XMFLOAT3 h;
-    XMStoreFloat3(&h, XMVectorMax(half, XMVectorReplicate(1e-3f)));
+    // Mass and inertia of a solid box.
     const float mass = kDensity * (2.0f * h.x) * (2.0f * h.y) * (2.0f * h.z);
     item.inv_mass = 1.0f / mass;
     // Solid box: I = (1/3) m (h_a^2 + h_b^2) about each axis, in half-extents.
@@ -263,6 +256,7 @@ int Props::StepBody(Item& item, float h, std::span<const Aabb> colliders) const 
         XMVECTOR normal; // unit, world; points out of the surface into the body.
         XMVECTOR r;      // contact point minus centre of mass, world.
         float depth;     // penetration, metres.
+        float k;         // effective mass along the normal, precomputed once.
     };
     Contact contacts[64];
     int contact_count = 0;
@@ -284,39 +278,41 @@ int Props::StepBody(Item& item, float h, std::span<const Aabb> colliders) const 
             }
             // Pick the face to push the corner out of, one axis at a time, then
             // take the shallowest across the three axes. On each axis the corner
-            // is sent back out the face it came IN through -- the one it is moving
-            // away from into the box -- not the nearer face. This is what keeps a
-            // thin patty that has sunk into the thick patio slab from being shoved
-            // out the slab's *bottom*: it fell in through the top, so it is lifted
-            // back out the top, however deep it got. Resolving per axis (rather
-            // than over all six faces at once) means a prop sliding flat along the
-            // floor can never be flung out a far side wall it happens to be moving
-            // toward -- only the near, shallow floor face wins.
+            // is sent back out toward the side it came from -- the side its
+            // previous position (one substep ago) was on -- not the nearer face.
+            // This is what keeps a thin patty that has sunk into the thick patio
+            // slab from being shoved out the slab's *bottom*: it fell in through
+            // the top, so it is lifted back out the top, however deep it got.
+            //
+            // Using where the corner *was*, rather than which way it is moving
+            // now, is what makes a bounce safe: a corner rebounding up off the
+            // ground still came from above, so it is pushed back up the shallow
+            // top face -- never flung down through the far bottom of the collider.
+            // And resolving per axis means a prop sliding flat along the floor is
+            // never flung out a far side wall.
             const XMVECTOR r = XMVectorSubtract(point, position);
-            XMFLOAT3 cv;
-            XMStoreFloat3(&cv, XMVectorAdd(velocity, XMVector3Cross(omega, r)));
+            XMFLOAT3 prev; // where this corner sat a substep ago
+            XMStoreFloat3(&prev, XMVectorSubtract(point, XMVectorScale(
+                                                             XMVectorAdd(velocity,
+                                                                         XMVector3Cross(omega, r)),
+                                                             h)));
 
             const float box_min[3] = {box.min.x, box.min.y, box.min.z};
             const float box_max[3] = {box.max.x, box.max.y, box.max.z};
             const float pc[3] = {p.x, p.y, p.z};
-            const float vc[3] = {cv.x, cv.y, cv.z};
+            const float pv[3] = {prev.x, prev.y, prev.z};
 
             int best_axis = -1;
             float best_depth = FLT_MAX;
             float best_sign = 0.0f;
             for (int a = 0; a < 3; ++a) {
+                const float center = 0.5f * (box_min[a] + box_max[a]);
                 float sign;
                 float depth;
-                if (vc[a] < -1e-4f) { // moving toward -a: entered through the +a face
+                if (pv[a] >= center) { // came from the +a side: push back out +a
                     sign = 1.0f;
                     depth = box_max[a] - pc[a];
-                } else if (vc[a] > 1e-4f) { // moving toward +a: entered through -a
-                    sign = -1.0f;
-                    depth = pc[a] - box_min[a];
-                } else if (box_max[a] - pc[a] < pc[a] - box_min[a]) { // still: nearer face
-                    sign = 1.0f;
-                    depth = box_max[a] - pc[a];
-                } else {
+                } else { // came from the -a side: push back out -a
                     sign = -1.0f;
                     depth = pc[a] - box_min[a];
                 }
@@ -331,7 +327,11 @@ int Props::StepBody(Item& item, float h, std::span<const Aabb> colliders) const 
                 const XMVECTOR normal =
                     XMVectorSet(best_axis == 0 ? best_sign : 0.0f, best_axis == 1 ? best_sign : 0.0f,
                                 best_axis == 2 ? best_sign : 0.0f, 0.0f);
-                contacts[contact_count++] = {normal, r, best_depth};
+                // Effective mass along this normal, used by both solver passes.
+                const XMVECTOR rn = XMVector3Cross(r, normal);
+                const XMVECTOR angular_n = XMVector3Cross(apply_inv_inertia(rn), r);
+                const float k = item.inv_mass + XMVectorGetX(XMVector3Dot(angular_n, normal));
+                contacts[contact_count++] = {normal, r, best_depth, k};
             }
         }
     }
@@ -342,17 +342,14 @@ int Props::StepBody(Item& item, float h, std::span<const Aabb> colliders) const 
             const XMVECTOR n = contacts[c].normal;
             const XMVECTOR r = contacts[c].r;
 
-            // Velocity of the material point at the contact.
-            XMVECTOR point_velocity = XMVectorAdd(velocity, XMVector3Cross(omega, r));
-            const float vn = XMVectorGetX(XMVector3Dot(point_velocity, n));
-
-            // Effective mass along the normal.
-            const XMVECTOR rn = XMVector3Cross(r, n);
-            const XMVECTOR angular_n = XMVector3Cross(apply_inv_inertia(rn), r);
-            const float k = item.inv_mass + XMVectorGetX(XMVector3Dot(angular_n, n));
+            const float k = contacts[c].k;
             if (k <= 0.0f) {
                 continue;
             }
+
+            // Velocity of the material point at the contact.
+            XMVECTOR point_velocity = XMVectorAdd(velocity, XMVector3Cross(omega, r));
+            const float vn = XMVectorGetX(XMVector3Dot(point_velocity, n));
 
             // Restitution only for genuine impacts; a slow settle gets none.
             // Penetration is NOT corrected here -- doing that as a velocity would
@@ -401,9 +398,7 @@ int Props::StepBody(Item& item, float h, std::span<const Aabb> colliders) const 
             const XMVECTOR n = contacts[c].normal;
             const XMVECTOR r = contacts[c].r;
 
-            const XMVECTOR rn = XMVector3Cross(r, n);
-            const XMVECTOR angular_n = XMVector3Cross(apply_inv_inertia(rn), r);
-            const float k = item.inv_mass + XMVectorGetX(XMVector3Dot(angular_n, n));
+            const float k = contacts[c].k;
             if (k <= 0.0f) {
                 continue;
             }
