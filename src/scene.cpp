@@ -21,29 +21,6 @@ constexpr XMFLOAT3 kGrass{0.24f, 0.36f, 0.18f};
 constexpr XMFLOAT3 kConcrete{0.55f, 0.54f, 0.51f};
 constexpr XMFLOAT3 kFenceWood{0.45f, 0.32f, 0.21f};
 
-// The world-space bound of a transformed box. For a rotated one that is a loose
-// fit, which for a tree canopy nobody can reach is not worth a separate
-// oriented-box test.
-Aabb TransformBounds(const Aabb& bounds, FXMMATRIX transform) {
-    XMVECTOR minimum = XMVectorReplicate(FLT_MAX);
-    XMVECTOR maximum = XMVectorReplicate(-FLT_MAX);
-
-    for (const float x : {bounds.min.x, bounds.max.x}) {
-        for (const float y : {bounds.min.y, bounds.max.y}) {
-            for (const float z : {bounds.min.z, bounds.max.z}) {
-                const XMVECTOR corner = XMVector3Transform(XMVectorSet(x, y, z, 1.0f), transform);
-                minimum = XMVectorMin(minimum, corner);
-                maximum = XMVectorMax(maximum, corner);
-            }
-        }
-    }
-
-    Aabb result{};
-    XMStoreFloat3(&result.min, minimum);
-    XMStoreFloat3(&result.max, maximum);
-    return result;
-}
-
 } // namespace
 
 Scene::Scene() {

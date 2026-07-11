@@ -31,7 +31,7 @@ struct Game {
     Scene scene;
     Camera camera;
     Viewmodel viewmodel{scene.CubeModel()};
-    Props props{scene.PropModelIds()};
+    Props props{scene};
     Input input;
     Audio audio;
 };
@@ -190,7 +190,7 @@ int Run(HINSTANCE instance, int show_command) {
         // once and shared.
         const XMMATRIX camera_to_world = game.camera.CameraToWorldMatrix();
         game.audio.Update(camera_to_world, dt);
-        game.props.Update(camera_to_world, game.input, game.scene.Colliders());
+        game.props.Update(camera_to_world, game.input, game.scene.Colliders(), dt);
 
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
