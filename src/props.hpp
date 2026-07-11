@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 class Input;
@@ -38,6 +39,11 @@ public:
     // cleared depth buffer, so a wall never slices it, exactly like the arms.
     std::span<const MeshInstance> HeldInstances() const { return held_; }
 
+    // The HUD hint for what the E key would do right now: "[E] Pick up tongs"
+    // when a loose object is in reach and looked at, "[E] Drop" while carrying,
+    // or empty when E would do nothing. Recomputed each Update.
+    std::string PromptText() const;
+
 private:
     // One loose object. `resting` is its world transform when set down;
     // `held_local` is its pose in eye space while carried, lifted into the world
@@ -46,9 +52,10 @@ private:
         std::uint32_t model;
         DirectX::XMFLOAT4X4 resting;
         DirectX::XMFLOAT4X4 held_local;
+        std::string name; // As it reads in the pick-up prompt.
     };
 
-    void Add(std::uint32_t model, DirectX::XMFLOAT3 position, float yaw_degrees,
+    void Add(std::uint32_t model, std::string name, DirectX::XMFLOAT3 position, float yaw_degrees,
              DirectX::FXMMATRIX held_local);
     // The item the player is looking at within reach, or -1. Nearest to the
     // centre of the gaze wins.
@@ -60,6 +67,7 @@ private:
 
     std::vector<Item> items_;
     int carried_ = -1; // index into items_, or -1
+    int hovered_ = -1; // item in reach and looked at this frame, or -1
     bool interact_was_down_ = false;
 
     // Rebuilt each Update: every resting item, and the carried one.

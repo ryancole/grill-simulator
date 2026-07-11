@@ -56,15 +56,17 @@ MeshInstance MakeInstance(std::uint32_t model, FXMMATRIX transform) {
 Props::Props(const PropModels& models) {
     // The tongs lie across the grill's side shelf; the meat waits on the picnic
     // table. All four sit in the player's view from the spawn point.
-    Add(models.tongs, {1.15f, 0.78f, 5.0f}, 90.0f, TongsInHand());
-    Add(models.steak, {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand());
-    Add(models.patty, {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand());
-    Add(models.patty, {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand());
+    Add(models.tongs, "tongs", {1.15f, 0.78f, 5.0f}, 90.0f, TongsInHand());
+    Add(models.steak, "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand());
+    Add(models.patty, "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand());
+    Add(models.patty, "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand());
 }
 
-void Props::Add(std::uint32_t model, XMFLOAT3 position, float yaw_degrees, FXMMATRIX held_local) {
+void Props::Add(std::uint32_t model, std::string name, XMFLOAT3 position, float yaw_degrees,
+                FXMMATRIX held_local) {
     Item item{};
     item.model = model;
+    item.name = std::move(name);
     XMStoreFloat4x4(&item.resting, XMMatrixRotationY(XMConvertToRadians(yaw_degrees)) *
                                        XMMatrixTranslation(position.x, position.y, position.z));
     XMStoreFloat4x4(&item.held_local, held_local);
@@ -90,6 +92,11 @@ void Props::Update(const XMMATRIX& camera_to_world, const Input& input,
     }
     interact_was_down_ = down;
 
+    // What the prompt reports this frame: nothing to pick while carrying, else
+    // whatever is in reach and looked at. Cheap enough to recompute outright for
+    // a handful of items.
+    hovered_ = carried_ >= 0 ? -1 : PickTarget(eye, forward);
+
     // Rebuild the two draw lists from the current state. There are a handful of
     // items, so this is cheaper than tracking which one moved.
     world_.clear();
@@ -105,6 +112,16 @@ void Props::Update(const XMMATRIX& camera_to_world, const Input& input,
                                      XMLoadFloat4x4(&items_[carried_].held_local) *
                                          camera_to_world));
     }
+}
+
+std::string Props::PromptText() const {
+    if (carried_ >= 0) {
+        return "[E] Drop";
+    }
+    if (hovered_ >= 0) {
+        return "[E] Pick up " + items_[hovered_].name;
+    }
+    return {};
 }
 
 int Props::PickTarget(FXMVECTOR eye, FXMVECTOR forward) const {

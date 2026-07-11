@@ -1,5 +1,7 @@
 #include "renderer.hpp"
 
+#include "image.hpp"
+
 #include <d3dx12/d3dx12.h>
 
 #include <DirectXMath.h>
@@ -57,6 +59,37 @@ constexpr DXGI_FORMAT kTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 // here, which spares the shader a branch and the pipeline a second variant.
 constexpr UINT kWhiteTexture = 0;
 
+// One corner of a glyph quad, in the HUD text pass. Position is already in
+// normalized device coordinates, so the vertex shader is a pass-through.
+struct TextVertex {
+    XMFLOAT2 position;
+    XMFLOAT2 uv;
+};
+
+// Mirrors the Constants cbuffer in shaders/text.hlsl. Eight DWORDs of root
+// constants: the colour, the distance-field's texel width over the atlas size,
+// and a clip-space nudge the shadow pass rides on.
+struct TextConstants {
+    XMFLOAT4 color;
+    XMFLOAT2 unit_range;
+    XMFLOAT2 ndc_offset;
+};
+
+static_assert(sizeof(TextConstants) % sizeof(UINT) == 0);
+constexpr UINT kTextConstantDwords = sizeof(TextConstants) / sizeof(UINT);
+
+// The most glyphs one HUD line can draw. A prompt is a few words; this is roomy.
+constexpr UINT kMaxTextGlyphs = 256;
+constexpr UINT kTextVerticesPerGlyph = 6; // Two triangles.
+constexpr UINT kTextRegionVertices = kMaxTextGlyphs * kTextVerticesPerGlyph;
+constexpr UINT kTextRegionBytes = kTextRegionVertices * sizeof(TextVertex);
+
+// Text height as a fraction of the back buffer's, so the prompt keeps its size
+// across resolutions.
+constexpr float kTextHeightFraction = 0.040f;
+// The shadow's offset from the text, in pixels, down and to the right.
+constexpr float kTextShadowPixels = 1.25f;
+
 #ifndef NDEBUG
 constexpr bool kEnableDebugLayer = true;
 #else
@@ -98,6 +131,7 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene
     CreateDepthBuffer();
     CreatePipeline();
     CreateSceneGeometry(scene);
+    CreateTextPipeline();
 
     initialized_ = true;
 }
@@ -435,7 +469,8 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     }
 
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
-    heap_desc.NumDescriptors = 1 + image_count; // The white texture, then the rest.
+    // The white texture, then every model image, then the HUD font atlas last.
+    heap_desc.NumDescriptors = 1 + image_count + 1;
     heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(device_->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&texture_heap_)),
@@ -511,6 +546,11 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
         }
     }
 
+    // The HUD font atlas takes the descriptor after the last model image, and
+    // rides the same command list and staging buffers to the GPU.
+    atlas_descriptor_ = next_descriptor;
+    LoadFontAtlas(staging);
+
     ThrowIfFailed(command_list_->Close(), "CommandList::Close");
     ID3D12CommandList* lists[] = {command_list_.Get()};
     queue_->ExecuteCommandLists(_countof(lists), lists);
@@ -518,6 +558,226 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     // The staging buffers are released when this function returns, so the copies
     // have to have landed before it does.
     FlushGpu();
+}
+
+void Renderer::LoadFontAtlas(std::vector<ComPtr<ID3D12Resource>>& staging) {
+    const std::filesystem::path dir = ExecutableDirectory() / "assets" / "fonts";
+    font_ = LoadFontCsv(dir / "hud.csv");
+
+    const std::vector<std::byte> png = ReadBinaryFile(dir / "hud.png");
+    Image atlas = DecodeImage(png);
+    atlas_width_ = atlas.width;
+    atlas_height_ = atlas.height;
+
+    // Deliberately no mip chain: a lower mip of a distance-field atlas averages
+    // neighbouring glyphs' distances together, so the edges bleed and the text
+    // turns to mush the moment it is minified. DecodeImage built the chain; drop
+    // all but the full-resolution level before the upload.
+    atlas.levels.resize(1);
+    atlas_texture_ = UploadTexture(atlas, atlas_descriptor_, staging);
+}
+
+void Renderer::CreateTextPipeline() {
+    // b0: the root constants shared by both stages. t0: the atlas, in the same
+    // shader-visible heap the scene binds. s0: a linear clamp sampler, baked in.
+    const CD3DX12_DESCRIPTOR_RANGE atlas_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+    CD3DX12_ROOT_PARAMETER parameters[2];
+    parameters[0].InitAsConstants(kTextConstantDwords, 0);
+    parameters[1].InitAsDescriptorTable(1, &atlas_range, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    root_desc.Init(_countof(parameters), parameters, 1, &sampler,
+                   D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr =
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr)) {
+        std::string message = error
+                                  ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                                error->GetBufferSize())
+                                  : "unknown error";
+        throw std::runtime_error("D3D12SerializeRootSignature(text) failed: " + message);
+    }
+    ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                               signature->GetBufferSize(),
+                                               IID_PPV_ARGS(&text_root_signature_)),
+                  "CreateRootSignature(text)");
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "text.vs.cso");
+    const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "text.ps.cso");
+
+    const D3D12_INPUT_ELEMENT_DESC input_layout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+         0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+         0},
+    };
+    static_assert(sizeof(TextVertex) == 16, "The input layout above spells out TextVertex");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.InputLayout = {input_layout, _countof(input_layout)};
+    pso.pRootSignature = text_root_signature_.Get();
+    pso.VS = {vs.data(), vs.size()};
+    pso.PS = {ps.data(), ps.size()};
+
+    // The glyph quads have no consistent winding, so cull nothing.
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+    // Straight-alpha blend: the shader's coverage is the source alpha, and the
+    // text sits over the finished frame. The colour writes are alpha-weighted;
+    // the destination alpha is left as it was.
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    D3D12_RENDER_TARGET_BLEND_DESC& blend = pso.BlendState.RenderTarget[0];
+    blend.BlendEnable = TRUE;
+    blend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    // The HUD sits on top of everything, so it neither tests nor writes depth.
+    pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = kBackBufferFormat;
+    pso.SampleDesc.Count = 1;
+
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&text_pipeline_state_)),
+                  "CreateGraphicsPipelineState(text)");
+
+    // One upload-heap region per frame in flight, mapped once and left mapped.
+    // MoveToNextFrame retires a frame before its region is reused, so the CPU
+    // never writes over quads the GPU is still reading.
+    const CD3DX12_HEAP_PROPERTIES upload_heap(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RESOURCE_DESC buffer_desc =
+        CD3DX12_RESOURCE_DESC::Buffer(static_cast<UINT64>(kTextRegionBytes) * kFrameCount);
+    ThrowIfFailed(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&text_vertex_buffer_)),
+                  "CreateCommittedResource(text vertices)");
+
+    void* mapped = nullptr;
+    const CD3DX12_RANGE no_read(0, 0);
+    ThrowIfFailed(text_vertex_buffer_->Map(0, &no_read, &mapped), "Text vertices::Map");
+    text_vertex_mapped_ = static_cast<std::byte*>(mapped);
+}
+
+void Renderer::DrawText(std::string_view text) {
+    if (text.empty() || width_ == 0 || height_ == 0) {
+        return;
+    }
+
+    const float pixel = static_cast<float>(height_) * kTextHeightFraction;
+
+    // Centre the line: total advance sets the left edge, and the baseline sits a
+    // little above the bottom of the screen.
+    float total_width = 0.0f;
+    for (const char c : text) {
+        if (const Glyph* glyph = font_.Find(static_cast<unsigned char>(c))) {
+            total_width += glyph->advance * pixel;
+        }
+    }
+    float pen_x = (static_cast<float>(width_) - total_width) * 0.5f;
+    const float baseline = static_cast<float>(height_) - pixel * 2.2f;
+
+    const float atlas_w = static_cast<float>(atlas_width_);
+    const float atlas_h = static_cast<float>(atlas_height_);
+
+    // Pixel coordinates (origin top-left) into clip space.
+    auto to_ndc = [this](float px, float py) {
+        return XMFLOAT2{px / static_cast<float>(width_) * 2.0f - 1.0f,
+                        1.0f - py / static_cast<float>(height_) * 2.0f};
+    };
+
+    auto* vertices = reinterpret_cast<TextVertex*>(text_vertex_mapped_ +
+                                                   static_cast<size_t>(frame_index_) *
+                                                       kTextRegionBytes);
+    UINT count = 0;
+    for (const char c : text) {
+        const Glyph* glyph = font_.Find(static_cast<unsigned char>(c));
+        if (glyph == nullptr) {
+            continue;
+        }
+        if (glyph->visible && count + kTextVerticesPerGlyph <= kTextRegionVertices) {
+            // The `b` corners share plane_b and atlas_b, the `t` corners share
+            // plane_t and atlas_t; both axes point down, so this lands upright.
+            const float xl = pen_x + glyph->plane_l * pixel;
+            const float xr = pen_x + glyph->plane_r * pixel;
+            const float yb = baseline + glyph->plane_b * pixel;
+            const float yt = baseline + glyph->plane_t * pixel;
+
+            const float ul = glyph->atlas_l / atlas_w;
+            const float ur = glyph->atlas_r / atlas_w;
+            const float vb = glyph->atlas_b / atlas_h;
+            const float vt = glyph->atlas_t / atlas_h;
+
+            const TextVertex lb{to_ndc(xl, yb), {ul, vb}};
+            const TextVertex rb{to_ndc(xr, yb), {ur, vb}};
+            const TextVertex rt{to_ndc(xr, yt), {ur, vt}};
+            const TextVertex lt{to_ndc(xl, yt), {ul, vt}};
+
+            vertices[count++] = lb;
+            vertices[count++] = rb;
+            vertices[count++] = rt;
+            vertices[count++] = lb;
+            vertices[count++] = rt;
+            vertices[count++] = lt;
+        }
+        pen_x += glyph->advance * pixel;
+    }
+    if (count == 0) {
+        return;
+    }
+
+    command_list_->SetPipelineState(text_pipeline_state_.Get());
+    command_list_->SetGraphicsRootSignature(text_root_signature_.Get());
+    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    command_list_->SetGraphicsRootDescriptorTable(1, TextureHandle(atlas_descriptor_));
+
+    D3D12_VERTEX_BUFFER_VIEW vbv{};
+    vbv.BufferLocation = text_vertex_buffer_->GetGPUVirtualAddress() +
+                         static_cast<UINT64>(frame_index_) * kTextRegionBytes;
+    vbv.StrideInBytes = sizeof(TextVertex);
+    vbv.SizeInBytes = count * sizeof(TextVertex);
+    command_list_->IASetVertexBuffers(0, 1, &vbv);
+
+    TextConstants constants{};
+    constants.unit_range = {kDistanceRange / static_cast<float>(atlas_width_),
+                            kDistanceRange / static_cast<float>(atlas_height_)};
+
+    // A soft drop shadow first, nudged down and right, so the text reads over a
+    // bright sky or a dark fence alike; then the text itself over the top.
+    constants.color = {0.0f, 0.0f, 0.0f, 0.75f};
+    constants.ndc_offset = {2.0f * kTextShadowPixels / static_cast<float>(width_),
+                            -2.0f * kTextShadowPixels / static_cast<float>(height_)};
+    command_list_->SetGraphicsRoot32BitConstants(0, kTextConstantDwords, &constants, 0);
+    command_list_->DrawInstanced(count, 1, 0, 0);
+
+    constants.color = {1.0f, 1.0f, 1.0f, 1.0f};
+    constants.ndc_offset = {0.0f, 0.0f};
+    command_list_->SetGraphicsRoot32BitConstants(0, kTextConstantDwords, &constants, 0);
+    command_list_->DrawInstanced(count, 1, 0, 0);
 }
 
 void Renderer::DrawInstances(std::span<const MeshInstance> instances,
@@ -564,7 +824,7 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
 
 void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       const ViewmodelPose& viewmodel, std::span<const MeshInstance> held_props,
-                      const XMMATRIX& view_projection) {
+                      const XMMATRIX& view_projection, std::string_view hud_prompt) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
@@ -611,6 +871,9 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // light bolted to the eye, so it is lit like something in the hand and never
     // clipped by the wall the player is facing.
     DrawInstances(held_props, view_projection, viewmodel.sun_direction);
+
+    // The HUD goes on last, blended over the finished frame with depth off.
+    DrawText(hud_prompt);
 
     const CD3DX12_RESOURCE_BARRIER to_present = CD3DX12_RESOURCE_BARRIER::Transition(
         render_targets_[frame_index_].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,

@@ -27,6 +27,7 @@ include(AgilitySDK)
 include(Shaders)
 include(FastGltf)
 include(DirectXTK12Audio)
+include(Fonts)
 include(Assets)
 
 add_executable(grill WIN32
@@ -40,6 +41,7 @@ add_executable(grill WIN32
   src/scene.cpp
   src/props.cpp
   src/viewmodel.cpp
+  src/font.cpp
   src/renderer.cpp
   src/agility_exports.cpp)
 
@@ -66,9 +68,15 @@ agility_sdk_stage_runtime(grill)
 
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT scene.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT scene.ps.cso)
+add_hlsl_shader(grill SOURCE shaders/text.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT text.vs.cso)
+add_hlsl_shader(grill SOURCE shaders/text.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT text.ps.cso)
 
 stage_assets(grill DIRECTORY assets/models
   FILES grill.glb tree.glb table.glb crate.glb cooler.glb tongs.glb patty.glb steak.glb)
 
 stage_assets(grill DIRECTORY assets/audio
   FILES sizzle.wav)
+
+# The HUD font atlas is baked from the committed .ttf at build time; only the
+# .png/.csv it produces are read at runtime, and those live in the build tree.
+bake_font_atlas(grill FONT assets/fonts/Inter-Regular.ttf IMAGE hud.png CSV hud.csv)
