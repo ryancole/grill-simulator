@@ -17,9 +17,14 @@ class PxRigidDynamic;
 // `prop_index` is >= 0 only for a carryable prop -- its index in Props::items_ --
 // which is how the gaze-pick sweep tells a grabbable prop (meat, tongs) from the
 // heavy furniture (grill, cooler), which is dynamic and shovable but not carried.
+//
+// `meat` marks the steak and patties, so the physics contact report can single
+// them out and play a wet splat when one lands on something -- the tongs, grill
+// and cooler carry the same tag but leave this false, so they stay silent.
 struct BodyTag {
     int prop_index = -1;
     float knock_rating = 1.0f;
+    bool meat = false;
 };
 
 // The shared core of everything the player can bump: a handle to a dynamic PhysX
@@ -38,7 +43,8 @@ class RigidBody {
 public:
     // Take ownership of the tag values for an actor the caller just created in the
     // scene. Does not touch userData yet -- see Bind.
-    void Adopt(physx::PxRigidDynamic* actor, float knock_rating, int prop_index = -1);
+    void Adopt(physx::PxRigidDynamic* actor, float knock_rating, int prop_index = -1,
+               bool meat = false);
     // Point the actor's userData at our tag. Call once, after this RigidBody is in
     // the storage slot it will live in for the session.
     void Bind();

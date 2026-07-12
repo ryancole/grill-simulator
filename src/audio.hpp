@@ -10,10 +10,11 @@ class Sound;
 class Channel;
 } // namespace FMOD
 
-// The backyard's sound. For now that is one thing: the grill, sizzling from its
-// own spot in the world, so it swells as the player walks up to it and pans left
-// or right as they turn. FMOD does the mixing on its own thread; this class only
-// re-poses the listener each frame and lets the engine tidy up after itself.
+// The backyard's sound. Two things for now: the grill sizzling from its own spot
+// in the world, so it swells as the player walks up to it and pans as they turn;
+// and one-shot splats when meat the physics reports lands on something. FMOD does
+// the mixing on its own thread; this class re-poses the listener each frame, fires
+// the impacts the loop hands it, and lets the engine tidy up after itself.
 class Audio {
 public:
     Audio();
@@ -29,9 +30,19 @@ public:
     // `dt` is the frame time the loop has already clamped.
     void Update(DirectX::FXMMATRIX camera_to_world, float dt);
 
+    // Fires a one-shot splat at `position` in the world, for a meat body the
+    // physics reported landing on something. `strength` is the contact impulse the
+    // solver measured; it is mapped to a volume, so a hurled patty cracks louder
+    // than one set down. A fresh FMOD voice is taken each call and freed by the
+    // engine when the clip ends, so overlapping splats layer rather than cut off.
+    // A no-op until the listener has been posed (the first Update) or if the engine
+    // never came up.
+    void PlayImpact(const DirectX::XMFLOAT3& position, float strength);
+
 private:
     FMOD::System* system_ = nullptr;
     FMOD::Sound* sizzle_ = nullptr;
+    FMOD::Sound* splat_ = nullptr;
     FMOD::Channel* channel_ = nullptr;
 
     // Set once the engine hits an error it will not come back from -- no audio

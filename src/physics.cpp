@@ -1,5 +1,7 @@
 #include "physics.hpp"
 
+#include "rigid_body.hpp"
+
 #include <PxPhysicsAPI.h>
 
 #include <algorithm>
@@ -11,6 +13,100 @@ namespace {
 constexpr float kGravity = 20.0f;         // m/s^2 down; punchier than 9.81.
 constexpr float kSubstep = 1.0f / 120.0f; // fixed physics tick.
 constexpr int kMaxSubsteps = 8;           // catch-up cap, so a stall never bursts.
+
+// Contacts below this impulse magnitude are the meat settling and jostling in
+// place -- a resting patty nudged by its neighbour -- not a real landing, so
+// they raise no sound. A drop from table height clears it comfortably. Tuned by
+// ear; the units are PhysX impulse (kg*m/s over the substep).
+constexpr float kMinImpactImpulse = 0.35f;
+
+// The most contact points pulled from one pair. A box-on-box landing has four at
+// most; this is headroom so extractContacts never has to truncate.
+constexpr PxU32 kMaxContactPoints = 8;
+
+// The filter shader the scene runs for every overlapping pair. It keeps PhysX's
+// usual contact resolution but additionally asks for a touch-found notification
+// with contact points, which is what makes the scene call onContact when two
+// shapes first meet -- the default shader stays silent, reporting nothing. The
+// callback then throws away every pair that has no meat in it, so tagging all
+// pairs here costs only that quick check, not a sound.
+PxFilterFlags ContactReportFilterShader(PxFilterObjectAttributes attributes0, PxFilterData,
+                                        PxFilterObjectAttributes attributes1, PxFilterData,
+                                        PxPairFlags& pair_flags, const void*, PxU32) {
+    // No triggers are used in this game, but keep the standard guard so one added
+    // later behaves as a trigger rather than a solid contact.
+    if (PxFilterObjectIsTrigger(attributes0) || PxFilterObjectIsTrigger(attributes1)) {
+        pair_flags = PxPairFlag::eTRIGGER_DEFAULT;
+        return PxFilterFlag::eDEFAULT;
+    }
+    pair_flags = PxPairFlag::eCONTACT_DEFAULT | PxPairFlag::eNOTIFY_TOUCH_FOUND |
+                 PxPairFlag::eNOTIFY_CONTACT_POINTS;
+    return PxFilterFlag::eDEFAULT;
+}
+
+// Turns the solver's contact reports into meat Impacts. The scene owns the sim
+// callback pointer; this holds a pointer to Physics::impacts_ (a stable member
+// address) and appends to it as pairs land. onContact runs inside fetchResults on
+// the same thread that calls Step, so appending to the vector needs no locking.
+class ContactReporter : public PxSimulationEventCallback {
+public:
+    explicit ContactReporter(std::vector<Impact>& out) : out_(out) {}
+
+    void onContact(const PxContactPairHeader& header, const PxContactPair* pairs,
+                   PxU32 count) override {
+        // If either actor was removed this step its userData is gone; nothing to
+        // sound for, and dereferencing it would be a use-after-free.
+        if (header.flags &
+            (PxContactPairHeaderFlag::eREMOVED_ACTOR_0 | PxContactPairHeaderFlag::eREMOVED_ACTOR_1)) {
+            return;
+        }
+        const auto* tag0 = static_cast<const BodyTag*>(header.actors[0]->userData);
+        const auto* tag1 = static_cast<const BodyTag*>(header.actors[1]->userData);
+        if ((tag0 == nullptr || !tag0->meat) && (tag1 == nullptr || !tag1->meat)) {
+            return; // Neither body is meat -- the tongs, furniture and world stay quiet.
+        }
+
+        for (PxU32 i = 0; i < count; ++i) {
+            const PxContactPair& pair = pairs[i];
+            // Only the frame a touch begins, not every step it rests in contact --
+            // otherwise a patty lying on the grate would splat continuously.
+            if (!(pair.events & PxPairFlag::eNOTIFY_TOUCH_FOUND)) {
+                continue;
+            }
+
+            PxContactPairPoint points[kMaxContactPoints];
+            const PxU32 n = pair.extractContacts(points, kMaxContactPoints);
+            if (n == 0) {
+                continue;
+            }
+
+            // One event per landing, at the mean contact point and carrying the
+            // summed impulse -- so a flat face slapping down reads louder than a
+            // corner just clipping something.
+            PxVec3 position(0.0f, 0.0f, 0.0f);
+            float impulse = 0.0f;
+            for (PxU32 p = 0; p < n; ++p) {
+                position += points[p].position;
+                impulse += points[p].impulse.magnitude();
+            }
+            if (impulse < kMinImpactImpulse) {
+                continue;
+            }
+            position /= static_cast<float>(n);
+            out_.push_back(Impact{DirectX::XMFLOAT3(position.x, position.y, position.z), impulse});
+        }
+    }
+
+    // Nothing else in the game listens for these, but they are pure virtual.
+    void onTrigger(PxTriggerPair*, PxU32) override {}
+    void onConstraintBreak(PxConstraintInfo*, PxU32) override {}
+    void onWake(PxActor**, PxU32) override {}
+    void onSleep(PxActor**, PxU32) override {}
+    void onAdvance(const PxRigidBody* const*, const PxTransform*, PxU32) override {}
+
+private:
+    std::vector<Impact>& out_;
+};
 
 // The shared surface material. A little friction and a low restitution so the
 // props grip when they land; PhysX applies its own restitution-velocity
@@ -41,10 +137,17 @@ Physics::Physics() {
 
     dispatcher_ = PxDefaultCpuDispatcherCreate(kWorkerThreads);
 
+    // The reporter is set on the scene below and appends to impacts_ as meat lands.
+    // impacts_ is a member, so its address is stable for the reporter's lifetime.
+    contact_reporter_ = new ContactReporter(impacts_);
+
     PxSceneDesc desc(physics_->getTolerancesScale());
     desc.gravity = PxVec3(0.0f, -kGravity, 0.0f);
     desc.cpuDispatcher = dispatcher_;
-    desc.filterShader = PxDefaultSimulationFilterShader;
+    // A filter shader that asks for touch-found reports, plus the callback that
+    // turns them into meat splats; the stock shader would report no contacts.
+    desc.filterShader = ContactReportFilterShader;
+    desc.simulationEventCallback = contact_reporter_;
     scene_ = physics_->createScene(desc);
 
     material_ = physics_->createMaterial(kStaticFriction, kDynamicFriction, kRestitution);
@@ -74,6 +177,8 @@ Physics::~Physics() {
     if (foundation_) {
         foundation_->release();
     }
+    // The scene held a pointer to this, so it is freed only after the scene is gone.
+    delete contact_reporter_;
     delete error_callback_;
     delete allocator_;
 }
@@ -145,6 +250,10 @@ PxRigidDynamic* Physics::AddDynamicBody(std::span<const OrientedBox> shapes,
 }
 
 void Physics::Step(float dt) {
+    // Last frame's impacts have been sounded; start the step with an empty list so
+    // onContact (called from fetchResults below) fills it with only this step's.
+    impacts_.clear();
+
     // Fixed ticks with the leftover time banked for next frame -- a fixed step is
     // what keeps the solver stable. A long stall is spent, not hoarded: once the
     // catch-up cap is hit the remainder is dropped so the sim never sprints to

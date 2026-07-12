@@ -5,9 +5,9 @@
 using namespace DirectX;
 using namespace physx;
 
-void RigidBody::Adopt(PxRigidDynamic* actor, float knock_rating, int prop_index) {
+void RigidBody::Adopt(PxRigidDynamic* actor, float knock_rating, int prop_index, bool meat) {
     actor_ = actor;
-    tag_ = BodyTag{prop_index, knock_rating};
+    tag_ = BodyTag{prop_index, knock_rating, meat};
 }
 
 void RigidBody::Bind() {

@@ -89,7 +89,7 @@ stage_assets(grill DIRECTORY assets/models
   FILES grill-basic.glb tree.glb bench-basic.glb crate.glb cooler-basic.glb tongs-metal.glb burger-raw.glb steak-cooked.glb)
 
 stage_assets(grill DIRECTORY assets/audio
-  FILES sizzle.wav)
+  FILES sizzle.wav 232135__yottasounds__splat-005.wav)
 
 # The HUD font atlas is baked from the committed .ttf at build time; only the
 # .png/.csv it produces are read at runtime, and those live in the build tree.

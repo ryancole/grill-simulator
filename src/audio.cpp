@@ -5,8 +5,10 @@
 #include <fmod.hpp>
 #include <fmod_errors.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <filesystem>
+#include <random>
 #include <string>
 
 using namespace DirectX;
@@ -57,6 +59,28 @@ constexpr int kSizzleCurvePointCount =
 // models no Doppler yet (that is what dt in Update is reserved for).
 constexpr FMOD_VECTOR kNoVelocity{0.0f, 0.0f, 0.0f};
 
+// The splat's distance falloff, driven by FMOD's default inverse rolloff: full
+// gain within the near distance, then thinning as the near/distance ratio. The
+// meat usually lands right by the player, but a thrown one can splat across the
+// yard, so it stays just audible out to the far distance and no further.
+constexpr float kSplatNearDistance = 1.5f;  // metres of full-gain radius.
+constexpr float kSplatFarDistance = 25.0f;  // past here the gain stops falling.
+
+// Maps a contact impulse to a splat volume. At or above the reference impulse the
+// splat plays at full gain; a gentle set-down floors at the minimum so it is still
+// heard rather than silent. Tuned by ear against the meat's mass and drop heights.
+constexpr float kSplatFullVolumeImpulse = 4.0f;
+constexpr float kSplatMinVolume = 0.25f;
+
+// Each splat is pitched by a random factor in this band, so a run of them (a patty
+// bouncing, or several dropped in a row) does not machine-gun the identical sample.
+constexpr float kSplatPitchLow = 0.9f;
+constexpr float kSplatPitchHigh = 1.12f;
+
+// One generator for the pitch jitter, seeded once. Playback is all on the game
+// thread (PlayImpact is called from the loop), so no synchronisation is needed.
+std::mt19937 g_pitch_rng{std::random_device{}()};
+
 } // namespace
 
 Audio::Audio() {
@@ -102,6 +126,24 @@ Audio::Audio() {
         return;
     }
     sizzle_->set3DCustomRolloff(g_sizzle_curve_points, kSizzleCurvePointCount);
+
+    // The splat one-shot: FMOD_3D so it pans and attenuates from the landing spot,
+    // FMOD_LOOP_OFF because it fires once per impact, FMOD_CREATESAMPLE so the tiny
+    // clip is decoded up front and a fresh voice can start with no streaming seam.
+    // Its distance falloff is FMOD's default inverse rolloff, shaped by the near/far
+    // distances below -- no custom curve, so no FMOD_3D_CUSTOMROLLOFF here.
+    const std::filesystem::path splat_path =
+        ExecutableDirectory() / "assets" / "audio" / "232135__yottasounds__splat-005.wav";
+    const std::u8string splat_utf8 = splat_path.u8string();
+    const FMOD_MODE splat_mode = FMOD_3D | FMOD_LOOP_OFF | FMOD_CREATESAMPLE;
+    if (system_->createSound(reinterpret_cast<const char*>(splat_utf8.c_str()), splat_mode, nullptr,
+                             &splat_) != FMOD_OK) {
+        // A missing splat is not fatal: the sizzle already loaded, so run on with
+        // the grill's sound and simply skip impacts (PlayImpact null-checks splat_).
+        splat_ = nullptr;
+    } else {
+        splat_->set3DMinMaxDistance(kSplatNearDistance, kSplatFarDistance);
+    }
 
     // Playback deliberately does not start here -- see started_ in the header and
     // the first-frame handling in Update.
@@ -156,4 +198,33 @@ void Audio::Update(FXMMATRIX camera_to_world, float dt) {
     }
 
     (void)dt; // FMOD keeps its own clock; dt is here for a future footstep or Doppler pass.
+}
+
+void Audio::PlayImpact(const XMFLOAT3& position, float strength) {
+    // Nothing to play into if the engine never came up or the clip failed to load;
+    // and before the first Update the listener is unposed, so a splat then would
+    // sound from nowhere -- skip it (an impact on frame zero is not a real case).
+    if (silent_ || splat_ == nullptr || !started_) {
+        return;
+    }
+
+    // Louder the harder it hit, down to a floor so a soft set-down is still heard.
+    const float volume =
+        std::clamp(strength / kSplatFullVolumeImpulse, kSplatMinVolume, 1.0f);
+    std::uniform_real_distribution<float> pitch(kSplatPitchLow, kSplatPitchHigh);
+
+    // Start paused so the emitter is placed and the voice shaped before its first
+    // sample is heard, then unpause -- the same one-shot pattern as the sizzle's
+    // first frame. A null channel (all voices busy) just means this splat is
+    // dropped, which is fine under a pile-up.
+    FMOD::Channel* channel = nullptr;
+    if (system_->playSound(splat_, nullptr, /*paused=*/true, &channel) != FMOD_OK ||
+        channel == nullptr) {
+        return;
+    }
+    const FMOD_VECTOR emitter{position.x, position.y, position.z};
+    channel->set3DAttributes(&emitter, &kNoVelocity);
+    channel->setVolume(volume);
+    channel->setPitch(pitch(g_pitch_rng));
+    channel->setPaused(false);
 }

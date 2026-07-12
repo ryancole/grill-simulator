@@ -106,16 +106,17 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
     // picnic table. All four sit in the player's view from the spawn point. Each
     // carries the Model it was loaded from so its box collider can be measured off
     // the mesh bounds. Placed a hair above the ground so physics settles it flat.
-    // The last argument is the 1..10 "hard to knock over" rating: the meat sits at
-    // a middling 4, the light tongs skitter more easily at 2.
+    // The second-to-last argument is the 1..10 "hard to knock over" rating: the
+    // meat sits at a middling 4, the light tongs skitter more easily at 2. The last
+    // marks the meat, so a landing steak or patty splats where the tongs stay quiet.
     Add(models.tongs, pool[models.tongs], "tongs", {1.15f, 0.05f, 4.45f}, 25.0f, TongsInHand(),
-        2.0f);
+        2.0f, /*meat=*/false);
     Add(models.steak, pool[models.steak], "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand(),
-        4.0f);
+        4.0f, /*meat=*/true);
     Add(models.patty, pool[models.patty], "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand(),
-        4.0f);
+        4.0f, /*meat=*/true);
     Add(models.patty, pool[models.patty], "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand(),
-        4.0f);
+        4.0f, /*meat=*/true);
 }
 
 void Props::DeriveBodyShape(Item& item, const Model& model) {
@@ -166,7 +167,7 @@ void Props::RebuildTransform(Item& item) {
 }
 
 void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XMFLOAT3 position,
-                float yaw_degrees, FXMMATRIX held_local, float knock_rating) {
+                float yaw_degrees, FXMMATRIX held_local, float knock_rating, bool meat) {
     Item item{};
     item.model = model_id;
     item.name = std::move(name);
@@ -180,7 +181,7 @@ void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XM
     // Adopt the new actor with this item's index (so a gaze-sweep hit decodes back
     // to an item) and its knock rating (so the shove knows how hard it is to move).
     const int index = static_cast<int>(items_.size());
-    item.rigid.Adopt(CreateBody(item, pose), knock_rating, index);
+    item.rigid.Adopt(CreateBody(item, pose), knock_rating, index, meat);
     RebuildTransform(item);
 
     // Bind userData only after the item is settled in items_, since it points at

@@ -2,7 +2,10 @@
 
 #include "collision.hpp"
 
+#include <DirectXMath.h>
+
 #include <span>
+#include <vector>
 
 // PhysX owns the simulation. This class brings the SDK up, holds the one scene
 // every rigid body lives in, and steps it on a fixed clock. The props (dynamic
@@ -25,7 +28,18 @@ class PxScene;
 class PxMaterial;
 class PxControllerManager;
 class PxRigidDynamic;
+class PxSimulationEventCallback;
 } // namespace physx
+
+// A meat-on-something collision the solver reported this step, for the audio to
+// turn into a splat. `position` is where the contact landed in world space, so
+// the sound pans and attenuates from the right spot; `strength` is the contact
+// impulse magnitude, which the mixer maps to volume -- a dropped patty thuds
+// softer than one hurled at a wall.
+struct Impact {
+    DirectX::XMFLOAT3 position;
+    float strength;
+};
 
 // Brings PhysX up in the constructor and tears it back down with the object's
 // lifetime. One of these lives in Game, constructed once near the top so it
@@ -40,8 +54,14 @@ public:
 
     // Advances the simulation over `dt` seconds in fixed substeps, banking the
     // remainder for next frame -- a fixed clock is what keeps the contact solve
-    // stable however long a rendered frame took.
+    // stable however long a rendered frame took. Contacts that a meat body begins
+    // this step are gathered into the impact list, which Impacts() hands back.
     void Step(float dt);
+
+    // The meat impacts the solver reported during the most recent Step, for the
+    // audio to sound. Cleared at the top of each Step, so read it after Step and
+    // before the next one; empty on any frame no meat landed on anything.
+    std::span<const Impact> Impacts() const { return impacts_; }
 
     // Builds the immovable world: one static box actor per collider, sized,
     // placed and turned to match. Called once after the scene loads; these actors
@@ -79,6 +99,15 @@ private:
     physx::PxScene* scene_ = nullptr;
     physx::PxMaterial* material_ = nullptr;
     physx::PxControllerManager* controllers_ = nullptr;
+
+    // Receives the solver's contact reports and appends meat impacts to impacts_.
+    // Owned here (raw new/delete like the SDK objects) and set on the scene, so it
+    // must outlive the scene -- released after it in the destructor.
+    physx::PxSimulationEventCallback* contact_reporter_ = nullptr;
+
+    // Meat impacts gathered during the current Step's substeps, handed to the audio
+    // by Impacts(). Cleared at the top of each Step.
+    std::vector<Impact> impacts_;
 
     // Real time not yet consumed by a fixed substep, carried to next frame.
     float accumulator_ = 0.0f;
