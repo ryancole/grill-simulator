@@ -54,7 +54,11 @@ Scene::Scene() {
     // Each model's origin sits on the ground beneath it, so a prop that is not
     // scaled or turned goes where it belongs with a plain translation, and its
     // parts come along as the nodes of one asset.
-    AddInstance(grill, XMMatrixTranslation(0.0f, 0.0f, 5.0f), kWhite);
+    //
+    // The grill is a dynamic body, not part of the static world: run into it and
+    // it topples. AddGrill draws it here but hands its colliders to Physics as one
+    // rigid piece rather than nailing them down.
+    AddGrill(grill, XMMatrixTranslation(0.0f, 0.0f, 5.0f), kWhite);
     AddInstance(bench, XMMatrixTranslation(-4.5f, 0.0f, 1.5f), kWhite);
     AddInstance(cooler, XMMatrixTranslation(3.6f, 0.0f, 6.5f), kWhite);
 
@@ -116,6 +120,30 @@ void Scene::AddInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
         }
         const XMMATRIX to_world = XMLoadFloat4x4(&primitive.transform) * transform;
         colliders_.push_back(TransformBox(primitive.bounds, to_world));
+    }
+}
+
+void Scene::AddGrill(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint) {
+    grill_.instance = static_cast<std::uint32_t>(instances_.size());
+    XMStoreFloat4x4(&grill_.initial_transform, transform);
+
+    MeshInstance instance{};
+    instance.model = model;
+    XMStoreFloat4x4(&instance.transform, transform);
+    instance.tint = tint;
+    instance.checker = 0.0f;
+    instances_.push_back(instance);
+
+    // One box per colliding primitive, in the grill's own model space -- the
+    // instance transform is left off here because the body carries it as its
+    // spawn pose, and the shapes ride inside that. This is the same box-per-part
+    // decomposition AddInstance would have pushed into the static world, only
+    // handed to the dynamic body instead so nothing walls the grill in place.
+    for (const Primitive& primitive : models_[model].primitives) {
+        if (!primitive.collides) {
+            continue;
+        }
+        grill_.shapes.push_back(TransformBox(primitive.bounds, XMLoadFloat4x4(&primitive.transform)));
     }
 }
 

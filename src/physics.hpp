@@ -24,6 +24,7 @@ class PxDefaultCpuDispatcher;
 class PxScene;
 class PxMaterial;
 class PxControllerManager;
+class PxRigidDynamic;
 } // namespace physx
 
 // Brings PhysX up in the constructor and tears it back down with the object's
@@ -47,6 +48,17 @@ public:
     // never move and live for the rest of the session -- they are what a dropped
     // prop falls onto and what the player's controller slides along.
     void AddStaticWorld(std::span<const OrientedBox> colliders);
+
+    // Creates one dynamic rigid body from a set of box shapes, so a large object
+    // (the grill) can be shoved and toppled as a single rigid piece. `shapes` are
+    // in the body's own model space -- one per leg, body, lid and shelf -- and
+    // `initial_pose` is the model-to-world transform the body spawns at (a pure
+    // translation/rotation, no scale). PhysX derives the centre of mass and
+    // inertia from the shapes at the given total `mass`, which is what makes a
+    // top-heavy, narrow-based object tip rather than merely slide. The returned
+    // body is owned by the scene; the caller reads its pose back each frame.
+    physx::PxRigidDynamic* AddDynamicBody(std::span<const OrientedBox> shapes,
+                                          const DirectX::XMFLOAT4X4& initial_pose, float mass);
 
     // The scene every actor is added to, the factory that creates them, the
     // shared surface material, and the manager that will own the player's

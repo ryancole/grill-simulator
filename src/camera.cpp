@@ -60,18 +60,28 @@ constexpr float kFieldOfView = XMConvertToRadians(70.0f);
 constexpr float kNearPlane = 0.05f;
 constexpr float kFarPlane = 250.0f;
 
-// How hard the player shoves a loose prop they walk into: the target horizontal
-// speed imparted, made independent of the prop's mass by scaling the impulse by
-// that mass.
-constexpr float kPushSpeed = 1.2f; // m/s
+// How hard the player shoves what they walk into. The target horizontal speed
+// imparted to the object scales with how fast the player is actually moving, so a
+// shuffle barely stirs it while a sprint carries real momentum -- enough, struck
+// above its centre of mass, to tip a tall thing like the grill rather than only
+// sliding it. The impulse is scaled by the object's mass so the *target speed*,
+// not the impulse, is what these numbers mean, independent of what is hit.
+constexpr float kPushGain = 0.6f;     // fraction of the player's speed imparted
+constexpr float kMinPushSpeed = 1.2f; // floor, so a slow bump still scoots a prop
+constexpr float kMaxPushSpeed = 3.5f; // cap, so nothing is launched across the yard
 
-// Lets the walking player nudge props aside. The controller collides with
-// dynamic actors on its own but never moves them; this applies a gentle impulse
-// along the direction of travel so a steak or crate scoots rather than standing
-// there like a wall. The vertical component is dropped, so a downward hit --
-// stepping up onto a prop -- never scoops it into the air.
+// Lets the walking player nudge props aside and bowl the grill over. The
+// controller collides with dynamic actors on its own but never moves them; this
+// applies an impulse along the direction of travel, at the contact point, so a
+// steak or crate scoots and a run into the grill knocks it down rather than the
+// object standing there like a wall. The vertical component is dropped, so a
+// downward hit -- stepping up onto a prop -- never scoops it into the air.
 class ControllerHitReport : public PxUserControllerHitReport {
 public:
+    // The player's horizontal speed this frame, set by Camera::Update just before
+    // the controller moves, so onShapeHit knows how hard the player is running in.
+    float player_speed = 0.0f;
+
     void onShapeHit(const PxControllerShapeHit& hit) override {
         PxRigidDynamic* body = hit.actor->is<PxRigidDynamic>();
         if (body == nullptr || body->getRigidBodyFlags().isSet(PxRigidBodyFlag::eKINEMATIC)) {
@@ -83,7 +93,11 @@ public:
             return; // a purely vertical hit: standing on it, not walking into it.
         }
         dir *= 1.0f / PxSqrt(length_sq);
-        PxRigidBodyExt::addForceAtPos(*body, dir * (kPushSpeed * body->getMass()),
+        const float target =
+            std::clamp(kPushGain * player_speed, kMinPushSpeed, kMaxPushSpeed);
+        // At the contact point, not the centre of mass: the offset is what turns a
+        // horizontal shove into the torque that topples a tall object.
+        PxRigidBodyExt::addForceAtPos(*body, dir * (target * body->getMass()),
                                       toVec3(hit.worldPos), PxForceMode::eIMPULSE);
     }
     void onControllerHit(const PxControllersHit&) override {}
@@ -184,6 +198,10 @@ void Camera::Update(const Input& input, float dt) {
     XMFLOAT3 v;
     XMStoreFloat3(&v, velocity);
     const PxVec3 displacement(v.x * dt, vertical_speed_ * dt, v.z * dt);
+
+    // Hand the hit report how fast the player is moving across the ground, so the
+    // shove it deals to whatever the capsule strikes scales with real momentum.
+    static_cast<ControllerHitReport*>(report_)->player_speed = std::sqrt(v.x * v.x + v.z * v.z);
 
     const PxExtendedVec3 before = controller_->getFootPosition();
     const PxControllerCollisionFlags flags =
