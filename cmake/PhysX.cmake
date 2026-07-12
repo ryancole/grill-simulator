@@ -23,10 +23,24 @@
 find_package(unofficial-omniverse-physx-sdk CONFIG REQUIRED)
 
 # The rest of the build links one PhysX::PhysX target and stays agnostic about how
-# PhysX is sourced. The port's target already carries the include dirs, the
-# PX_PHYSX_STATIC_LIB define and the full set of static libraries.
+# PhysX is sourced. The port's target carries the include dirs and the full set of
+# static libraries.
 add_library(PhysX::PhysX INTERFACE IMPORTED GLOBAL)
 target_link_libraries(PhysX::PhysX INTERFACE unofficial::omniverse-physx-sdk::sdk)
+
+# Tell the PhysX headers we link the SDK statically. This is NOT optional and the
+# port does NOT set it: the generated PxConfig.h defines PX_PHYSX_STATIC_LIB, but
+# nothing in the SDK's own headers includes PxConfig.h, and the vcpkg package
+# config sets no such define -- so a consumer that just includes <PxPhysicsAPI.h>
+# never sees it. Without it, PxFoundationConfig.h (and its siblings) fall through
+# to `#define PX_FOUNDATION_API __declspec(dllimport)` and every PhysX entry point
+# -- PxCreateFoundation first -- is compiled as an import from a DLL that does not
+# exist in this static build. lld-link papers over the missing __imp_ symbols with
+# auto-generated import thunks whose IAT slots are never bound, so the very first
+# PhysX call jumps through a null pointer to address 0. It happened to survive the
+# Debug config and crashed Release (the two bind those bogus thunks differently),
+# which is exactly the sort of config-dependent landmine this define removes.
+target_compile_definitions(PhysX::PhysX INTERFACE PX_PHYSX_STATIC_LIB)
 
 # Consume with clang-cl. PhysX's SSE vec-math header (PxVecMathSSE.h) reads
 # MSVC-specific named members of __m128 (.m128_u16, ...). clang-cl defines
