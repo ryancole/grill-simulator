@@ -72,16 +72,19 @@ PxTransform ToPxTransform(FXMMATRIX m) {
     return PxTransform(PxVec3(p.x, p.y, p.z), PxQuat(q.x, q.y, q.z, q.w));
 }
 
-// A scene-query filter that keeps only the props. Every prop body is tagged with
-// its item index in userData (see Add); the yard's static actors and the player's
-// own capsule -- which the gaze sweep starts *inside*, so it would otherwise be
-// the nearest hit every frame -- leave userData null and are rejected here. The
-// sweep then reports the first prop along the gaze rather than the body the eye
-// sits in.
+// A scene-query filter that keeps only the carryable props. Every shovable body
+// carries a BodyTag in userData, but only a prop's has prop_index >= 0; the yard's
+// static actors and the player's own capsule -- which the gaze sweep starts
+// *inside*, so it would otherwise be the nearest hit every frame -- leave userData
+// null, and the heavy furniture (grill, cooler) tags itself with prop_index -1.
+// Both are rejected here, so the sweep reports the first grabbable prop along the
+// gaze rather than the body the eye sits in or a cooler in the way.
 struct PropQueryFilter : PxQueryFilterCallback {
     PxQueryHitType::Enum preFilter(const PxFilterData&, const PxShape*, const PxRigidActor* actor,
                                    PxHitFlags&) override {
-        return actor->userData != nullptr ? PxQueryHitType::eBLOCK : PxQueryHitType::eNONE;
+        const auto* tag = static_cast<const BodyTag*>(actor->userData);
+        return (tag != nullptr && tag->prop_index >= 0) ? PxQueryHitType::eBLOCK
+                                                        : PxQueryHitType::eNONE;
     }
     PxQueryHitType::Enum postFilter(const PxFilterData&, const PxQueryHit&, const PxShape*,
                                     const PxRigidActor*) override {
@@ -95,14 +98,24 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
     const PropModels& models = scene.PropModelIds();
     const std::vector<Model>& pool = scene.Models();
 
+    // Reserve so no push_back reallocates: each body's userData points at the tag
+    // stored inside its Item, and that address has to stay put for the session.
+    items_.reserve(4);
+
     // The tongs lie flat on the patio just beside the grill; the meat waits on the
     // picnic table. All four sit in the player's view from the spawn point. Each
     // carries the Model it was loaded from so its box collider can be measured off
     // the mesh bounds. Placed a hair above the ground so physics settles it flat.
-    Add(models.tongs, pool[models.tongs], "tongs", {1.15f, 0.05f, 4.45f}, 25.0f, TongsInHand());
-    Add(models.steak, pool[models.steak], "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand());
-    Add(models.patty, pool[models.patty], "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand());
-    Add(models.patty, pool[models.patty], "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand());
+    // The last argument is the 1..10 "hard to knock over" rating: the meat sits at
+    // a middling 4, the light tongs skitter more easily at 2.
+    Add(models.tongs, pool[models.tongs], "tongs", {1.15f, 0.05f, 4.45f}, 25.0f, TongsInHand(),
+        2.0f);
+    Add(models.steak, pool[models.steak], "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand(),
+        4.0f);
+    Add(models.patty, pool[models.patty], "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand(),
+        4.0f);
+    Add(models.patty, pool[models.patty], "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand(),
+        4.0f);
 }
 
 void Props::DeriveBodyShape(Item& item, const Model& model) {
@@ -129,7 +142,7 @@ void Props::DeriveBodyShape(Item& item, const Model& model) {
     XMStoreFloat3(&item.com_offset, center);
 }
 
-void Props::CreateBody(Item& item, FXMMATRIX initial_pose) {
+PxRigidDynamic* Props::CreateBody(const Item& item, FXMMATRIX initial_pose) {
     PxPhysics& sdk = physics_->Sdk();
 
     PxRigidDynamic* body = sdk.createRigidDynamic(ToPxTransform(initial_pose));
@@ -143,21 +156,17 @@ void Props::CreateBody(Item& item, FXMMATRIX initial_pose) {
     PxRigidBodyExt::updateMassAndInertia(*body, kDensity);
 
     physics_->Scene().addActor(*body);
-    item.body = body;
+    return body;
 }
 
 void Props::RebuildTransform(Item& item) {
-    // The body frame is the model frame, so its global pose *is* the model-to-
-    // world transform: rotate by the quaternion, then translate.
-    const PxTransform pose = item.body->getGlobalPose();
-    const XMVECTOR q = XMVectorSet(pose.q.x, pose.q.y, pose.q.z, pose.q.w);
-    const XMVECTOR t = XMVectorSet(pose.p.x, pose.p.y, pose.p.z, 0.0f);
-    const XMMATRIX m = XMMatrixRotationQuaternion(q) * XMMatrixTranslationFromVector(t);
-    XMStoreFloat4x4(&item.resting, m);
+    // The body frame is the model frame, so its global pose *is* the model-to-world
+    // transform, which the RigidBody hands back directly.
+    XMStoreFloat4x4(&item.resting, item.rigid.Transform());
 }
 
 void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XMFLOAT3 position,
-                float yaw_degrees, FXMMATRIX held_local) {
+                float yaw_degrees, FXMMATRIX held_local, float knock_rating) {
     Item item{};
     item.model = model_id;
     item.name = std::move(name);
@@ -168,15 +177,16 @@ void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XM
     // placement the old yaw-and-translate gave.
     const XMMATRIX pose = XMMatrixRotationY(XMConvertToRadians(yaw_degrees)) *
                           XMMatrixTranslation(position.x, position.y, position.z);
-    CreateBody(item, pose);
+    // Adopt the new actor with this item's index (so a gaze-sweep hit decodes back
+    // to an item) and its knock rating (so the shove knows how hard it is to move).
+    const int index = static_cast<int>(items_.size());
+    item.rigid.Adopt(CreateBody(item, pose), knock_rating, index);
     RebuildTransform(item);
 
-    // Tag the body with this item's index (offset by one, so a null userData --
-    // every static-world actor -- reads as "not a prop"). A gaze sweep hit carries
-    // the actor back, and this is how PickTarget turns it into an item.
-    item.body->userData = reinterpret_cast<void*>(static_cast<std::uintptr_t>(items_.size() + 1));
-
+    // Bind userData only after the item is settled in items_, since it points at
+    // the tag living inside the RigidBody -- items_ is reserved so it never moves.
     items_.push_back(std::move(item));
+    items_.back().rigid.Bind();
 }
 
 void Props::Update(const XMMATRIX& camera_to_world, const Input& input) {
@@ -196,7 +206,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Input& input) {
             if (target >= 0) {
                 // Lift it out of the simulation while it hangs in the hand: it
                 // neither falls nor shoves anything until it is dropped.
-                items_[target].body->setActorFlag(PxActorFlag::eDISABLE_SIMULATION, true);
+                items_[target].rigid.actor()->setActorFlag(PxActorFlag::eDISABLE_SIMULATION, true);
                 carried_ = target;
             }
         }
@@ -272,10 +282,9 @@ int Props::PickTarget(FXMVECTOR eye, FXMVECTOR forward) const {
         return -1;
     }
 
-    // Only prop bodies pass the filter, and each carries its item index (offset by
-    // one) in userData -- so the nearest hit decodes straight back to an item.
-    const std::uintptr_t tag = reinterpret_cast<std::uintptr_t>(hit.block.actor->userData);
-    return static_cast<int>(tag) - 1;
+    // Only carryable props pass the filter, and each carries its item index in its
+    // BodyTag -- so the nearest hit decodes straight back to an item.
+    return static_cast<const BodyTag*>(hit.block.actor->userData)->prop_index;
 }
 
 void Props::Drop(FXMMATRIX camera_to_world) {
@@ -298,7 +307,7 @@ void Props::Drop(FXMMATRIX camera_to_world) {
     // Back into the simulation at the hand pose, with a gentle underarm toss down
     // the gaze and a forward pitch about the player's right so it tumbles over
     // instead of gliding down flat.
-    PxRigidDynamic* body = item.body;
+    PxRigidDynamic* body = item.rigid.actor();
     body->setActorFlag(PxActorFlag::eDISABLE_SIMULATION, false);
     body->setGlobalPose(ToPxTransform(held_world));
     body->setLinearVelocity(PxVec3(toss.x, toss.y, toss.z));

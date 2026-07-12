@@ -3,6 +3,7 @@
 #include "collision.hpp" // kStepHeight
 #include "input.hpp"
 #include "physics.hpp"
+#include "rigid_body.hpp" // BodyTag
 
 #include <PxPhysicsAPI.h>
 
@@ -74,6 +75,15 @@ constexpr float kMaxPushSpeed = 3.5f; // cap, so nothing is launched across the 
 // an object they are merely resting a foot on is left alone rather than kicked.
 constexpr float kMinMoveSpeed = 0.5f; // m/s
 
+// Turns an object's 1..10 "hard to knock over" rating (BodyTag::knock_rating) into
+// the divisor applied to the shove: rating 1 shrugs nothing off, and each point
+// above that stiffens it. Tuned so the planted grill (8) barely stirs at a walk
+// and needs a real run to go over, while a middling steak (4) still shifts when
+// bumped. An untagged body reads as rating 1 -- full push, as before.
+constexpr float kResistancePerPoint = 0.45f;
+
+float KnockResistance(float rating) { return 1.0f + kResistancePerPoint * (rating - 1.0f); }
+
 // Lets the walking player nudge props aside and bowl the grill over. The
 // controller collides with dynamic actors on its own but never moves them; this
 // applies an impulse at the contact point so a steak or crate scoots and a run
@@ -115,10 +125,29 @@ public:
             return; // vertical contact, standing still -- just resting on it.
         }
 
-        const float target = std::clamp(kPushGain * speed, kMinPushSpeed, kMaxPushSpeed);
+        // The target speed the player's momentum wants to impart, divided down by
+        // how hard this particular object is to knock over.
+        const auto* tag = static_cast<const BodyTag*>(body->userData);
+        const float resistance = KnockResistance(tag != nullptr ? tag->knock_rating : 1.0f);
+        const float target =
+            std::clamp(kPushGain * speed, kMinPushSpeed, kMaxPushSpeed) / resistance;
+
+        // A contact reports every substep the player leans on the object, so a
+        // single unconditional impulse per call would pile up over the contact and
+        // bowl over even a "heavy" thing given a second of shoving. Instead treat
+        // `target` as a speed the shove brings the object *up to*: only add the
+        // shortfall between how fast it is already moving off (its centre-of-mass
+        // speed along the push) and `target`, and nothing once it is there. Now a
+        // low target genuinely caps how hard the object can ever be shoved, so a
+        // sturdy object is nudged but never accelerated enough to go over.
+        const float moving_off = body->getLinearVelocity().dot(dir);
+        const float add = target - moving_off;
+        if (add <= 0.0f) {
+            return;
+        }
         // At the contact point, not the centre of mass: the offset is what turns a
         // horizontal shove into the torque that topples a tall object.
-        PxRigidBodyExt::addForceAtPos(*body, dir * (target * body->getMass()),
+        PxRigidBodyExt::addForceAtPos(*body, dir * (add * body->getMass()),
                                       toVec3(hit.worldPos), PxForceMode::eIMPULSE);
     }
     void onControllerHit(const PxControllersHit&) override {}

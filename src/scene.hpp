@@ -48,6 +48,8 @@ struct DynamicBody {
     DirectX::XMFLOAT4X4 initial_transform;
     std::vector<OrientedBox> shapes;
     float mass = 1.0f;
+    // 1..10, how hard the player finds it to knock over (see BodyTag::knock_rating).
+    float knock_rating = 1.0f;
 };
 
 // A backyard: a grill loaded from glTF, and everything else still a box.
@@ -95,7 +97,7 @@ private:
     // recorded in the model's own space; the instance transform rides separately as
     // where the body spawns, and `mass` sets how heavy it is to shove.
     void AddDynamicInstance(std::uint32_t model, DirectX::FXMMATRIX transform,
-                            DirectX::XMFLOAT3 tint, float mass);
+                            DirectX::XMFLOAT3 tint, float mass, float knock_rating);
     void AddBox(DirectX::XMFLOAT3 center, DirectX::XMFLOAT3 size, float yaw_degrees,
                 DirectX::XMFLOAT3 color, float checker = 0.0f);
 

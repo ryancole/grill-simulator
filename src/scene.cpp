@@ -59,10 +59,12 @@ Scene::Scene() {
     // into one and it topples or slides. AddDynamicInstance draws it here but hands
     // its colliders to Physics as one rigid piece rather than nailing them down.
     // The grill is light and top-heavy so it goes over; the cooler is heavier and
-    // low, so it mostly gets shoved -- which is how a cooler behaves.
-    AddDynamicInstance(grill, XMMatrixTranslation(0.0f, 0.0f, 5.0f), kWhite, 12.0f);
+    // low, so it mostly gets shoved -- which is how a cooler behaves. The last
+    // argument is a 1..10 "hard to knock over" rating: the grill sits planted (8),
+    // the cooler nearly as stubborn (7).
+    AddDynamicInstance(grill, XMMatrixTranslation(0.0f, 0.0f, 5.0f), kWhite, 12.0f, 8.0f);
     AddInstance(bench, XMMatrixTranslation(-4.5f, 0.0f, 1.5f), kWhite);
-    AddDynamicInstance(cooler, XMMatrixTranslation(3.6f, 0.0f, 6.5f), kWhite, 14.0f);
+    AddDynamicInstance(cooler, XMMatrixTranslation(3.6f, 0.0f, 6.5f), kWhite, 14.0f, 7.0f);
 
     // Two crates, the upper one knocked askew. The smaller is the same box at
     // 0.875 -- an exact scale, unlike the trees', because these two always were
@@ -126,11 +128,12 @@ void Scene::AddInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
 }
 
 void Scene::AddDynamicInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
-                               float mass) {
+                               float mass, float knock_rating) {
     DynamicBody body{};
     body.instance = static_cast<std::uint32_t>(instances_.size());
     XMStoreFloat4x4(&body.initial_transform, transform);
     body.mass = mass;
+    body.knock_rating = knock_rating;
 
     MeshInstance instance{};
     instance.model = model;

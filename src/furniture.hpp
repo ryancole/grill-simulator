@@ -1,11 +1,10 @@
 #pragma once
 
+#include "rigid_body.hpp"
+
 #include <cstdint>
 #include <vector>
 
-namespace physx {
-class PxRigidDynamic;
-}
 class Scene;
 class Physics;
 
@@ -31,10 +30,11 @@ public:
     void Update();
 
 private:
-    // One dynamic object: its PhysX body (owned by the scene) and the draw instance
-    // the body's pose is written back into.
+    // One dynamic object: the shared bumpable body and the scene draw instance its
+    // pose is written back into. bodies_ is reserved up front because the body's
+    // tag is what its userData points at, and that address must stay valid.
     struct Body {
-        physx::PxRigidDynamic* actor;
+        RigidBody body;
         std::uint32_t instance;
     };
 
