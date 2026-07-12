@@ -506,62 +506,10 @@ def build_crate() -> bytes:
                     materials, [cardboard_image])
 
 
-# --- The props ----------------------------------------------------------------
-#
-# Unlike the yard's furniture, these are loose objects the player carries. They
-# are flat-coloured -- no textures -- because they are small and mostly seen in
-# the hand, and because it exercises the loader's texture-less material path that
-# the grill's flat lid and legs only share a file with. Each is one node, so it
-# still yields a bounding box, but the game gives none of them a collider: a
-# dropped steak is something to walk through, not to trip over.
-#
-# Every prop's origin sits at the centre of its underside, so the game sets one
-# down with a plain translation to whatever surface height it is resting on --
-# the same convention the crate and cooler already use.
-
-
-def build_tongs() -> bytes:
-    """A pair of spring tongs: two steel arms splaying from a hinge.
-
-    They lie flat along +X with the hinge at the origin, so the game can lay them
-    across the grill's shelf with a yaw and a translation.
-    """
-    builder = GlbBuilder()
-    materials = [material("steel", color=(0.72, 0.74, 0.78), metallic=1.0, roughness=0.3)]
-    STEEL = 0
-
-    meshes = [
-        builder.box_mesh("arm", (0.34, 0.02, 0.03), STEEL),
-        builder.box_mesh("hinge", (0.05, 0.03, 0.08), STEEL),
-    ]
-
-    # The arms' boxes are centred, so a translation of 0.19 in X puts each one's
-    # near end just past the hinge; the yaw splays them apart along Z into the
-    # open V of a pair of tongs.
-    parts = [
-        ("hinge", 1, (0.0, 0.015, 0.0)),
-        ("arm_n", 0, (0.19, 0.01, 0.04), 8.0),
-        ("arm_s", 0, (0.19, 0.01, -0.04), -8.0),
-    ]
-
-    return assemble(builder, part_nodes("Tongs", parts), meshes, materials, [])
-
-
-def build_patty() -> bytes:
-    """A raw burger patty: a low, dark disc stood in for by a flat box."""
-    builder = GlbBuilder()
-    materials = [material("patty", color=(0.36, 0.20, 0.14), roughness=0.9)]
-    meshes = [builder.box_mesh("patty", (0.20, 0.035, 0.20), 0)]
-    return assemble(builder, part_nodes("Patty", [("patty", 0, (0.0, 0.0175, 0.0))]),
-                    meshes, materials, [])
-
-
 def main() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
     models = (("tree.glb", build_tree()),
-              ("crate.glb", build_crate()),
-              ("tongs.glb", build_tongs()),
-              ("patty.glb", build_patty()))
+              ("crate.glb", build_crate()))
     for name, data in models:
         path = ASSETS / name
         path.write_bytes(data)

@@ -36,8 +36,8 @@ Scene::Scene() {
     // The loose props are loaded so the renderer uploads them, but the scene
     // places no instances of them: Props sets out the starting handful and owns
     // every one thereafter.
-    prop_models_.tongs = LoadModel("tongs.glb");
-    prop_models_.patty = LoadModel("patty.glb");
+    prop_models_.tongs = LoadModel("tongs-metal.glb");
+    prop_models_.patty = LoadModel("burger-raw.glb");
     prop_models_.steak = LoadModel("steak-cooked.glb");
 
     // The yard. +X is east, +Z is north, and the player spawns at the south end
