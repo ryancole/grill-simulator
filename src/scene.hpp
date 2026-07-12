@@ -34,16 +34,20 @@ struct PropModels {
     std::uint32_t steak = 0;
 };
 
-// A world object heavy enough to want its own dynamic rigid body rather than a
-// clutch of immovable static colliders: the grill. The scene draws it like any
-// other instance, but hands its collider boxes here -- in the model's own space,
-// one per colliding primitive -- so Physics can build a single dynamic body that
-// tips as one piece. `instance` is the draw instance the body's pose is read back
-// into each frame; `initial_transform` is where that body spawns.
+// A world object the player can knock over -- the grill, the cooler -- given its
+// own dynamic rigid body instead of a clutch of immovable static colliders. The
+// scene draws it like any other instance, but hands its collider boxes here (in
+// the model's own space, one per colliding primitive) so Physics can build a
+// single dynamic body that tips and slides as one piece. `instance` is the draw
+// instance the body's pose is read back into each frame, `initial_transform` is
+// where it spawns, and `mass` (kg) is fixed while PhysX derives the centre of
+// mass and inertia from the shapes -- so a top-heavy grill topples where a low,
+// wide cooler mostly shoves.
 struct DynamicBody {
     std::uint32_t instance = 0;
     DirectX::XMFLOAT4X4 initial_transform;
     std::vector<OrientedBox> shapes;
+    float mass = 1.0f;
 };
 
 // A backyard: a grill loaded from glTF, and everything else still a box.
@@ -55,11 +59,12 @@ public:
     const std::vector<MeshInstance>& Instances() const { return instances_; }
     const std::vector<OrientedBox>& Colliders() const { return colliders_; }
 
-    // The grill, as a dynamic body: its model-space collider shapes and where it
-    // spawns. Handed to Physics::AddDynamicBody so the grill topples when run into.
-    const DynamicBody& Grill() const { return grill_; }
-    // Rewrites one instance's model-to-world transform. Grill reads the toppling
-    // body's pose back into the grill instance through this each frame, so the
+    // The knock-over-able world objects, as dynamic bodies: each one's model-space
+    // collider shapes, mass and spawn pose. Handed to Physics::AddDynamicBody so
+    // they topple or slide when run into.
+    const std::vector<DynamicBody>& DynamicBodies() const { return dynamic_bodies_; }
+    // Rewrites one instance's model-to-world transform. Furniture reads each
+    // toppling body's pose back into its instance through this every frame, so the
     // renderer (and the sun's shadow) draw it wherever it has fallen.
     void SetInstanceTransform(std::uint32_t index, DirectX::FXMMATRIX transform) {
         DirectX::XMStoreFloat4x4(&instances_[index].transform, transform);
@@ -84,19 +89,20 @@ private:
     // walling off the ground between them.
     void AddInstance(std::uint32_t model, DirectX::FXMMATRIX transform, DirectX::XMFLOAT3 tint,
                      float checker = 0.0f);
-    // Places the grill like AddInstance, but diverts its collider boxes into a
-    // dynamic body (Grill) instead of the immovable static world -- so it draws in
-    // the world pass yet is free to be knocked over. The boxes are recorded in the
-    // grill's own model space; the instance transform rides separately as where the
-    // body spawns.
-    void AddGrill(std::uint32_t model, DirectX::FXMMATRIX transform, DirectX::XMFLOAT3 tint);
+    // Places a model like AddInstance, but diverts its collider boxes into a
+    // dynamic body (see DynamicBodies) instead of the immovable static world -- so
+    // it draws in the world pass yet is free to be knocked over. The boxes are
+    // recorded in the model's own space; the instance transform rides separately as
+    // where the body spawns, and `mass` sets how heavy it is to shove.
+    void AddDynamicInstance(std::uint32_t model, DirectX::FXMMATRIX transform,
+                            DirectX::XMFLOAT3 tint, float mass);
     void AddBox(DirectX::XMFLOAT3 center, DirectX::XMFLOAT3 size, float yaw_degrees,
                 DirectX::XMFLOAT3 color, float checker = 0.0f);
 
     std::vector<Model> models_;
     std::vector<MeshInstance> instances_;
     std::vector<OrientedBox> colliders_;
-    DynamicBody grill_;
+    std::vector<DynamicBody> dynamic_bodies_;
 
     std::uint32_t cube_ = 0;
     PropModels prop_models_{};
