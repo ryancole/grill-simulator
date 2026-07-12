@@ -204,44 +204,6 @@ def cardboard() -> bytes:
     return shaded_texture(size, size, (0.52, 0.38, 0.24), shade)
 
 
-def moulded_plastic(base: tuple[float, float, float]) -> bytes:
-    """Injection-moulded plastic: a fine speckle under shallow ridges.
-
-    The cooler's body and its lid are the same plastic in two colours, so they
-    share this and differ only in `base`.
-    """
-    size = 64
-    ridges = 4
-
-    def shade(x: int, y: int) -> float:
-        ridge = 0.95 + 0.10 * (0.5 + 0.5 * math.cos(y * 2.0 * math.pi * ridges / size))
-        speck = 0.96 + 0.08 * noise(x * 131071 + y * 31)
-        return ridge * speck
-
-    return shaded_texture(size, size, base, shade)
-
-
-def planks(bands: int = 4) -> bytes:
-    """The picnic table. Boards run along the texture's U, seams along its V.
-
-    `box()` is asked to tile this every 0.8 m, so four bands across the tile put
-    a seam every 20 cm -- which is about what a picnic table's boards are.
-    """
-    height = 64
-    band_height = height // bands
-
-    def shade(x: int, y: int) -> float:
-        board = 0.88 + 0.24 * noise((y // band_height) * 7919)
-        # The dark line where two boards meet.
-        seam = 0.55 if y % band_height == 0 else 1.0
-        # Grain runs the length of the board, so it varies fast across V and
-        # slowly along U.
-        grain = 0.95 + 0.10 * noise(y * 31 + (x // 16) * 131071)
-        return board * seam * grain
-
-    return shaded_texture(64, height, (0.60, 0.44, 0.28), shade)
-
-
 # --- Geometry -----------------------------------------------------------------
 
 # The six face normals of a box, in glTF space.
@@ -525,33 +487,6 @@ def build_tree() -> bytes:
                     [bark_image, leaves_image])
 
 
-def build_table() -> bytes:
-    """A picnic table: a top, four legs and two benches, all the same wood."""
-    builder = GlbBuilder()
-    planks_image = builder.image_view(planks())
-
-    materials = [material("wood", texture=0, roughness=0.8)]
-    WOOD = 0
-
-    # 0.8 m of texture per tile, so the boards read at the same size on the top,
-    # the benches and the legs.
-    meshes = [
-        builder.box_mesh("top", (2.6, 0.1, 1.2), WOOD, tile=0.8),
-        builder.box_mesh("leg", (0.12, 0.7, 0.12), WOOD, tile=0.8),
-        builder.box_mesh("bench", (2.6, 0.08, 0.4), WOOD, tile=0.8),
-    ]
-
-    # The table's origin sits on the ground at the centre of its top.
-    parts = [("top", 0, (0.0, 0.75, 0.0)),
-             ("bench_s", 2, (0.0, 0.45, -0.95)),
-             ("bench_n", 2, (0.0, 0.45, 0.95))]
-    for x in (-1.15, 1.15):
-        for z in (-0.45, 0.45):
-            parts.append((f"leg_{'e' if x > 0 else 'w'}{'n' if z > 0 else 's'}", 1, (x, 0.35, z)))
-
-    return assemble(builder, part_nodes("Table", parts), meshes, materials, [planks_image])
-
-
 def build_crate() -> bytes:
     """A cardboard packing box, 80 cm on a side.
 
@@ -569,41 +504,6 @@ def build_crate() -> bytes:
     # is a translation by the lower one's height.
     return assemble(builder, part_nodes("Crate", [("box", 0, (0.0, 0.4, 0.0))]), meshes,
                     materials, [cardboard_image])
-
-
-def build_cooler() -> bytes:
-    """A cool box: a blue body with a pale moulded lid lapped over its top.
-
-    The body is the whole cooler -- the full 0.9 x 0.6 x 0.6 box the yard used to
-    draw -- and it is the only thing that collides. The lid is decorative: it
-    laps 1 cm over the body's sides and stands 5 mm proud of its top, which is
-    what stops the two from sharing a face and z-fighting.
-
-    Stacking a shorter body under a lid would have been the obvious way to build
-    this, and it is wrong. Colliders come one per node, so the body's top face
-    would be a surface the player can stand on -- buried inside the cooler at lid
-    height, invisible, and reachable by anyone falling past the corner. Naming
-    the lid `_nocollide` is how the asset says it is a decoration; see
-    kDecorativeSuffix in src/model.cpp.
-    """
-    builder = GlbBuilder()
-    body_image = builder.image_view(moulded_plastic((0.16, 0.44, 0.62)))
-    lid_image = builder.image_view(moulded_plastic((0.82, 0.84, 0.86)))
-
-    materials = [material("body", texture=0, roughness=0.55),
-                 material("lid", texture=1, roughness=0.45)]
-    BODY, LID = range(2)
-
-    meshes = [
-        builder.box_mesh("body", (0.9, 0.6, 0.6), BODY, tile=0.6),
-        builder.box_mesh("lid", (0.92, 0.16, 0.62), LID, tile=0.6),
-    ]
-
-    # The lid spans 0.445 .. 0.605, so it swallows the body's top face rather
-    # than meeting it.
-    parts = [("body", 0, (0.0, 0.3, 0.0)), ("lid_nocollide", 1, (0.0, 0.525, 0.0))]
-    return assemble(builder, part_nodes("Cooler", parts), meshes, materials,
-                    [body_image, lid_image])
 
 
 # --- The props ----------------------------------------------------------------
@@ -656,21 +556,12 @@ def build_patty() -> bytes:
                     meshes, materials, [])
 
 
-def build_steak() -> bytes:
-    """A steak: a larger, redder slab than the patty, a touch thicker."""
-    builder = GlbBuilder()
-    materials = [material("steak", color=(0.47, 0.17, 0.16), roughness=0.85)]
-    meshes = [builder.box_mesh("steak", (0.26, 0.04, 0.18), 0)]
-    return assemble(builder, part_nodes("Steak", [("steak", 0, (0.0, 0.02, 0.0))]),
-                    meshes, materials, [])
-
-
 def main() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
     models = (("tree.glb", build_tree()),
-              ("table.glb", build_table()), ("crate.glb", build_crate()),
-              ("cooler.glb", build_cooler()), ("tongs.glb", build_tongs()),
-              ("patty.glb", build_patty()), ("steak.glb", build_steak()))
+              ("crate.glb", build_crate()),
+              ("tongs.glb", build_tongs()),
+              ("patty.glb", build_patty()))
     for name, data in models:
         path = ASSETS / name
         path.write_bytes(data)
