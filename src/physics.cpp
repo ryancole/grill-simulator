@@ -94,6 +94,56 @@ void Physics::AddStaticWorld(std::span<const OrientedBox> colliders) {
     }
 }
 
+PxRigidDynamic* Physics::AddDynamicBody(std::span<const OrientedBox> shapes,
+                                        const DirectX::XMFLOAT4X4& initial_pose, float mass) {
+    using namespace DirectX;
+
+    // The body spawns at the model-to-world transform. It carries no scale (the
+    // shapes are already sized), so the decomposition only wants the translation
+    // and rotation; the scale is pulled out and dropped.
+    XMVECTOR scale;
+    XMVECTOR rotation;
+    XMVECTOR translation;
+    XMMatrixDecompose(&scale, &rotation, &translation, XMLoadFloat4x4(&initial_pose));
+    XMFLOAT3 t;
+    XMFLOAT4 q;
+    XMStoreFloat3(&t, translation);
+    XMStoreFloat4(&q, rotation);
+
+    const PxTransform pose(PxVec3(t.x, t.y, t.z), PxQuat(q.x, q.y, q.z, q.w));
+    PxRigidDynamic* body = physics_->createRigidDynamic(pose);
+
+    // Each shape sits at its own model-space centre and orientation, so the
+    // legs, body, lid and shelf keep their real arrangement and the mass is
+    // distributed the way the object actually is -- weight up in the kettle, so
+    // it topples off its narrow feet.
+    for (const OrientedBox& box : shapes) {
+        const PxVec3 half(std::max(box.half_extents.x, 1e-3f),
+                          std::max(box.half_extents.y, 1e-3f),
+                          std::max(box.half_extents.z, 1e-3f));
+        const PxTransform local(
+            PxVec3(box.center.x, box.center.y, box.center.z),
+            PxQuat(box.orientation.x, box.orientation.y, box.orientation.z, box.orientation.w));
+        PxShape* shape = PxRigidActorExt::createExclusiveShape(*body, PxBoxGeometry(half),
+                                                               *material_);
+        shape->setLocalPose(local);
+    }
+
+    // Total mass fixed; PhysX computes the centre of mass and inertia tensor from
+    // the shapes so the distribution -- not just the number -- drives the tumble.
+    PxRigidBodyExt::setMassAndUpdateInertia(*body, mass);
+
+    // A little damping so a toppled grill rocks to a stop instead of sliding on
+    // for ever, and a capped depenetration speed so any small overlap with the
+    // patio it spawns on eases out rather than flinging it into the air.
+    body->setLinearDamping(0.15f);
+    body->setAngularDamping(0.4f);
+    body->setMaxDepenetrationVelocity(1.5f);
+
+    scene_->addActor(*body);
+    return body;
+}
+
 void Physics::Step(float dt) {
     // Fixed ticks with the leftover time banked for next frame -- a fixed step is
     // what keeps the solver stable. A long stall is spent, not hoarded: once the

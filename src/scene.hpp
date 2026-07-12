@@ -34,6 +34,24 @@ struct PropModels {
     std::uint32_t steak = 0;
 };
 
+// A world object the player can knock over -- the grill, the cooler -- given its
+// own dynamic rigid body instead of a clutch of immovable static colliders. The
+// scene draws it like any other instance, but hands its collider boxes here (in
+// the model's own space, one per colliding primitive) so Physics can build a
+// single dynamic body that tips and slides as one piece. `instance` is the draw
+// instance the body's pose is read back into each frame, `initial_transform` is
+// where it spawns, and `mass` (kg) is fixed while PhysX derives the centre of
+// mass and inertia from the shapes -- so a top-heavy grill topples where a low,
+// wide cooler mostly shoves.
+struct DynamicBody {
+    std::uint32_t instance = 0;
+    DirectX::XMFLOAT4X4 initial_transform;
+    std::vector<OrientedBox> shapes;
+    float mass = 1.0f;
+    // 1..10, how hard the player finds it to knock over (see BodyTag::knock_rating).
+    float knock_rating = 1.0f;
+};
+
 // A backyard: a grill loaded from glTF, and everything else still a box.
 class Scene {
 public:
@@ -42,6 +60,17 @@ public:
     const std::vector<Model>& Models() const { return models_; }
     const std::vector<MeshInstance>& Instances() const { return instances_; }
     const std::vector<OrientedBox>& Colliders() const { return colliders_; }
+
+    // The knock-over-able world objects, as dynamic bodies: each one's model-space
+    // collider shapes, mass and spawn pose. Handed to Physics::AddDynamicBody so
+    // they topple or slide when run into.
+    const std::vector<DynamicBody>& DynamicBodies() const { return dynamic_bodies_; }
+    // Rewrites one instance's model-to-world transform. Furniture reads each
+    // toppling body's pose back into its instance through this every frame, so the
+    // renderer (and the sun's shadow) draw it wherever it has fallen.
+    void SetInstanceTransform(std::uint32_t index, DirectX::FXMMATRIX transform) {
+        DirectX::XMStoreFloat4x4(&instances_[index].transform, transform);
+    }
 
     // The shared unit cube. The viewmodel builds its arms out of it too, and
     // needs to name it in the instances it hands the renderer.
@@ -62,12 +91,20 @@ private:
     // walling off the ground between them.
     void AddInstance(std::uint32_t model, DirectX::FXMMATRIX transform, DirectX::XMFLOAT3 tint,
                      float checker = 0.0f);
+    // Places a model like AddInstance, but diverts its collider boxes into a
+    // dynamic body (see DynamicBodies) instead of the immovable static world -- so
+    // it draws in the world pass yet is free to be knocked over. The boxes are
+    // recorded in the model's own space; the instance transform rides separately as
+    // where the body spawns, and `mass` sets how heavy it is to shove.
+    void AddDynamicInstance(std::uint32_t model, DirectX::FXMMATRIX transform,
+                            DirectX::XMFLOAT3 tint, float mass, float knock_rating);
     void AddBox(DirectX::XMFLOAT3 center, DirectX::XMFLOAT3 size, float yaw_degrees,
                 DirectX::XMFLOAT3 color, float checker = 0.0f);
 
     std::vector<Model> models_;
     std::vector<MeshInstance> instances_;
     std::vector<OrientedBox> colliders_;
+    std::vector<DynamicBody> dynamic_bodies_;
 
     std::uint32_t cube_ = 0;
     PropModels prop_models_{};

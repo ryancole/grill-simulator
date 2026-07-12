@@ -1,6 +1,7 @@
 #include "audio.hpp"
 #include "camera.hpp"
 #include "dx_common.hpp"
+#include "furniture.hpp"
 #include "input.hpp"
 #include "physics.hpp"
 #include "props.hpp"
@@ -36,6 +37,10 @@ struct Game {
     Camera camera{physics};
     Viewmodel viewmodel{scene.CubeModel()};
     Props props{scene, physics};
+    // The grill and cooler are dynamic bodies: they register with Physics and read
+    // their poses back into the scene's instances each frame, so a run-in topples
+    // or shoves them.
+    Furniture furniture{scene, physics};
     Input input;
     Audio audio;
 };
@@ -203,6 +208,8 @@ int Run(HINSTANCE instance, int show_command) {
         const XMMATRIX camera_to_world = game.camera.CameraToWorldMatrix();
         game.audio.Update(camera_to_world, dt);
         game.props.Update(camera_to_world, game.input);
+        // Read the dynamic furniture's body poses back into their draw instances.
+        game.furniture.Update();
 
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());

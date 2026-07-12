@@ -1,6 +1,7 @@
 #pragma once
 
 #include "collision.hpp"
+#include "rigid_body.hpp"
 #include "scene.hpp"
 
 #include <DirectXMath.h>
@@ -10,9 +11,6 @@
 #include <string>
 #include <vector>
 
-namespace physx {
-class PxRigidDynamic;
-}
 class Input;
 class Physics;
 
@@ -83,8 +81,10 @@ private:
         DirectX::XMFLOAT3 half_extents;
         DirectX::XMFLOAT3 com_offset;
 
-        // The rigid body in the PhysX scene. Owned by the scene, not by Item.
-        physx::PxRigidDynamic* body;
+        // The shared bumpable body: the PhysX actor (owned by the scene, not by
+        // Item) plus the knock tag its userData points at. items_ is reserved up
+        // front so that tag address stays stable.
+        RigidBody rigid;
 
         // Rebuilt from the body's pose each frame: the model-to-world transform
         // the renderer draws this item under.
@@ -94,14 +94,16 @@ private:
     };
 
     void Add(std::uint32_t model_id, const Model& model, std::string name,
-             DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local);
+             DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
+             float knock_rating);
     // Fills an item's box shape (half_extents, com_offset) from the union of its
     // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);
     // Creates the PhysX body for `item` at `initial_pose` (a model-to-world
     // transform), attaches its box shape offset to com_offset, and lets PhysX
-    // compute the mass properties from the shape.
-    void CreateBody(Item& item, DirectX::FXMMATRIX initial_pose);
+    // compute the mass properties from the shape. Returns the actor for the caller
+    // to hand to the item's RigidBody.
+    physx::PxRigidDynamic* CreateBody(const Item& item, DirectX::FXMMATRIX initial_pose);
     // Recomputes `resting` from the body's current global pose, so drawing and
     // picking see where the body actually is.
     static void RebuildTransform(Item& item);

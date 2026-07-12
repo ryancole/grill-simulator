@@ -54,9 +54,17 @@ Scene::Scene() {
     // Each model's origin sits on the ground beneath it, so a prop that is not
     // scaled or turned goes where it belongs with a plain translation, and its
     // parts come along as the nodes of one asset.
-    AddInstance(grill, XMMatrixTranslation(0.0f, 0.0f, 5.0f), kWhite);
+    //
+    // The grill and cooler are dynamic bodies, not part of the static world: run
+    // into one and it topples or slides. AddDynamicInstance draws it here but hands
+    // its colliders to Physics as one rigid piece rather than nailing them down.
+    // The grill is light and top-heavy so it goes over; the cooler is heavier and
+    // low, so it mostly gets shoved -- which is how a cooler behaves. The last
+    // argument is a 1..10 "hard to knock over" rating: the grill sits planted (8),
+    // the cooler nearly as stubborn (7).
+    AddDynamicInstance(grill, XMMatrixTranslation(0.0f, 0.0f, 5.0f), kWhite, 12.0f, 8.0f);
     AddInstance(bench, XMMatrixTranslation(-4.5f, 0.0f, 1.5f), kWhite);
-    AddInstance(cooler, XMMatrixTranslation(3.6f, 0.0f, 6.5f), kWhite);
+    AddDynamicInstance(cooler, XMMatrixTranslation(3.6f, 0.0f, 6.5f), kWhite, 14.0f, 7.0f);
 
     // Two crates, the upper one knocked askew. The smaller is the same box at
     // 0.875 -- an exact scale, unlike the trees', because these two always were
@@ -117,6 +125,36 @@ void Scene::AddInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
         const XMMATRIX to_world = XMLoadFloat4x4(&primitive.transform) * transform;
         colliders_.push_back(TransformBox(primitive.bounds, to_world));
     }
+}
+
+void Scene::AddDynamicInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
+                               float mass, float knock_rating) {
+    DynamicBody body{};
+    body.instance = static_cast<std::uint32_t>(instances_.size());
+    XMStoreFloat4x4(&body.initial_transform, transform);
+    body.mass = mass;
+    body.knock_rating = knock_rating;
+
+    MeshInstance instance{};
+    instance.model = model;
+    XMStoreFloat4x4(&instance.transform, transform);
+    instance.tint = tint;
+    instance.checker = 0.0f;
+    instances_.push_back(instance);
+
+    // One box per colliding primitive, in the model's own space -- the instance
+    // transform is left off here because the body carries it as its spawn pose, and
+    // the shapes ride inside that. This is the same box-per-part decomposition
+    // AddInstance would have pushed into the static world, only handed to the
+    // dynamic body instead so nothing walls the object in place.
+    for (const Primitive& primitive : models_[model].primitives) {
+        if (!primitive.collides) {
+            continue;
+        }
+        body.shapes.push_back(TransformBox(primitive.bounds, XMLoadFloat4x4(&primitive.transform)));
+    }
+
+    dynamic_bodies_.push_back(std::move(body));
 }
 
 void Scene::AddBox(XMFLOAT3 center, XMFLOAT3 size, float yaw_degrees, XMFLOAT3 color,
