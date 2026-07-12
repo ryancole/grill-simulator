@@ -166,6 +166,8 @@ void LoadMaterials(const fastgltf::Asset& asset, Model& model) {
         material.base_color = {source.pbrData.baseColorFactor.x(),
                                source.pbrData.baseColorFactor.y(),
                                source.pbrData.baseColorFactor.z()};
+        material.metallic = source.pbrData.metallicFactor;
+        material.roughness = source.pbrData.roughnessFactor;
 
         if (source.pbrData.baseColorTexture) {
             const fastgltf::Texture& texture =
@@ -174,6 +176,37 @@ void LoadMaterials(const fastgltf::Asset& asset, Model& model) {
                 throw std::runtime_error("glTF base colour texture names no image");
             }
             material.base_color_image = static_cast<int>(*texture.imageIndex);
+        }
+
+        if (source.normalTexture) {
+            const fastgltf::Texture& texture =
+                asset.textures[source.normalTexture->textureIndex];
+            if (!texture.imageIndex) {
+                throw std::runtime_error("glTF normal texture names no image");
+            }
+            material.normal_image = static_cast<int>(*texture.imageIndex);
+            // normalTexture.scale would attenuate the map's XY; the game does not
+            // read it yet, and no asset it loads sets it to anything but 1.
+        }
+
+        if (source.pbrData.metallicRoughnessTexture) {
+            const fastgltf::Texture& texture =
+                asset.textures[source.pbrData.metallicRoughnessTexture->textureIndex];
+            if (!texture.imageIndex) {
+                throw std::runtime_error("glTF metallic-roughness texture names no image");
+            }
+            material.metallic_roughness_image = static_cast<int>(*texture.imageIndex);
+        }
+
+        if (source.occlusionTexture) {
+            const fastgltf::Texture& texture =
+                asset.textures[source.occlusionTexture->textureIndex];
+            if (!texture.imageIndex) {
+                throw std::runtime_error("glTF occlusion texture names no image");
+            }
+            material.occlusion_image = static_cast<int>(*texture.imageIndex);
+            // occlusionTexture.strength would scale the effect; no asset the game
+            // loads sets it below 1, so it is left out like normalTexture.scale.
         }
 
         model.materials.push_back(material);
@@ -272,6 +305,86 @@ void LoadSkinVertices(const fastgltf::Asset& asset, const fastgltf::Primitive& p
         });
 }
 
+// Manufactures a tangent for every vertex of one primitive when the glTF did not
+// author TANGENT. Lengyel's method: accumulate a per-triangle tangent and
+// bitangent at each vertex from the triangle's edges and UV gradient, then
+// Gram-Schmidt the tangent against the normal and read the handedness off the
+// bitangent. It runs in the game's space, on the positions already mirrored and
+// the winding already reversed, which is self-consistent -- so the frame it makes
+// agrees with the geometry and the UVs the same way an authored one would.
+void GenerateTangents(Model& model, std::size_t first_vertex, std::size_t vertex_count,
+                      std::uint32_t first_index, std::uint32_t index_count) {
+    std::vector<XMVECTOR> tangents(vertex_count, XMVectorZero());
+    std::vector<XMVECTOR> bitangents(vertex_count, XMVectorZero());
+
+    const auto base = static_cast<std::uint32_t>(first_vertex);
+    for (std::uint32_t i = 0; i + 2 < index_count; i += 3) {
+        const std::uint32_t a = model.indices[first_index + i] - base;
+        const std::uint32_t b = model.indices[first_index + i + 1] - base;
+        const std::uint32_t c = model.indices[first_index + i + 2] - base;
+
+        const Vertex& v0 = model.vertices[first_vertex + a];
+        const Vertex& v1 = model.vertices[first_vertex + b];
+        const Vertex& v2 = model.vertices[first_vertex + c];
+
+        const XMVECTOR p0 = XMLoadFloat3(&v0.position);
+        const XMVECTOR e1 = XMVectorSubtract(XMLoadFloat3(&v1.position), p0);
+        const XMVECTOR e2 = XMVectorSubtract(XMLoadFloat3(&v2.position), p0);
+
+        const float du1 = v1.uv.x - v0.uv.x;
+        const float dv1 = v1.uv.y - v0.uv.y;
+        const float du2 = v2.uv.x - v0.uv.x;
+        const float dv2 = v2.uv.y - v0.uv.y;
+
+        const float denom = du1 * dv2 - du2 * dv1;
+        if (std::abs(denom) < 1e-12f) {
+            continue; // Degenerate UVs contribute nothing; the seed below covers it.
+        }
+        const float r = 1.0f / denom;
+
+        // sdir runs the way U increases across the triangle, tdir the way V does.
+        const XMVECTOR sdir =
+            XMVectorScale(XMVectorSubtract(XMVectorScale(e1, dv2), XMVectorScale(e2, dv1)), r);
+        const XMVECTOR tdir =
+            XMVectorScale(XMVectorSubtract(XMVectorScale(e2, du1), XMVectorScale(e1, du2)), r);
+
+        for (const std::uint32_t index : {a, b, c}) {
+            tangents[index] = XMVectorAdd(tangents[index], sdir);
+            bitangents[index] = XMVectorAdd(bitangents[index], tdir);
+        }
+    }
+
+    for (std::size_t i = 0; i < vertex_count; ++i) {
+        Vertex& vertex = model.vertices[first_vertex + i];
+        const XMVECTOR normal = XMLoadFloat3(&vertex.normal);
+
+        // Gram-Schmidt: drop the part of the accumulated tangent along the normal.
+        XMVECTOR tangent = XMVectorSubtract(
+            tangents[i], XMVectorScale(normal, XMVectorGetX(XMVector3Dot(normal, tangents[i]))));
+
+        if (XMVectorGetX(XMVector3LengthSq(tangent)) < 1e-12f) {
+            // No usable UV gradient here. Any direction perpendicular to the normal
+            // will do; seed one exactly the way MakeUnitCubeModel does below.
+            const XMFLOAT3 n = vertex.normal;
+            const XMVECTOR seed = std::abs(n.y) > 0.5f ? XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f)
+                                                       : XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+            tangent = XMVector3Cross(seed, normal);
+        }
+        tangent = XMVector3Normalize(tangent);
+
+        // The frame implies a bitangent of cross(N, T); if that opposes the one the
+        // UVs asked for, the map is mirrored on this vertex and w records the flip.
+        const float handedness =
+            XMVectorGetX(XMVector3Dot(XMVector3Cross(normal, tangent), bitangents[i])) < 0.0f
+                ? -1.0f
+                : 1.0f;
+
+        XMFLOAT3 t3;
+        XMStoreFloat3(&t3, tangent);
+        vertex.tangent = {t3.x, t3.y, t3.z, handedness};
+    }
+}
+
 void LoadPrimitive(const fastgltf::Asset& asset, const fastgltf::Node& node,
                    const fastgltf::Primitive& source, const XMFLOAT4X4& to_model, Model& model) {
     if (source.type != fastgltf::PrimitiveType::Triangles) {
@@ -351,6 +464,23 @@ void LoadPrimitive(const fastgltf::Asset& asset, const fastgltf::Node& node,
             model.indices[primitive.first_index + reversed] =
                 static_cast<std::uint32_t>(first_vertex) + index;
         });
+
+    if (HasAttribute(source, "TANGENT")) {
+        // glTF's TANGENT is a vec4 in its right-handed space. The mirror through Z
+        // negates the direction's Z like any other direction; it also reverses
+        // handedness, so the stored bitangent sign in w flips too.
+        fastgltf::iterateAccessorWithIndex<XMFLOAT4>(
+            asset, FindAccessor(asset, source, "TANGENT"), [&](XMFLOAT4 tangent, std::size_t i) {
+                model.vertices[first_vertex + i].tangent = {tangent.x, tangent.y, -tangent.z,
+                                                            -tangent.w};
+            });
+    } else {
+        // No authored tangents -- glTF makes TANGENT optional, so this is the common
+        // case for assets exported without one. Build a frame from the geometry so a
+        // normal map still has something to perturb against.
+        GenerateTangents(model, first_vertex, positions.count, primitive.first_index,
+                         primitive.index_count);
+    }
 
     model.primitives.push_back(primitive);
 }
@@ -445,12 +575,20 @@ Model MakeUnitCubeModel() {
             XMVectorAdd(XMVectorSubtract(center, half_u), half_v),
         };
 
+        // The tangent points the way U runs, which is +u. The cube carries no
+        // material, so it always samples the flat 1x1 normal and this frame is
+        // never actually read -- but every vertex in the game holds a valid
+        // tangent, and the cube is no exception.
+        XMFLOAT3 face_tangent;
+        XMStoreFloat3(&face_tangent, u);
+
         const auto base = static_cast<std::uint32_t>(model.vertices.size());
         for (int corner = 0; corner < 4; ++corner) {
             Vertex vertex{};
             XMStoreFloat3(&vertex.position, corners[corner]);
             vertex.normal = face_normal;
             vertex.uv = kCornerUvs[corner];
+            vertex.tangent = {face_tangent.x, face_tangent.y, face_tangent.z, 1.0f};
             model.vertices.push_back(vertex);
         }
 

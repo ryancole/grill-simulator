@@ -14,6 +14,14 @@ struct Vertex {
     DirectX::XMFLOAT3 position;
     DirectX::XMFLOAT3 normal;
     DirectX::XMFLOAT2 uv;
+    // The surface's tangent, for normal mapping: xyz is the direction increasing U
+    // runs in model space, w is the handedness (+/-1) that orients the bitangent as
+    // cross(normal, tangent) * w. glTF supplies it as a vec4 when a material carries
+    // a normal map; when it does not, model.cpp manufactures one from the geometry,
+    // so every vertex has a usable frame whether or not the file authored one. A
+    // surface with no normal map ignores it -- a flat (0,0,1) tangent-space normal
+    // reconstructs to the geometric normal regardless of the frame.
+    DirectX::XMFLOAT4 tangent;
 };
 
 // The skinning half of a vertex, held in its own array rather than folded into
@@ -27,15 +35,28 @@ struct SkinVertex {
     DirectX::XMFLOAT4 weights;
 };
 
-// glTF materials describe a full metallic-roughness BRDF. This renderer has a
-// hemisphere ambient, one directional light and no specular term at all, so only
-// the base colour survives the trip: the factor, and the texture it modulates.
-// Everything else in the material -- metallic, roughness, normal maps, emissive
-// -- is read past and dropped.
+// glTF materials describe a metallic-roughness BRDF, and this renderer now runs
+// one: base colour, normal map, the metallic-roughness pair (factors and their
+// shared texture), and the ambient-occlusion map. Only emissive is still dropped.
 struct Material {
     DirectX::XMFLOAT3 base_color{1.0f, 1.0f, 1.0f};
+    // Multiplies the metallic-roughness texture, or stands alone when there is
+    // none. glTF's defaults: fully rough, non-metal.
+    float metallic = 1.0f;
+    float roughness = 1.0f;
     // Index into Model::images, or -1 when the material is a flat colour.
     int base_color_image = -1;
+    // Index into Model::images for the tangent-space normal map, or -1 when the
+    // material has none -- in which case the renderer points the draw at a flat
+    // 1x1 normal and the geometric normal is used unperturbed.
+    int normal_image = -1;
+    // Index into Model::images for the metallic-roughness map (glTF packs
+    // roughness in G and metallic in B), or -1 -- then a 1x1 white stands in and
+    // the factors above act alone.
+    int metallic_roughness_image = -1;
+    // Index into Model::images for the ambient-occlusion map (glTF stores it in
+    // the R channel), or -1 -- then a 1x1 white stands in and nothing is occluded.
+    int occlusion_image = -1;
 };
 
 // One draw. `transform` places the primitive's vertices into model space, having

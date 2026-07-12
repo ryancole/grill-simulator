@@ -149,18 +149,6 @@ def shaded_texture(width: int, height: int, base: tuple[float, float, float], sh
     return write_png(width, height, bytes(pixels))
 
 
-def brushed_charcoal() -> bytes:
-    """The grill's body: dark, faintly streaked along X so it wraps the barrel."""
-
-    def shade(x: int, y: int) -> float:
-        # One brightness per row is what makes the grain read as brushed metal
-        # rather than as sandpaper. The per-pixel term only breaks up the bands.
-        row = 0.86 + 0.28 * noise(y * 7919)
-        return row * (0.94 + 0.12 * noise(y * 131071 + x * 31))
-
-    return shaded_texture(128, 64, (0.13, 0.13, 0.14), shade)
-
-
 def bark() -> bytes:
     """The tree's trunk: fissures running the length of it.
 
@@ -214,44 +202,6 @@ def cardboard() -> bytes:
         return ridge * (0.92 + fibre + speck)
 
     return shaded_texture(size, size, (0.52, 0.38, 0.24), shade)
-
-
-def moulded_plastic(base: tuple[float, float, float]) -> bytes:
-    """Injection-moulded plastic: a fine speckle under shallow ridges.
-
-    The cooler's body and its lid are the same plastic in two colours, so they
-    share this and differ only in `base`.
-    """
-    size = 64
-    ridges = 4
-
-    def shade(x: int, y: int) -> float:
-        ridge = 0.95 + 0.10 * (0.5 + 0.5 * math.cos(y * 2.0 * math.pi * ridges / size))
-        speck = 0.96 + 0.08 * noise(x * 131071 + y * 31)
-        return ridge * speck
-
-    return shaded_texture(size, size, base, shade)
-
-
-def planks(bands: int = 4) -> bytes:
-    """The picnic table. Boards run along the texture's U, seams along its V.
-
-    `box()` is asked to tile this every 0.8 m, so four bands across the tile put
-    a seam every 20 cm -- which is about what a picnic table's boards are.
-    """
-    height = 64
-    band_height = height // bands
-
-    def shade(x: int, y: int) -> float:
-        board = 0.88 + 0.24 * noise((y // band_height) * 7919)
-        # The dark line where two boards meet.
-        seam = 0.55 if y % band_height == 0 else 1.0
-        # Grain runs the length of the board, so it varies fast across V and
-        # slowly along U.
-        grain = 0.95 + 0.10 * noise(y * 31 + (x // 16) * 131071)
-        return board * seam * grain
-
-    return shaded_texture(64, height, (0.60, 0.44, 0.28), shade)
 
 
 # --- Geometry -----------------------------------------------------------------
@@ -507,44 +457,6 @@ def assemble(builder: GlbBuilder, nodes: list[dict], meshes: list[dict], materia
 # --- The models ---------------------------------------------------------------
 
 
-def build_grill() -> bytes:
-    """The kettle grill: four legs, a body, a lid and a side shelf.
-
-    Every part is its own node, which is what gives the loader one bounding box
-    per part rather than one around the whole grill.
-    """
-    builder = GlbBuilder()
-    charcoal_image = builder.image_view(brushed_charcoal())
-
-    # The body is the only textured part. The rest carry a flat base colour, so
-    # the loader has to handle a material with no texture at all -- which is the
-    # case that a 1x1 white default texture exists to serve.
-    materials = [
-        material("body", texture=0),
-        material("lid", color=(0.62, 0.11, 0.09), roughness=0.4),
-        material("leg", color=(0.13, 0.13, 0.14), roughness=0.9),
-        material("shelf", color=(0.62, 0.64, 0.67), metallic=1.0, roughness=0.35),
-    ]
-    BODY, LID, LEG, SHELF = range(4)
-
-    meshes = [
-        builder.box_mesh("body", (1.6, 0.7, 0.9), BODY),
-        builder.box_mesh("lid", (1.7, 0.24, 1.0), LID),
-        builder.box_mesh("leg", (0.08, 0.25, 0.08), LEG),
-        builder.box_mesh("shelf", (0.7, 0.05, 0.7), SHELF),
-    ]
-
-    # The grill's own origin sits on the ground between its legs, so the scene
-    # places it with a plain translation.
-    parts = [("body", 0, (0.0, 0.6, 0.0)), ("lid", 1, (0.0, 1.05, 0.0)),
-             ("shelf", 3, (1.15, 0.75, 0.0))]
-    for x in (-0.65, 0.65):
-        for z in (-0.35, 0.35):
-            parts.append((f"leg_{'e' if x > 0 else 'w'}{'n' if z > 0 else 's'}", 2, (x, 0.125, z)))
-
-    return assemble(builder, part_nodes("Grill", parts), meshes, materials, [charcoal_image])
-
-
 def build_tree() -> bytes:
     """One tree: a trunk and a canopy above head height.
 
@@ -575,33 +487,6 @@ def build_tree() -> bytes:
                     [bark_image, leaves_image])
 
 
-def build_table() -> bytes:
-    """A picnic table: a top, four legs and two benches, all the same wood."""
-    builder = GlbBuilder()
-    planks_image = builder.image_view(planks())
-
-    materials = [material("wood", texture=0, roughness=0.8)]
-    WOOD = 0
-
-    # 0.8 m of texture per tile, so the boards read at the same size on the top,
-    # the benches and the legs.
-    meshes = [
-        builder.box_mesh("top", (2.6, 0.1, 1.2), WOOD, tile=0.8),
-        builder.box_mesh("leg", (0.12, 0.7, 0.12), WOOD, tile=0.8),
-        builder.box_mesh("bench", (2.6, 0.08, 0.4), WOOD, tile=0.8),
-    ]
-
-    # The table's origin sits on the ground at the centre of its top.
-    parts = [("top", 0, (0.0, 0.75, 0.0)),
-             ("bench_s", 2, (0.0, 0.45, -0.95)),
-             ("bench_n", 2, (0.0, 0.45, 0.95))]
-    for x in (-1.15, 1.15):
-        for z in (-0.45, 0.45):
-            parts.append((f"leg_{'e' if x > 0 else 'w'}{'n' if z > 0 else 's'}", 1, (x, 0.35, z)))
-
-    return assemble(builder, part_nodes("Table", parts), meshes, materials, [planks_image])
-
-
 def build_crate() -> bytes:
     """A cardboard packing box, 80 cm on a side.
 
@@ -621,106 +506,10 @@ def build_crate() -> bytes:
                     materials, [cardboard_image])
 
 
-def build_cooler() -> bytes:
-    """A cool box: a blue body with a pale moulded lid lapped over its top.
-
-    The body is the whole cooler -- the full 0.9 x 0.6 x 0.6 box the yard used to
-    draw -- and it is the only thing that collides. The lid is decorative: it
-    laps 1 cm over the body's sides and stands 5 mm proud of its top, which is
-    what stops the two from sharing a face and z-fighting.
-
-    Stacking a shorter body under a lid would have been the obvious way to build
-    this, and it is wrong. Colliders come one per node, so the body's top face
-    would be a surface the player can stand on -- buried inside the cooler at lid
-    height, invisible, and reachable by anyone falling past the corner. Naming
-    the lid `_nocollide` is how the asset says it is a decoration; see
-    kDecorativeSuffix in src/model.cpp.
-    """
-    builder = GlbBuilder()
-    body_image = builder.image_view(moulded_plastic((0.16, 0.44, 0.62)))
-    lid_image = builder.image_view(moulded_plastic((0.82, 0.84, 0.86)))
-
-    materials = [material("body", texture=0, roughness=0.55),
-                 material("lid", texture=1, roughness=0.45)]
-    BODY, LID = range(2)
-
-    meshes = [
-        builder.box_mesh("body", (0.9, 0.6, 0.6), BODY, tile=0.6),
-        builder.box_mesh("lid", (0.92, 0.16, 0.62), LID, tile=0.6),
-    ]
-
-    # The lid spans 0.445 .. 0.605, so it swallows the body's top face rather
-    # than meeting it.
-    parts = [("body", 0, (0.0, 0.3, 0.0)), ("lid_nocollide", 1, (0.0, 0.525, 0.0))]
-    return assemble(builder, part_nodes("Cooler", parts), meshes, materials,
-                    [body_image, lid_image])
-
-
-# --- The props ----------------------------------------------------------------
-#
-# Unlike the yard's furniture, these are loose objects the player carries. They
-# are flat-coloured -- no textures -- because they are small and mostly seen in
-# the hand, and because it exercises the loader's texture-less material path that
-# the grill's flat lid and legs only share a file with. Each is one node, so it
-# still yields a bounding box, but the game gives none of them a collider: a
-# dropped steak is something to walk through, not to trip over.
-#
-# Every prop's origin sits at the centre of its underside, so the game sets one
-# down with a plain translation to whatever surface height it is resting on --
-# the same convention the crate and cooler already use.
-
-
-def build_tongs() -> bytes:
-    """A pair of spring tongs: two steel arms splaying from a hinge.
-
-    They lie flat along +X with the hinge at the origin, so the game can lay them
-    across the grill's shelf with a yaw and a translation.
-    """
-    builder = GlbBuilder()
-    materials = [material("steel", color=(0.72, 0.74, 0.78), metallic=1.0, roughness=0.3)]
-    STEEL = 0
-
-    meshes = [
-        builder.box_mesh("arm", (0.34, 0.02, 0.03), STEEL),
-        builder.box_mesh("hinge", (0.05, 0.03, 0.08), STEEL),
-    ]
-
-    # The arms' boxes are centred, so a translation of 0.19 in X puts each one's
-    # near end just past the hinge; the yaw splays them apart along Z into the
-    # open V of a pair of tongs.
-    parts = [
-        ("hinge", 1, (0.0, 0.015, 0.0)),
-        ("arm_n", 0, (0.19, 0.01, 0.04), 8.0),
-        ("arm_s", 0, (0.19, 0.01, -0.04), -8.0),
-    ]
-
-    return assemble(builder, part_nodes("Tongs", parts), meshes, materials, [])
-
-
-def build_patty() -> bytes:
-    """A raw burger patty: a low, dark disc stood in for by a flat box."""
-    builder = GlbBuilder()
-    materials = [material("patty", color=(0.36, 0.20, 0.14), roughness=0.9)]
-    meshes = [builder.box_mesh("patty", (0.20, 0.035, 0.20), 0)]
-    return assemble(builder, part_nodes("Patty", [("patty", 0, (0.0, 0.0175, 0.0))]),
-                    meshes, materials, [])
-
-
-def build_steak() -> bytes:
-    """A steak: a larger, redder slab than the patty, a touch thicker."""
-    builder = GlbBuilder()
-    materials = [material("steak", color=(0.47, 0.17, 0.16), roughness=0.85)]
-    meshes = [builder.box_mesh("steak", (0.26, 0.04, 0.18), 0)]
-    return assemble(builder, part_nodes("Steak", [("steak", 0, (0.0, 0.02, 0.0))]),
-                    meshes, materials, [])
-
-
 def main() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
-    models = (("grill.glb", build_grill()), ("tree.glb", build_tree()),
-              ("table.glb", build_table()), ("crate.glb", build_crate()),
-              ("cooler.glb", build_cooler()), ("tongs.glb", build_tongs()),
-              ("patty.glb", build_patty()), ("steak.glb", build_steak()))
+    models = (("tree.glb", build_tree()),
+              ("crate.glb", build_crate()))
     for name, data in models:
         path = ASSETS / name
         path.write_bytes(data)

@@ -95,11 +95,11 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
     const PropModels& models = scene.PropModelIds();
     const std::vector<Model>& pool = scene.Models();
 
-    // The tongs lie across the grill's side shelf; the meat waits on the picnic
-    // table. All four sit in the player's view from the spawn point. Each carries
-    // the Model it was loaded from so its box collider can be measured off the
-    // mesh bounds.
-    Add(models.tongs, pool[models.tongs], "tongs", {1.15f, 0.78f, 5.0f}, 90.0f, TongsInHand());
+    // The tongs lie flat on the patio just beside the grill; the meat waits on the
+    // picnic table. All four sit in the player's view from the spawn point. Each
+    // carries the Model it was loaded from so its box collider can be measured off
+    // the mesh bounds. Placed a hair above the ground so physics settles it flat.
+    Add(models.tongs, pool[models.tongs], "tongs", {1.15f, 0.05f, 4.45f}, 25.0f, TongsInHand());
     Add(models.steak, pool[models.steak], "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand());
     Add(models.patty, pool[models.patty], "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand());
     Add(models.patty, pool[models.patty], "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand());

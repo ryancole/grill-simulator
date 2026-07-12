@@ -25,18 +25,20 @@ constexpr XMFLOAT3 kFenceWood{0.45f, 0.32f, 0.21f};
 
 Scene::Scene() {
     cube_ = AddModel(MakeUnitCubeModel());
-    const std::uint32_t grill = LoadModel("grill.glb");
+    // A downloaded kettle grill, scaled to real size and exported with its base at
+    // the origin, so a plain translation drops it on the ground -- no runtime scale.
+    const std::uint32_t grill = LoadModel("grill-basic.glb");
     const std::uint32_t tree = LoadModel("tree.glb");
-    const std::uint32_t table = LoadModel("table.glb");
+    const std::uint32_t bench = LoadModel("bench-basic.glb");
     const std::uint32_t crate = LoadModel("crate.glb");
-    const std::uint32_t cooler = LoadModel("cooler.glb");
+    const std::uint32_t cooler = LoadModel("cooler-basic.glb");
 
     // The loose props are loaded so the renderer uploads them, but the scene
     // places no instances of them: Props sets out the starting handful and owns
     // every one thereafter.
-    prop_models_.tongs = LoadModel("tongs.glb");
-    prop_models_.patty = LoadModel("patty.glb");
-    prop_models_.steak = LoadModel("steak.glb");
+    prop_models_.tongs = LoadModel("tongs-metal.glb");
+    prop_models_.patty = LoadModel("burger-raw.glb");
+    prop_models_.steak = LoadModel("steak-cooked.glb");
 
     // The yard. +X is east, +Z is north, and the player spawns at the south end
     // looking at the grill.
@@ -53,7 +55,7 @@ Scene::Scene() {
     // scaled or turned goes where it belongs with a plain translation, and its
     // parts come along as the nodes of one asset.
     AddInstance(grill, XMMatrixTranslation(0.0f, 0.0f, 5.0f), kWhite);
-    AddInstance(table, XMMatrixTranslation(-4.5f, 0.0f, 1.5f), kWhite);
+    AddInstance(bench, XMMatrixTranslation(-4.5f, 0.0f, 1.5f), kWhite);
     AddInstance(cooler, XMMatrixTranslation(3.6f, 0.0f, 6.5f), kWhite);
 
     // Two crates, the upper one knocked askew. The smaller is the same box at

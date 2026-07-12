@@ -71,6 +71,11 @@ fmod_stage_runtime(grill)
 
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT scene.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT scene.ps.cso)
+# The capture variant of the scene pixel shader: reflects the analytic sky rather
+# than the probe, so it can fill the probe cubemap without reading it.
+add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMainCapture PROFILE ps_6_6 OUTPUT scene_capture.ps.cso)
+add_hlsl_shader(grill SOURCE shaders/sky.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT sky.vs.cso)
+add_hlsl_shader(grill SOURCE shaders/sky.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT sky.ps.cso)
 add_hlsl_shader(grill SOURCE shaders/text.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT text.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/text.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT text.ps.cso)
 add_hlsl_shader(grill SOURCE shaders/outline.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT outline.vs.cso)
@@ -79,7 +84,7 @@ add_hlsl_shader(grill SOURCE shaders/outline.hlsl ENTRY PSMain PROFILE ps_6_6 OU
 add_hlsl_shader(grill SOURCE shaders/shadow.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT shadow.vs.cso)
 
 stage_assets(grill DIRECTORY assets/models
-  FILES grill.glb tree.glb table.glb crate.glb cooler.glb tongs.glb patty.glb steak.glb)
+  FILES grill-basic.glb tree.glb bench-basic.glb crate.glb cooler-basic.glb tongs-metal.glb burger-raw.glb steak-cooked.glb)
 
 stage_assets(grill DIRECTORY assets/audio
   FILES sizzle.wav)

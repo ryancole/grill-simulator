@@ -33,20 +33,28 @@ public:
     void Render(const Scene& scene, std::span<const MeshInstance> props,
                 std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                 std::span<const MeshInstance> held_props,
-                const DirectX::XMMATRIX& view_projection, std::string_view hud_prompt);
+                const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
+                std::string_view hud_prompt);
     void Shutdown();
 
     float AspectRatio() const;
 
 private:
     // One draw: a slice of its model's index buffer, the base colour the glTF
-    // material asked for, and the descriptor of the texture that modulates it.
+    // material asked for, the descriptor of the texture that modulates it, and the
+    // descriptor of its tangent-space normal map (the flat 1x1 default when the
+    // material has none).
     struct DrawPrimitive {
         DirectX::XMFLOAT4X4 transform;
         UINT first_index;
         UINT index_count;
         DirectX::XMFLOAT3 base_color;
+        float metallic;
+        float roughness;
         D3D12_GPU_DESCRIPTOR_HANDLE base_color_texture;
+        D3D12_GPU_DESCRIPTOR_HANDLE normal_texture;
+        D3D12_GPU_DESCRIPTOR_HANDLE metallic_roughness_texture;
+        D3D12_GPU_DESCRIPTOR_HANDLE occlusion_texture;
     };
 
     // A Model, uploaded. The CPU-side Model that produced it is not needed again.
@@ -73,6 +81,11 @@ private:
     // that hands that matrix to the scene pass.
     void CreateShadowPipeline();
     void CreatePipeline();
+    // The gradient-sky background: a fullscreen pass whose pixel shader turns each
+    // pixel into a world-space view ray and samples the same analytic sky the
+    // scene reflects. Its own tiny root signature (just the inverse view-projection
+    // and the eye) and PSO with depth off.
+    void CreateSkyPipeline();
     // The inverted-hull outline pass: its own root signature and PSO that grow a
     // mesh along its normals, cull the near faces and paint the far shell a flat
     // glowing colour. Depth-tests against the world but writes no depth.
@@ -80,6 +93,13 @@ private:
     // Uploads every model the scene holds, plus the 1x1 white texture that
     // stands in for a material with no texture of its own.
     void CreateSceneGeometry(const Scene& scene);
+
+    // Renders the static yard into a cubemap once, from a fixed point at its
+    // centre, so the scene pass can reflect the real fence and trees off a metal
+    // rather than only the analytic sky. Six faces, each the scene lit by the
+    // analytic sky (the capture pixel shader), with the gradient sky behind. Runs
+    // after CreateSceneGeometry, on the same one-shot command list.
+    void CaptureReflectionProbe(const Scene& scene);
 
     // The second, tiny pipeline: the alpha-blended, depth-free pass that draws
     // HUD text from the MSDF atlas. Builds its root signature, PSO and the
@@ -100,17 +120,27 @@ private:
                                         D3D12_RESOURCE_STATES final_state,
                                         std::vector<ComPtr<ID3D12Resource>>& staging);
     // Uploads a mip chain and writes its shader resource view into slot
-    // `descriptor` of the texture heap.
-    ComPtr<ID3D12Resource> UploadTexture(const Image& image, UINT descriptor,
+    // `descriptor` of the texture heap. `format` is sRGB for base-colour images
+    // and plain _UNORM for data textures (normal, metallic-roughness, atlas).
+    ComPtr<ID3D12Resource> UploadTexture(const Image& image, UINT descriptor, DXGI_FORMAT format,
                                          std::vector<ComPtr<ID3D12Resource>>& staging);
     D3D12_GPU_DESCRIPTOR_HANDLE TextureHandle(UINT descriptor) const;
 
     // One draw per primitive of each instance's model, each under its own root
     // constants. `shadow_receive` is 1 for the world, which is shadowed by the
     // sun, and 0 for the viewmodel, which is not.
+    // `bind_probe` binds the reflection cubemap for the pass to sample. The
+    // on-screen pass wants it; the probe-capture pass must not (it is filling that
+    // cube and its pixel shader never reads it), so it passes false.
     void DrawInstances(std::span<const MeshInstance> instances,
                        const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction,
-                       float shadow_receive);
+                       float shadow_receive, bool bind_probe);
+
+    // Fills the currently bound render target with the gradient sky, seen from
+    // `camera_position` through `view_projection`. Draws no depth, so geometry
+    // rendered afterward paints over it. Switches to the sky pipeline and root
+    // signature; the caller restores whatever it needs next.
+    void DrawSky(const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position);
 
     // The shadow pass: draws every caster depth-only into the shadow map from the
     // sun's point of view, wrapped in the barriers that flip the map between
@@ -153,6 +183,23 @@ private:
     ComPtr<ID3D12RootSignature> root_signature_;
     ComPtr<ID3D12PipelineState> pipeline_state_;
 
+    // The gradient-sky background pass. No vertex buffer, no textures: the pixel
+    // shader reconstructs the view ray from the inverse view-projection handed in
+    // as root constants.
+    ComPtr<ID3D12RootSignature> sky_root_signature_;
+    ComPtr<ID3D12PipelineState> sky_pipeline_state_;
+
+    // The reflection probe. `scene_capture_pipeline_state_` is the scene PSO with
+    // the capture pixel shader (analytic sky, no cube read); it fills probe_cube_
+    // through the six face RTVs in probe_rtv_heap_, depth-tested against
+    // probe_depth_. The finished cube's SRV lives in texture_heap_ at
+    // probe_descriptor_. All built once, at startup.
+    ComPtr<ID3D12PipelineState> scene_capture_pipeline_state_;
+    ComPtr<ID3D12Resource> probe_cube_;
+    ComPtr<ID3D12DescriptorHeap> probe_rtv_heap_;
+    ComPtr<ID3D12Resource> probe_depth_;
+    UINT probe_descriptor_ = 0;
+
     // The pick-up outline pass. Shares the scene's vertex buffers and input
     // layout; only the root signature and PSO differ.
     ComPtr<ID3D12RootSignature> outline_root_signature_;
@@ -166,7 +213,13 @@ private:
     ComPtr<ID3D12Resource> shadow_map_;
     UINT shadow_descriptor_ = 0;
     DirectX::XMFLOAT4X4 light_view_projection_{};
+    // One aligned FrameConstants region per frame in flight, kept mapped and
+    // rewritten each frame with the sun matrix and the current eye position. Per
+    // frame because the camera moves, and buffered per frame so writing this
+    // frame's copy cannot trample the one the GPU is still reading for the last.
     ComPtr<ID3D12Resource> frame_constants_;
+    std::byte* frame_constants_mapped_ = nullptr;
+    UINT frame_constants_stride_ = 0;
     D3D12_GPU_VIRTUAL_ADDRESS frame_constants_address_ = 0;
     D3D12_VIEWPORT shadow_viewport_{};
     D3D12_RECT shadow_scissor_{};

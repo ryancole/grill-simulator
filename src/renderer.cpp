@@ -44,13 +44,25 @@ struct Constants {
     // lit by its own camera-bolted sun. Mirrors g_shadow_receive in scene.hlsl,
     // and reuses the DWORD that was only padding before shadows existed.
     float shadow_receive;
+    // The glTF metallic-roughness factors, each multiplying its channel of the
+    // metallic-roughness texture. They open a fresh cbuffer row, so two DWORDs of
+    // padding follow to keep the C++ size a whole 16-byte multiple like the HLSL
+    // side.
+    float metallic;
+    float roughness;
+    float pad0;
+    float pad1;
 };
 
 static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
 // Beyond the root constants the scene signature holds the base-colour table (1),
-// the frame constant buffer (2) and the shadow-map table (1) -- four DWORDs.
-static_assert(kConstantDwords + 4 <= 64, "A root signature holds at most 64 DWORDs in total");
+// the frame constant buffer (2), the shadow-map table (1), the normal-map table
+// (1), the metallic-roughness table (1), the reflection-probe table (1) and the
+// occlusion table (1) -- eight DWORDs, which puts the signature exactly at the
+// 64-DWORD ceiling. Another per-draw texture would need the tables merged into one
+// contiguous range first.
+static_assert(kConstantDwords + 8 <= 64, "A root signature holds at most 64 DWORDs in total");
 
 // The shadow map is square and this many texels on a side. Matches kShadowMapSize
 // in scene.hlsl, which sizes one texel for the PCF taps. 2048 gives the fenced
@@ -71,11 +83,25 @@ struct ShadowConstants {
 
 constexpr UINT kShadowConstantDwords = sizeof(ShadowConstants) / sizeof(UINT);
 
-// Mirrors the FrameConstants cbuffer in shaders/scene.hlsl. One matrix now; a
-// constant buffer is 256-byte aligned, so there is room to spare if more per-frame
-// state ever wants to ride along.
+// Mirrors the SkyConstants cbuffer in shaders/sky.hlsl: clip space back to world,
+// and the eye the view rays start from.
+struct SkyConstants {
+    XMFLOAT4X4 inv_view_projection;
+    XMFLOAT3 camera_position;
+    float pad0;
+};
+
+static_assert(sizeof(SkyConstants) % sizeof(UINT) == 0);
+constexpr UINT kSkyConstantDwords = sizeof(SkyConstants) / sizeof(UINT);
+
+// Mirrors the FrameConstants cbuffer in shaders/scene.hlsl: state shared by every
+// scene draw in a frame. The sun's view-projection never changes; the camera
+// position does, which is why this buffer is now written per frame (see
+// frame_constants_mapped_) rather than once at startup.
 struct FrameConstants {
     XMFLOAT4X4 light_view_projection;
+    XMFLOAT3 camera_position;
+    float pad0;
 };
 
 // Mirrors the OutlineConstants cbuffer in shaders/outline.hlsl. The view-
@@ -120,17 +146,40 @@ constexpr float kOutlinePulseHz = 1.4f;
 constexpr float kOutlinePulseMin = 0.65f;
 constexpr float kOutlinePulseMax = 1.0f;
 
-// _UNORM rather than _UNORM_SRGB, and deliberately. Nothing in this renderer
-// converts to linear light: the flat colours in scene.cpp, the constants in the
-// shader, the box filter that builds the mips and the back buffer are all in
-// whatever space they were written. Decoding only the textures would leave them
-// the one linear thing in the frame, reading darker than the flat colour beside
-// them. Fixing it is a single change that has to touch all five.
+// The linear texture format, for data that is not colour: normal maps, the
+// metallic-roughness map, the font's distance field, and the 1x1 defaults.
 constexpr DXGI_FORMAT kTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+// The sRGB texture format, for base-colour images. Sampling through an sRGB view
+// decodes the texel to linear light in hardware, which is where the BRDF wants
+// it. The scene pixel shader re-encodes to sRGB on the way out (LinearToSrgb),
+// and it linearises the flat colours in scene.cpp itself -- so base colour,
+// factors and lighting all meet in linear space. The back buffer stays plain
+// _UNORM: the encode is done in the shader, which keeps the outline and text
+// passes, which still write display-space colour, untouched.
+constexpr DXGI_FORMAT kSrgbTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+
+// The reflection probe cubemap: this many texels on a side, per face, captured
+// once from the yard's centre at eye height. Typeless so the same memory renders
+// as _UNORM (the capture writes display-space colour, as the scene pass does to
+// the back buffer) and samples as _UNORM_SRGB (decoded to linear light, like a
+// base-colour texture). The scene's own depth buffer cannot be reused -- it is the
+// window's size -- so the capture has a square depth of its own in DSV slot 2.
+constexpr UINT kProbeSize = 256;
+constexpr XMFLOAT3 kProbePosition{0.0f, 1.5f, 0.0f};
+constexpr DXGI_FORMAT kProbeResourceFormat = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+constexpr DXGI_FORMAT kProbeRtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+constexpr DXGI_FORMAT kProbeSrvFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+constexpr UINT kProbeDsvIndex = 2;
 
 // Slot 0 of the texture heap. A material with no base colour texture points
 // here, which spares the shader a branch and the pipeline a second variant.
 constexpr UINT kWhiteTexture = 0;
+
+// Slot 1: the flat tangent-space normal (0,0,1), encoded (128,128,255). A
+// material with no normal map points here, so the shader always samples a normal
+// map and a textureless surface simply reconstructs its geometric normal.
+constexpr UINT kFlatNormalTexture = 1;
 
 // One corner of a glyph quad, in the HUD text pass. Position is already in
 // normalized device coordinates, so the vertex shader is a pass-through.
@@ -204,9 +253,11 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene
     CreateDepthBuffer();
     CreateShadowMap();
     CreatePipeline();
+    CreateSkyPipeline();
     CreateOutlinePipeline();
     CreateShadowPipeline();
     CreateSceneGeometry(scene);
+    CaptureReflectionProbe(scene);
     CreateTextPipeline();
 
     initialized_ = true;
@@ -313,9 +364,10 @@ void Renderer::CreateSwapChain(HWND hwnd, UINT width, UINT height) {
                   "CreateDescriptorHeap(RTV)");
     rtv_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
-    // Two: the scene's depth buffer, then the sun's shadow map.
+    // Three: the scene's depth buffer, the sun's shadow map, then the reflection
+    // probe's square capture depth.
     D3D12_DESCRIPTOR_HEAP_DESC dsv_desc{};
-    dsv_desc.NumDescriptors = 2;
+    dsv_desc.NumDescriptors = 3;
     dsv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
     ThrowIfFailed(device_->CreateDescriptorHeap(&dsv_desc, IID_PPV_ARGS(&dsv_heap_)),
                   "CreateDescriptorHeap(DSV)");
@@ -404,13 +456,28 @@ void Renderer::CreatePipeline() {
     // t1: the shadow map, at a fixed slot in the same heap the base colour lives
     // in, bound once per frame rather than per draw.
     const CD3DX12_DESCRIPTOR_RANGE shadow_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
+    // t2, t3: the base colour's normal and metallic-roughness maps, each its own
+    // one-entry table bound per draw exactly like the base colour. Separate tables
+    // rather than one widened range, so the three need not sit next to each other
+    // in the heap.
+    const CD3DX12_DESCRIPTOR_RANGE normal_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
+    const CD3DX12_DESCRIPTOR_RANGE mr_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3);
+    // t4: the reflection probe cubemap, bound once per pass rather than per draw --
+    // one probe serves the whole yard.
+    const CD3DX12_DESCRIPTOR_RANGE probe_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);
+    // t5: the ambient-occlusion map, per draw like the other material textures.
+    const CD3DX12_DESCRIPTOR_RANGE occlusion_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5);
 
-    CD3DX12_ROOT_PARAMETER parameters[4];
+    CD3DX12_ROOT_PARAMETER parameters[8];
     parameters[0].InitAsConstants(kConstantDwords, 0);
     parameters[1].InitAsDescriptorTable(1, &base_color_range, D3D12_SHADER_VISIBILITY_PIXEL);
-    // b1: the frame constant buffer holding the sun's view-projection.
+    // b1: the frame constant buffer holding the sun's view-projection and the eye.
     parameters[2].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
     parameters[3].InitAsDescriptorTable(1, &shadow_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[4].InitAsDescriptorTable(1, &normal_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[5].InitAsDescriptorTable(1, &mr_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[6].InitAsDescriptorTable(1, &probe_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[7].InitAsDescriptorTable(1, &occlusion_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     // s0: anisotropic because the ground and the patio are seen almost edge on,
@@ -467,8 +534,10 @@ void Renderer::CreatePipeline() {
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24,
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
-    static_assert(sizeof(Vertex) == 32, "The input layout above spells out Vertex's offsets");
+    static_assert(sizeof(Vertex) == 48, "The input layout above spells out Vertex's offsets");
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
     pso.InputLayout = {input_layout, _countof(input_layout)};
@@ -489,6 +558,91 @@ void Renderer::CreatePipeline() {
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pipeline_state_)),
                   "CreateGraphicsPipelineState");
+
+    // The probe-capture variant: the same pipeline, same root signature and vertex
+    // shader, with the capture pixel shader (analytic sky, no cube read) and the
+    // probe's render-target format. It renders the yard into the cubemap faces.
+    const std::vector<std::byte> capture_ps =
+        ReadBinaryFile(shader_dir / "scene_capture.ps.cso");
+    pso.PS = {capture_ps.data(), capture_ps.size()};
+    pso.RTVFormats[0] = kProbeRtvFormat;
+    ThrowIfFailed(
+        device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&scene_capture_pipeline_state_)),
+        "CreateGraphicsPipelineState(capture)");
+}
+
+void Renderer::CreateSkyPipeline() {
+    // One root parameter: the inverse view-projection and the eye, as root
+    // constants. No input layout (the vertices come from SV_VertexID), no
+    // textures, no sampler.
+    CD3DX12_ROOT_PARAMETER parameters[1];
+    parameters[0].InitAsConstants(kSkyConstantDwords, 0);
+
+    CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    root_desc.Init(_countof(parameters), parameters, 0, nullptr,
+                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr =
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr)) {
+        std::string message = error
+                                  ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                                error->GetBufferSize())
+                                  : "unknown error";
+        throw std::runtime_error("D3D12SerializeRootSignature(sky) failed: " + message);
+    }
+    ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                               signature->GetBufferSize(),
+                                               IID_PPV_ARGS(&sky_root_signature_)),
+                  "CreateRootSignature(sky)");
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "sky.vs.cso");
+    const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "sky.ps.cso");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.InputLayout = {nullptr, 0};
+    pso.pRootSignature = sky_root_signature_.Get();
+    pso.VS = {vs.data(), vs.size()};
+    pso.PS = {ps.data(), ps.size()};
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    // The fullscreen triangle's winding is unimportant, so do not risk culling it.
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    // No depth at all: the sky is written flat behind the frame, and the geometry
+    // that follows paints over it wherever the yard stands.
+    pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = kBackBufferFormat;
+    pso.SampleDesc.Count = 1;
+
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sky_pipeline_state_)),
+                  "CreateGraphicsPipelineState(sky)");
+}
+
+void Renderer::DrawSky(const XMMATRIX& view_projection, XMFLOAT3 camera_position) {
+    command_list_->SetPipelineState(sky_pipeline_state_.Get());
+    command_list_->SetGraphicsRootSignature(sky_root_signature_.Get());
+    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    command_list_->IASetVertexBuffers(0, 0, nullptr);
+
+    SkyConstants constants{};
+    XMStoreFloat4x4(&constants.inv_view_projection, XMMatrixInverse(nullptr, view_projection));
+    constants.camera_position = camera_position;
+    command_list_->SetGraphicsRoot32BitConstants(0, kSkyConstantDwords, &constants, 0);
+
+    // Three vertices, no buffer: the vertex shader builds the triangle from the id.
+    command_list_->DrawInstanced(3, 1, 0, 0);
 }
 
 void Renderer::CreateOutlinePipeline() {
@@ -527,8 +681,9 @@ void Renderer::CreateOutlinePipeline() {
     const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "outline.vs.cso");
     const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "outline.ps.cso");
 
-    // The same vertex stream the scene uses; the VS only reads POSITION and
-    // NORMAL, but the layout has to describe the whole 32-byte Vertex.
+    // The same 48-byte vertex stream the scene uses. The VS only reads POSITION
+    // and NORMAL, so the layout lists just what it consumes; the stride comes from
+    // the vertex buffer view and steps past the UV and tangent this pass ignores.
     const D3D12_INPUT_ELEMENT_DESC input_layout[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -608,25 +763,30 @@ void Renderer::CreateShadowPipeline() {
         XMMatrixOrthographicLH(kShadowExtent, kShadowExtent, kShadowNear, kShadowFar);
     XMStoreFloat4x4(&light_view_projection_, view * proj);
 
-    // The per-frame constant buffer that hands that matrix to the scene pass. It
-    // never changes, so it is written once here and left mapped-then-unmapped. A
-    // constant buffer wants a 256-byte-aligned size.
-    const UINT64 cb_size = (sizeof(FrameConstants) + 255) & ~UINT64{255};
+    // The per-frame constant buffer that hands that matrix, and the eye position,
+    // to the scene pass. One 256-byte-aligned region per frame in flight, kept
+    // mapped: Render rewrites the current frame's region and never touches the one
+    // the GPU may still be reading for the frame before it. The sun matrix is
+    // static, so it is stamped into every region here; only the eye is refreshed.
+    frame_constants_stride_ = static_cast<UINT>((sizeof(FrameConstants) + 255) & ~UINT64{255});
     const CD3DX12_HEAP_PROPERTIES upload_heap(D3D12_HEAP_TYPE_UPLOAD);
-    const CD3DX12_RESOURCE_DESC cb_desc = CD3DX12_RESOURCE_DESC::Buffer(cb_size);
+    const CD3DX12_RESOURCE_DESC cb_desc =
+        CD3DX12_RESOURCE_DESC::Buffer(static_cast<UINT64>(frame_constants_stride_) * kFrameCount);
     ThrowIfFailed(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &cb_desc,
                                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                                    IID_PPV_ARGS(&frame_constants_)),
                   "CreateCommittedResource(frame constants)");
 
-    FrameConstants frame{};
-    frame.light_view_projection = light_view_projection_;
-    void* mapped = nullptr;
     const CD3DX12_RANGE no_read(0, 0);
+    void* mapped = nullptr;
     ThrowIfFailed(frame_constants_->Map(0, &no_read, &mapped), "FrameConstants::Map");
-    std::memcpy(mapped, &frame, sizeof(frame));
-    frame_constants_->Unmap(0, nullptr);
-    frame_constants_address_ = frame_constants_->GetGPUVirtualAddress();
+    frame_constants_mapped_ = static_cast<std::byte*>(mapped);
+    for (UINT i = 0; i < kFrameCount; ++i) {
+        FrameConstants frame{};
+        frame.light_view_projection = light_view_projection_;
+        std::memcpy(frame_constants_mapped_ + static_cast<size_t>(i) * frame_constants_stride_,
+                    &frame, sizeof(frame));
+    }
 
     // The pass draws position only, under one root constant: the light MVP. No
     // texture, no sampler, and -- with no pixel shader at all -- pixel access
@@ -736,12 +896,13 @@ ComPtr<ID3D12Resource> Renderer::UploadBuffer(const void* data, UINT64 bytes,
 }
 
 ComPtr<ID3D12Resource> Renderer::UploadTexture(const Image& image, UINT descriptor,
+                                               DXGI_FORMAT format,
                                                std::vector<ComPtr<ID3D12Resource>>& staging) {
     const auto mip_levels = static_cast<UINT16>(image.levels.size());
 
     const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
     const CD3DX12_RESOURCE_DESC desc =
-        CD3DX12_RESOURCE_DESC::Tex2D(kTextureFormat, image.width, image.height, 1, mip_levels);
+        CD3DX12_RESOURCE_DESC::Tex2D(format, image.width, image.height, 1, mip_levels);
 
     ComPtr<ID3D12Resource> texture;
     ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
@@ -780,7 +941,7 @@ ComPtr<ID3D12Resource> Renderer::UploadTexture(const Image& image, UINT descript
     command_list_->ResourceBarrier(1, &barrier);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = kTextureFormat;
+    srv.Format = format;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = mip_levels;
@@ -807,9 +968,9 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     }
 
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
-    // The white texture, then every model image, then the HUD font atlas, then
-    // the sun's shadow map last.
-    heap_desc.NumDescriptors = 1 + image_count + 1 + 1;
+    // The white texture and the flat normal, then every model image, then the HUD
+    // font atlas, the sun's shadow map, and the reflection probe cubemap last.
+    heap_desc.NumDescriptors = 2 + image_count + 1 + 1 + 1;
     heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(device_->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&texture_heap_)),
@@ -824,13 +985,25 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     // Every staging resource stays alive until the copies have landed.
     std::vector<ComPtr<ID3D12Resource>> staging;
 
+    // Linear white: it stands in for both a missing base colour (tint only) and a
+    // missing metallic-roughness map (the factors act alone, since 1 leaves each
+    // channel untouched). It is data, not colour, so it is not sRGB.
     Image white{};
     white.width = 1;
     white.height = 1;
     white.levels.push_back(std::vector<std::byte>(4, std::byte{0xff}));
-    textures_.push_back(UploadTexture(white, kWhiteTexture, staging));
+    textures_.push_back(UploadTexture(white, kWhiteTexture, kTextureFormat, staging));
 
-    UINT next_descriptor = kWhiteTexture + 1;
+    // The flat normal: tangent-space (0,0,1) encoded as (128,128,255,255). A
+    // material with no normal map samples this and perturbs its normal by nothing.
+    Image flat_normal{};
+    flat_normal.width = 1;
+    flat_normal.height = 1;
+    flat_normal.levels.push_back(
+        std::vector<std::byte>{std::byte{0x80}, std::byte{0x80}, std::byte{0xff}, std::byte{0xff}});
+    textures_.push_back(UploadTexture(flat_normal, kFlatNormalTexture, kTextureFormat, staging));
+
+    UINT next_descriptor = kFlatNormalTexture + 1;
     models_.resize(models.size());
 
     for (size_t i = 0; i < models.size(); ++i) {
@@ -852,11 +1025,23 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
         gpu.index_buffer_view.Format = DXGI_FORMAT_R32_UINT;
         gpu.index_buffer_view.SizeInBytes = static_cast<UINT>(index_bytes);
 
+        // An image is sRGB only where a material uses it as base colour; the same
+        // bytes read as a normal or metallic-roughness map are linear data. No
+        // asset here reuses one image as both, so a single flag per image is safe.
+        std::vector<bool> is_srgb(model.images.size(), false);
+        for (const Material& material : model.materials) {
+            if (material.base_color_image >= 0) {
+                is_srgb[material.base_color_image] = true;
+            }
+        }
+
         // Where each of this model's images landed in the shared heap.
         std::vector<UINT> descriptors;
         descriptors.reserve(model.images.size());
-        for (const Image& image : model.images) {
-            textures_.push_back(UploadTexture(image, next_descriptor, staging));
+        for (size_t image_index = 0; image_index < model.images.size(); ++image_index) {
+            const DXGI_FORMAT format = is_srgb[image_index] ? kSrgbTextureFormat : kTextureFormat;
+            textures_.push_back(
+                UploadTexture(model.images[image_index], next_descriptor, format, staging));
             descriptors.push_back(next_descriptor++);
         }
 
@@ -871,15 +1056,37 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
             // the only thing colouring the draw. That is how every box in the
             // yard gets its colour.
             draw.base_color = {1.0f, 1.0f, 1.0f};
+            // Defaults for a primitive with no material at all -- the unit cube.
+            // Fully rough and non-metal is a plain matte surface, which is what the
+            // yard's flat-coloured boxes want.
+            draw.metallic = 0.0f;
+            draw.roughness = 1.0f;
             UINT descriptor = kWhiteTexture;
+            UINT normal_descriptor = kFlatNormalTexture;
+            UINT mr_descriptor = kWhiteTexture;
+            UINT occlusion_descriptor = kWhiteTexture;
             if (primitive.material >= 0) {
                 const Material& material = model.materials[primitive.material];
                 draw.base_color = material.base_color;
+                draw.metallic = material.metallic;
+                draw.roughness = material.roughness;
                 if (material.base_color_image >= 0) {
                     descriptor = descriptors[material.base_color_image];
                 }
+                if (material.normal_image >= 0) {
+                    normal_descriptor = descriptors[material.normal_image];
+                }
+                if (material.metallic_roughness_image >= 0) {
+                    mr_descriptor = descriptors[material.metallic_roughness_image];
+                }
+                if (material.occlusion_image >= 0) {
+                    occlusion_descriptor = descriptors[material.occlusion_image];
+                }
             }
             draw.base_color_texture = TextureHandle(descriptor);
+            draw.normal_texture = TextureHandle(normal_descriptor);
+            draw.metallic_roughness_texture = TextureHandle(mr_descriptor);
+            draw.occlusion_texture = TextureHandle(occlusion_descriptor);
 
             gpu.primitives.push_back(draw);
         }
@@ -905,12 +1112,165 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
         static_cast<INT>(shadow_descriptor_), texture_size_);
     device_->CreateShaderResourceView(shadow_map_.Get(), &shadow_srv, shadow_handle);
 
+    // The reflection probe's cube SRV takes the descriptor after the shadow map.
+    // The cube itself is created and filled in CaptureReflectionProbe; only the
+    // slot is reserved here so the scene root signature can point at it.
+    probe_descriptor_ = shadow_descriptor_ + 1;
+
     ThrowIfFailed(command_list_->Close(), "CommandList::Close");
     ID3D12CommandList* lists[] = {command_list_.Get()};
     queue_->ExecuteCommandLists(_countof(lists), lists);
 
     // The staging buffers are released when this function returns, so the copies
     // have to have landed before it does.
+    FlushGpu();
+}
+
+void Renderer::CaptureReflectionProbe(const Scene& scene) {
+    // The cube: six square faces, one mip, typeless so it renders as _UNORM (the
+    // capture writes display-space colour, as the scene pass does to the back
+    // buffer) and samples as sRGB (decoded to linear light). A render-target
+    // resource must declare its clear value up front.
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = kProbeRtvFormat;
+    clear.Color[0] = kSkyColor[0];
+    clear.Color[1] = kSkyColor[1];
+    clear.Color[2] = kSkyColor[2];
+    clear.Color[3] = 1.0f;
+
+    const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+    const CD3DX12_RESOURCE_DESC cube_desc =
+        CD3DX12_RESOURCE_DESC::Tex2D(kProbeResourceFormat, kProbeSize, kProbeSize, 6, 1, 1, 0,
+                                     D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &cube_desc,
+                                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear,
+                                                   IID_PPV_ARGS(&probe_cube_)),
+                  "CreateCommittedResource(probe cube)");
+
+    // One render-target view per face.
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc{};
+    rtv_heap_desc.NumDescriptors = 6;
+    rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    ThrowIfFailed(device_->CreateDescriptorHeap(&rtv_heap_desc, IID_PPV_ARGS(&probe_rtv_heap_)),
+                  "CreateDescriptorHeap(probe RTV)");
+    for (UINT face = 0; face < 6; ++face) {
+        D3D12_RENDER_TARGET_VIEW_DESC rtv{};
+        rtv.Format = kProbeRtvFormat;
+        rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+        rtv.Texture2DArray.FirstArraySlice = face;
+        rtv.Texture2DArray.ArraySize = 1;
+        rtv.Texture2DArray.MipSlice = 0;
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(
+            probe_rtv_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(face),
+            rtv_size_);
+        device_->CreateRenderTargetView(probe_cube_.Get(), &rtv, handle);
+    }
+
+    // The square depth buffer the capture tests against, in DSV slot 2.
+    D3D12_CLEAR_VALUE depth_clear{};
+    depth_clear.Format = kDepthFormat;
+    depth_clear.DepthStencil.Depth = 1.0f;
+    const CD3DX12_RESOURCE_DESC depth_desc = CD3DX12_RESOURCE_DESC::Tex2D(
+        kDepthFormat, kProbeSize, kProbeSize, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &depth_desc,
+                                                   D3D12_RESOURCE_STATE_DEPTH_WRITE, &depth_clear,
+                                                   IID_PPV_ARGS(&probe_depth_)),
+                  "CreateCommittedResource(probe depth)");
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
+    dsv.Format = kDepthFormat;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE probe_dsv(dsv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                  static_cast<INT>(kProbeDsvIndex), dsv_size_);
+    device_->CreateDepthStencilView(probe_depth_.Get(), &dsv, probe_dsv);
+
+    // The cube's SRV, in the slot CreateSceneGeometry reserved for it.
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = kProbeSrvFormat;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.TextureCube.MipLevels = 1;
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE srv_handle(texture_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                   static_cast<INT>(probe_descriptor_), texture_size_);
+    device_->CreateShaderResourceView(probe_cube_.Get(), &srv, srv_handle);
+
+    // The capture is lit from the eye at the probe centre; write that into frame
+    // constants region 0 and aim the scene pass's CBV at it. Nothing is in flight
+    // yet, so region 0 is free to borrow.
+    FrameConstants frame{};
+    frame.light_view_projection = light_view_projection_;
+    frame.camera_position = kProbePosition;
+    std::memcpy(frame_constants_mapped_, &frame, sizeof(frame));
+    frame_constants_address_ = frame_constants_->GetGPUVirtualAddress();
+
+    // The six face cameras: the standard cube directions and ups, a 90-degree
+    // frustum. Each is just another left-handed camera, so the same back-face cull
+    // the main view uses renders each face correctly.
+    struct Face {
+        XMVECTOR dir;
+        XMVECTOR up;
+    };
+    const Face faces[6] = {
+        {XMVectorSet(1, 0, 0, 0), XMVectorSet(0, 1, 0, 0)},   // +X
+        {XMVectorSet(-1, 0, 0, 0), XMVectorSet(0, 1, 0, 0)},  // -X
+        {XMVectorSet(0, 1, 0, 0), XMVectorSet(0, 0, -1, 0)},  // +Y
+        {XMVectorSet(0, -1, 0, 0), XMVectorSet(0, 0, 1, 0)},  // -Y
+        {XMVectorSet(0, 0, 1, 0), XMVectorSet(0, 1, 0, 0)},   // +Z
+        {XMVectorSet(0, 0, -1, 0), XMVectorSet(0, 1, 0, 0)},  // -Z
+    };
+    const XMVECTOR eye = XMLoadFloat3(&kProbePosition);
+    const XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV2, 1.0f, 0.05f, 100.0f);
+
+    XMFLOAT3 sun{};
+    XMStoreFloat3(&sun, XMVector3Normalize(XMLoadFloat3(&kSunDirection)));
+
+    // Record the capture on the one-shot command list CreateSceneGeometry left
+    // closed.
+    ThrowIfFailed(allocators_[frame_index_]->Reset(), "CommandAllocator::Reset");
+    ThrowIfFailed(command_list_->Reset(allocators_[frame_index_].Get(), nullptr),
+                  "CommandList::Reset");
+
+    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
+
+    const CD3DX12_VIEWPORT viewport(0.0f, 0.0f, static_cast<float>(kProbeSize),
+                                    static_cast<float>(kProbeSize));
+    const CD3DX12_RECT scissor(0, 0, static_cast<LONG>(kProbeSize), static_cast<LONG>(kProbeSize));
+    command_list_->RSSetViewports(1, &viewport);
+    command_list_->RSSetScissorRects(1, &scissor);
+
+    // Every face from its resting shader-resource state to a render target.
+    const CD3DX12_RESOURCE_BARRIER to_rt = CD3DX12_RESOURCE_BARRIER::Transition(
+        probe_cube_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    command_list_->ResourceBarrier(1, &to_rt);
+
+    for (UINT face = 0; face < 6; ++face) {
+        const XMMATRIX view_projection = XMMatrixLookToLH(eye, faces[face].dir, faces[face].up) * proj;
+
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(
+            probe_rtv_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(face),
+            rtv_size_);
+        command_list_->OMSetRenderTargets(1, &rtv, FALSE, &probe_dsv);
+        command_list_->ClearRenderTargetView(rtv, kSkyColor, 0, nullptr);
+        command_list_->ClearDepthStencilView(probe_dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+        // The gradient sky behind, then the static yard lit by the analytic sky.
+        DrawSky(view_projection, kProbePosition);
+        command_list_->SetGraphicsRootSignature(root_signature_.Get());
+        command_list_->SetPipelineState(scene_capture_pipeline_state_.Get());
+        command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        DrawInstances(scene.Instances(), view_projection, sun, 0.0f, false);
+    }
+
+    // And back to a shader resource for the scene pass to reflect off of.
+    const CD3DX12_RESOURCE_BARRIER to_srv = CD3DX12_RESOURCE_BARRIER::Transition(
+        probe_cube_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    command_list_->ResourceBarrier(1, &to_srv);
+
+    ThrowIfFailed(command_list_->Close(), "CommandList::Close");
+    ID3D12CommandList* lists[] = {command_list_.Get()};
+    queue_->ExecuteCommandLists(_countof(lists), lists);
     FlushGpu();
 }
 
@@ -928,7 +1288,7 @@ void Renderer::LoadFontAtlas(std::vector<ComPtr<ID3D12Resource>>& staging) {
     // turns to mush the moment it is minified. DecodeImage built the chain; drop
     // all but the full-resolution level before the upload.
     atlas.levels.resize(1);
-    atlas_texture_ = UploadTexture(atlas, atlas_descriptor_, staging);
+    atlas_texture_ = UploadTexture(atlas, atlas_descriptor_, kTextureFormat, staging);
 }
 
 void Renderer::CreateTextPipeline() {
@@ -1136,13 +1496,18 @@ void Renderer::DrawText(std::string_view text) {
 
 void Renderer::DrawInstances(std::span<const MeshInstance> instances,
                              const XMMATRIX& view_projection, XMFLOAT3 sun_direction,
-                             float shadow_receive) {
-    // The two per-frame bindings the scene signature adds for shadows: the sun's
-    // view-projection and the shadow map itself. Bound here, at the top of every
-    // batch, so they survive the root-signature switch the outline pass makes --
-    // setting a root signature clears every argument bound under the old one.
+                             float shadow_receive, bool bind_probe) {
+    // The per-pass bindings the scene signature adds beyond the per-draw tables:
+    // the frame constants (sun matrix + eye), the shadow map, and the reflection
+    // probe. Bound here, at the top of every batch, so they survive the
+    // root-signature switch the outline pass makes -- setting a root signature
+    // clears every argument bound under the old one. The probe is skipped for the
+    // capture pass, which is filling that cube and whose shader never reads it.
     command_list_->SetGraphicsRootConstantBufferView(2, frame_constants_address_);
     command_list_->SetGraphicsRootDescriptorTable(3, TextureHandle(shadow_descriptor_));
+    if (bind_probe) {
+        command_list_->SetGraphicsRootDescriptorTable(6, TextureHandle(probe_descriptor_));
+    }
 
     for (const MeshInstance& instance : instances) {
         const GpuModel& model = models_[instance.model];
@@ -1176,9 +1541,14 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
             constants.checker = instance.checker;
             constants.sun_direction = sun_direction;
             constants.shadow_receive = shadow_receive;
+            constants.metallic = primitive.metallic;
+            constants.roughness = primitive.roughness;
 
             command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
             command_list_->SetGraphicsRootDescriptorTable(1, primitive.base_color_texture);
+            command_list_->SetGraphicsRootDescriptorTable(4, primitive.normal_texture);
+            command_list_->SetGraphicsRootDescriptorTable(5, primitive.metallic_roughness_texture);
+            command_list_->SetGraphicsRootDescriptorTable(7, primitive.occlusion_texture);
             command_list_->DrawIndexedInstanced(primitive.index_count, 1, primitive.first_index, 0,
                                                 0);
         }
@@ -1300,10 +1670,23 @@ void Renderer::DrawOutlines(std::span<const MeshInstance> instances,
 void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                       std::span<const MeshInstance> held_props, const XMMATRIX& view_projection,
-                      std::string_view hud_prompt) {
+                      XMFLOAT3 camera_position, std::string_view hud_prompt) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
+
+    // Refresh this frame's slice of the frame constants -- the eye moved -- and
+    // point the scene pass's CBV at it. Its own region, so the write cannot race
+    // the GPU still reading the previous frame's.
+    std::byte* frame_region =
+        frame_constants_mapped_ + static_cast<size_t>(frame_index_) * frame_constants_stride_;
+    FrameConstants frame{};
+    frame.light_view_projection = light_view_projection_;
+    frame.camera_position = camera_position;
+    std::memcpy(frame_region, &frame, sizeof(frame));
+    frame_constants_address_ =
+        frame_constants_->GetGPUVirtualAddress() +
+        static_cast<UINT64>(frame_index_) * frame_constants_stride_;
 
     // The only heap the game binds, and it must be bound before any root
     // descriptor table that points into it.
@@ -1336,13 +1719,20 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     command_list_->ClearRenderTargetView(rtv, kSkyColor, 0, nullptr);
     command_list_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
+    // The gradient sky, filling the frame behind the yard. Depth is off, so the
+    // geometry that follows paints over it. DrawSky binds its own pipeline and root
+    // signature, so the scene's are restored before the first instance is drawn.
+    DrawSky(view_projection, camera_position);
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    command_list_->SetPipelineState(pipeline_state_.Get());
+
     XMFLOAT3 sun{};
     XMStoreFloat3(&sun, XMVector3Normalize(XMLoadFloat3(&kSunDirection)));
     // The world and the resting props receive the sun's shadow.
-    DrawInstances(scene.Instances(), view_projection, sun, 1.0f);
+    DrawInstances(scene.Instances(), view_projection, sun, 1.0f, true);
     // The resting props take the yard's sun too: they are part of the world, and
     // only pass into the near pass once the player lifts them.
-    DrawInstances(props, view_projection, sun, 1.0f);
+    DrawInstances(props, view_projection, sun, 1.0f, true);
 
     // Paint the glowing halo around the object the player is aiming at. It runs
     // with depth off, so it washes across the object as well as the ground around
@@ -1357,7 +1747,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
         // follow, which are all DrawInstances and assume the scene's are in force.
         command_list_->SetPipelineState(pipeline_state_.Get());
         command_list_->SetGraphicsRootSignature(root_signature_.Get());
-        DrawInstances(highlight, view_projection, sun, 1.0f);
+        DrawInstances(highlight, view_projection, sun, 1.0f, true);
     }
 
     // The arms live about half a metre from the eye, close enough that any wall
@@ -1368,11 +1758,11 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // The arms and anything carried do not receive the sun's shadow: they are lit
     // by a sun bolted to the camera, which the shadow map, built from the world's
     // fixed sun, says nothing about. Hence 0 -- their sun term stays unshadowed.
-    DrawInstances(viewmodel.instances, view_projection, viewmodel.sun_direction, 0.0f);
+    DrawInstances(viewmodel.instances, view_projection, viewmodel.sun_direction, 0.0f, true);
     // A carried object rides in the same pass as the arms, under the same key
     // light bolted to the eye, so it is lit like something in the hand and never
     // clipped by the wall the player is facing.
-    DrawInstances(held_props, view_projection, viewmodel.sun_direction, 0.0f);
+    DrawInstances(held_props, view_projection, viewmodel.sun_direction, 0.0f, true);
 
     // The HUD goes on last, blended over the finished frame with depth off.
     DrawText(hud_prompt);
