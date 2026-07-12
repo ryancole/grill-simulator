@@ -36,8 +36,8 @@ struct SkinVertex {
 };
 
 // glTF materials describe a metallic-roughness BRDF, and this renderer now runs
-// one: base colour, normal map, and the metallic-roughness pair (factors and
-// their shared texture). Emissive and occlusion are still read past and dropped.
+// one: base colour, normal map, the metallic-roughness pair (factors and their
+// shared texture), and the ambient-occlusion map. Only emissive is still dropped.
 struct Material {
     DirectX::XMFLOAT3 base_color{1.0f, 1.0f, 1.0f};
     // Multiplies the metallic-roughness texture, or stands alone when there is
@@ -54,6 +54,9 @@ struct Material {
     // roughness in G and metallic in B), or -1 -- then a 1x1 white stands in and
     // the factors above act alone.
     int metallic_roughness_image = -1;
+    // Index into Model::images for the ambient-occlusion map (glTF stores it in
+    // the R channel), or -1 -- then a 1x1 white stands in and nothing is occluded.
+    int occlusion_image = -1;
 };
 
 // One draw. `transform` places the primitive's vertices into model space, having

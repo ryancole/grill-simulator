@@ -198,6 +198,17 @@ void LoadMaterials(const fastgltf::Asset& asset, Model& model) {
             material.metallic_roughness_image = static_cast<int>(*texture.imageIndex);
         }
 
+        if (source.occlusionTexture) {
+            const fastgltf::Texture& texture =
+                asset.textures[source.occlusionTexture->textureIndex];
+            if (!texture.imageIndex) {
+                throw std::runtime_error("glTF occlusion texture names no image");
+            }
+            material.occlusion_image = static_cast<int>(*texture.imageIndex);
+            // occlusionTexture.strength would scale the effect; no asset the game
+            // loads sets it below 1, so it is left out like normalTexture.scale.
+        }
+
         model.materials.push_back(material);
     }
 }

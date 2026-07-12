@@ -54,6 +54,7 @@ private:
         D3D12_GPU_DESCRIPTOR_HANDLE base_color_texture;
         D3D12_GPU_DESCRIPTOR_HANDLE normal_texture;
         D3D12_GPU_DESCRIPTOR_HANDLE metallic_roughness_texture;
+        D3D12_GPU_DESCRIPTOR_HANDLE occlusion_texture;
     };
 
     // A Model, uploaded. The CPU-side Model that produced it is not needed again.

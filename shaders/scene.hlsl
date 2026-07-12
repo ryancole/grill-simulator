@@ -65,6 +65,10 @@ Texture2D<float4> g_metallic_roughness : register(t3);
 // PSMain; PSMainCapture, which fills this very cube, must not read it, so the
 // sample is behind a compile-time flag that folds away for the capture variant.
 TextureCube<float4> g_reflection_probe : register(t4);
+// The ambient-occlusion map: glTF stores how exposed each texel is to ambient
+// light in the R channel. A material with none samples a 1x1 white, so nothing is
+// occluded. It is linear data, not colour, so it is sampled without sRGB decode.
+Texture2D<float4> g_occlusion : register(t5);
 SamplerState g_sampler : register(s0);
 // Hardware PCF. SampleCmp compares the receiver's depth against the stored one
 // and bilinearly filters the 0/1 results, so a single tap already softens across
@@ -324,7 +328,12 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     const float3 ambient_specular =
         SpecularEnvironment(reflection, roughness, use_probe) * (f0 * env_brdf.x + env_brdf.y);
 
-    const float3 ambient = ambient_diffuse + ambient_specular;
+    // Ambient occlusion darkens only the indirect light -- the sky's diffuse and
+    // its reflection -- in the crevices and contact points the map records. The
+    // direct sun is untouched, since a surface in a crevice is still lit if the sun
+    // reaches it. A material with no map reads 1 and nothing changes.
+    const float ao = g_occlusion.Sample(g_sampler, input.uv).r;
+    const float3 ambient = (ambient_diffuse + ambient_specular) * ao;
 
     // A dim fill from behind the sun, diffuse only, so faces turned away read brown
     // rather than as holes.

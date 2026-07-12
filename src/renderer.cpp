@@ -58,9 +58,11 @@ static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
 // Beyond the root constants the scene signature holds the base-colour table (1),
 // the frame constant buffer (2), the shadow-map table (1), the normal-map table
-// (1), the metallic-roughness table (1) and the reflection-probe table (1) --
-// seven DWORDs.
-static_assert(kConstantDwords + 7 <= 64, "A root signature holds at most 64 DWORDs in total");
+// (1), the metallic-roughness table (1), the reflection-probe table (1) and the
+// occlusion table (1) -- eight DWORDs, which puts the signature exactly at the
+// 64-DWORD ceiling. Another per-draw texture would need the tables merged into one
+// contiguous range first.
+static_assert(kConstantDwords + 8 <= 64, "A root signature holds at most 64 DWORDs in total");
 
 // The shadow map is square and this many texels on a side. Matches kShadowMapSize
 // in scene.hlsl, which sizes one texel for the PCF taps. 2048 gives the fenced
@@ -463,8 +465,10 @@ void Renderer::CreatePipeline() {
     // t4: the reflection probe cubemap, bound once per pass rather than per draw --
     // one probe serves the whole yard.
     const CD3DX12_DESCRIPTOR_RANGE probe_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);
+    // t5: the ambient-occlusion map, per draw like the other material textures.
+    const CD3DX12_DESCRIPTOR_RANGE occlusion_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5);
 
-    CD3DX12_ROOT_PARAMETER parameters[7];
+    CD3DX12_ROOT_PARAMETER parameters[8];
     parameters[0].InitAsConstants(kConstantDwords, 0);
     parameters[1].InitAsDescriptorTable(1, &base_color_range, D3D12_SHADER_VISIBILITY_PIXEL);
     // b1: the frame constant buffer holding the sun's view-projection and the eye.
@@ -473,6 +477,7 @@ void Renderer::CreatePipeline() {
     parameters[4].InitAsDescriptorTable(1, &normal_range, D3D12_SHADER_VISIBILITY_PIXEL);
     parameters[5].InitAsDescriptorTable(1, &mr_range, D3D12_SHADER_VISIBILITY_PIXEL);
     parameters[6].InitAsDescriptorTable(1, &probe_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[7].InitAsDescriptorTable(1, &occlusion_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     // s0: anisotropic because the ground and the patio are seen almost edge on,
@@ -1059,6 +1064,7 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
             UINT descriptor = kWhiteTexture;
             UINT normal_descriptor = kFlatNormalTexture;
             UINT mr_descriptor = kWhiteTexture;
+            UINT occlusion_descriptor = kWhiteTexture;
             if (primitive.material >= 0) {
                 const Material& material = model.materials[primitive.material];
                 draw.base_color = material.base_color;
@@ -1073,10 +1079,14 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
                 if (material.metallic_roughness_image >= 0) {
                     mr_descriptor = descriptors[material.metallic_roughness_image];
                 }
+                if (material.occlusion_image >= 0) {
+                    occlusion_descriptor = descriptors[material.occlusion_image];
+                }
             }
             draw.base_color_texture = TextureHandle(descriptor);
             draw.normal_texture = TextureHandle(normal_descriptor);
             draw.metallic_roughness_texture = TextureHandle(mr_descriptor);
+            draw.occlusion_texture = TextureHandle(occlusion_descriptor);
 
             gpu.primitives.push_back(draw);
         }
@@ -1538,6 +1548,7 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
             command_list_->SetGraphicsRootDescriptorTable(1, primitive.base_color_texture);
             command_list_->SetGraphicsRootDescriptorTable(4, primitive.normal_texture);
             command_list_->SetGraphicsRootDescriptorTable(5, primitive.metallic_roughness_texture);
+            command_list_->SetGraphicsRootDescriptorTable(7, primitive.occlusion_texture);
             command_list_->DrawIndexedInstanced(primitive.index_count, 1, primitive.first_index, 0,
                                                 0);
         }
