@@ -25,7 +25,9 @@ constexpr XMFLOAT3 kFenceWood{0.45f, 0.32f, 0.21f};
 
 Scene::Scene() {
     cube_ = AddModel(MakeUnitCubeModel());
-    const std::uint32_t grill = LoadModel("grill.glb");
+    // A downloaded kettle grill, scaled to real size and exported with its base at
+    // the origin, so a plain translation drops it on the ground -- no runtime scale.
+    const std::uint32_t grill = LoadModel("grill-basic.glb");
     const std::uint32_t tree = LoadModel("tree.glb");
     const std::uint32_t table = LoadModel("table.glb");
     const std::uint32_t crate = LoadModel("crate.glb");

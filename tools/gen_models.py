@@ -149,18 +149,6 @@ def shaded_texture(width: int, height: int, base: tuple[float, float, float], sh
     return write_png(width, height, bytes(pixels))
 
 
-def brushed_charcoal() -> bytes:
-    """The grill's body: dark, faintly streaked along X so it wraps the barrel."""
-
-    def shade(x: int, y: int) -> float:
-        # One brightness per row is what makes the grain read as brushed metal
-        # rather than as sandpaper. The per-pixel term only breaks up the bands.
-        row = 0.86 + 0.28 * noise(y * 7919)
-        return row * (0.94 + 0.12 * noise(y * 131071 + x * 31))
-
-    return shaded_texture(128, 64, (0.13, 0.13, 0.14), shade)
-
-
 def bark() -> bytes:
     """The tree's trunk: fissures running the length of it.
 
@@ -507,44 +495,6 @@ def assemble(builder: GlbBuilder, nodes: list[dict], meshes: list[dict], materia
 # --- The models ---------------------------------------------------------------
 
 
-def build_grill() -> bytes:
-    """The kettle grill: four legs, a body, a lid and a side shelf.
-
-    Every part is its own node, which is what gives the loader one bounding box
-    per part rather than one around the whole grill.
-    """
-    builder = GlbBuilder()
-    charcoal_image = builder.image_view(brushed_charcoal())
-
-    # The body is the only textured part. The rest carry a flat base colour, so
-    # the loader has to handle a material with no texture at all -- which is the
-    # case that a 1x1 white default texture exists to serve.
-    materials = [
-        material("body", texture=0),
-        material("lid", color=(0.62, 0.11, 0.09), roughness=0.4),
-        material("leg", color=(0.13, 0.13, 0.14), roughness=0.9),
-        material("shelf", color=(0.62, 0.64, 0.67), metallic=1.0, roughness=0.35),
-    ]
-    BODY, LID, LEG, SHELF = range(4)
-
-    meshes = [
-        builder.box_mesh("body", (1.6, 0.7, 0.9), BODY),
-        builder.box_mesh("lid", (1.7, 0.24, 1.0), LID),
-        builder.box_mesh("leg", (0.08, 0.25, 0.08), LEG),
-        builder.box_mesh("shelf", (0.7, 0.05, 0.7), SHELF),
-    ]
-
-    # The grill's own origin sits on the ground between its legs, so the scene
-    # places it with a plain translation.
-    parts = [("body", 0, (0.0, 0.6, 0.0)), ("lid", 1, (0.0, 1.05, 0.0)),
-             ("shelf", 3, (1.15, 0.75, 0.0))]
-    for x in (-0.65, 0.65):
-        for z in (-0.35, 0.35):
-            parts.append((f"leg_{'e' if x > 0 else 'w'}{'n' if z > 0 else 's'}", 2, (x, 0.125, z)))
-
-    return assemble(builder, part_nodes("Grill", parts), meshes, materials, [charcoal_image])
-
-
 def build_tree() -> bytes:
     """One tree: a trunk and a canopy above head height.
 
@@ -717,7 +667,7 @@ def build_steak() -> bytes:
 
 def main() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
-    models = (("grill.glb", build_grill()), ("tree.glb", build_tree()),
+    models = (("tree.glb", build_tree()),
               ("table.glb", build_table()), ("crate.glb", build_crate()),
               ("cooler.glb", build_cooler()), ("tongs.glb", build_tongs()),
               ("patty.glb", build_patty()), ("steak.glb", build_steak()))
