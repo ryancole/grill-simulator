@@ -254,44 +254,6 @@ def planks(bands: int = 4) -> bytes:
     return shaded_texture(64, height, (0.60, 0.44, 0.28), shade)
 
 
-def bump_normal_map(size: int = 128, cells: int = 6, strength: float = 0.8) -> bytes:
-    """A tangent-space normal map: an egg-carton of round bumps.
-
-    This is the one texture here that is *not* a colour. Each texel encodes a
-    surface normal, xyz packed into rgb as n*0.5+0.5, with the flat direction
-    (0,0,1) landing on (128,128,255). Its whole job is to be unmistakable -- a
-    regular grid of raised lobes whose highlights and shadows swing as the sun and
-    the camera move, which is exactly what proves normal mapping is live.
-
-    Height is cos(U)+cos(V) bumps; the normal is the analytic gradient of that,
-    leaned over by `strength` and renormalised. Green encodes +V, the glTF/OpenGL
-    convention the loader's generated tangents are built to match.
-    """
-    two_pi = 2.0 * math.pi
-    pixels = bytearray()
-    for y in range(size):
-        for x in range(size):
-            ax = two_pi * cells * (x + 0.5) / size
-            ay = two_pi * cells * (y + 0.5) / size
-            # For a height field h, the normal is (-dh/du, -dh/dv, 1). With
-            # h = cos(ax) + cos(ay) the slopes are -sin, so the normal leans by
-            # +sin toward each bump's rim.
-            nx = strength * math.sin(ax)
-            ny = strength * math.sin(ay)
-            nz = 1.0
-            inv = 1.0 / math.sqrt(nx * nx + ny * ny + nz * nz)
-            nx, ny, nz = nx * inv, ny * inv, nz * inv
-            pixels += bytes(
-                (
-                    round((nx * 0.5 + 0.5) * 255),
-                    round((ny * 0.5 + 0.5) * 255),
-                    round((nz * 0.5 + 0.5) * 255),
-                    255,
-                )
-            )
-    return write_png(size, size, bytes(pixels))
-
-
 # --- Geometry -----------------------------------------------------------------
 
 # The six face normals of a box, in glTF space.
@@ -481,8 +443,7 @@ class GlbBuilder:
 
 
 def material(name: str, texture: int | None = None, color=(1.0, 1.0, 1.0),
-             metallic: float = 0.0, roughness: float = 0.85,
-             normal: int | None = None) -> dict:
+             metallic: float = 0.0, roughness: float = 0.85) -> dict:
     pbr: dict = {
         "baseColorFactor": [*color, 1.0],
         "metallicFactor": metallic,
@@ -490,10 +451,7 @@ def material(name: str, texture: int | None = None, color=(1.0, 1.0, 1.0),
     }
     if texture is not None:
         pbr["baseColorTexture"] = {"index": texture}
-    mat = {"name": name, "pbrMetallicRoughness": pbr, "doubleSided": False}
-    if normal is not None:
-        mat["normalTexture"] = {"index": normal}
-    return mat
+    return {"name": name, "pbrMetallicRoughness": pbr, "doubleSided": False}
 
 
 def sampler() -> dict:
@@ -757,34 +715,12 @@ def build_steak() -> bytes:
                     meshes, materials, [])
 
 
-def build_normaltest() -> bytes:
-    """A standing panel wearing nothing but a bump normal map.
-
-    Not part of the yard's fiction -- it is a test rig for normal mapping. A flat
-    mid-grey base colour with no texture, so the only thing breaking the surface
-    up is the map, and a tall square face turned toward the yard so the sun rakes
-    across the bumps. The box ships without a TANGENT attribute, so loading it also
-    exercises the loader's tangent generation. scene.cpp places it near the spawn;
-    delete that instance and this model once normal mapping is trusted.
-    """
-    builder = GlbBuilder()
-    normal_image = builder.image_view(bump_normal_map())
-
-    materials = [material("panel", color=(0.62, 0.62, 0.64), roughness=0.6, normal=0)]
-
-    # One texture repeat across the 1.6 m face, so six bumps span the panel.
-    meshes = [builder.box_mesh("panel", (1.6, 1.6, 0.1), 0, tile=1.6)]
-    parts = [("panel", 0, (0.0, 0.8, 0.0))]
-    return assemble(builder, part_nodes("NormalTest", parts), meshes, materials, [normal_image])
-
-
 def main() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
     models = (("grill.glb", build_grill()), ("tree.glb", build_tree()),
               ("table.glb", build_table()), ("crate.glb", build_crate()),
               ("cooler.glb", build_cooler()), ("tongs.glb", build_tongs()),
-              ("patty.glb", build_patty()), ("steak.glb", build_steak()),
-              ("normaltest.glb", build_normaltest()))
+              ("patty.glb", build_patty()), ("steak.glb", build_steak()))
     for name, data in models:
         path = ASSETS / name
         path.write_bytes(data)

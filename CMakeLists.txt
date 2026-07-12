@@ -84,8 +84,7 @@ add_hlsl_shader(grill SOURCE shaders/outline.hlsl ENTRY PSMain PROFILE ps_6_6 OU
 add_hlsl_shader(grill SOURCE shaders/shadow.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT shadow.vs.cso)
 
 stage_assets(grill DIRECTORY assets/models
-  FILES grill.glb tree.glb table.glb crate.glb cooler.glb tongs.glb patty.glb steak.glb
-        normaltest.glb)
+  FILES grill.glb tree.glb table.glb crate.glb cooler.glb tongs.glb patty.glb steak.glb)
 
 stage_assets(grill DIRECTORY assets/audio
   FILES sizzle.wav)
