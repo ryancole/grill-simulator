@@ -152,9 +152,10 @@ private:
 
     // Fills a default-heap buffer through a staging copy. The staging resource is
     // appended to `staging`, which the caller must keep alive until the GPU has
-    // retired the copy.
+    // retired the copy. `access_after` is the buffer access the copy is followed by
+    // -- vertex or index -- for the barrier that hands the buffer to the draw.
     ComPtr<ID3D12Resource> UploadBuffer(const void* data, UINT64 bytes,
-                                        D3D12_RESOURCE_STATES final_state,
+                                        D3D12_BARRIER_ACCESS access_after,
                                         std::vector<ComPtr<ID3D12Resource>>& staging);
     // Uploads a mip chain and writes its shader resource view into slot
     // `descriptor` of the texture heap. `format` is sRGB for base-colour images
@@ -205,7 +206,11 @@ private:
     void MoveToNextFrame();
 
     ComPtr<IDXGIFactory6> factory_;
-    ComPtr<ID3D12Device> device_;
+    // Device10 and CommandList7 are the enhanced-barrier era: the device for
+    // CreateCommittedResource3 (resources born with an explicit barrier layout), the
+    // command list for Barrier(). Both inherit the older interfaces, so nothing else
+    // that uses them has to change.
+    ComPtr<ID3D12Device10> device_;
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<IDXGISwapChain3> swap_chain_;
 
@@ -229,7 +234,7 @@ private:
     UINT engine_heap_size_ = 0;
 
     ComPtr<ID3D12CommandAllocator> allocators_[kFrameCount];
-    ComPtr<ID3D12GraphicsCommandList> command_list_;
+    ComPtr<ID3D12GraphicsCommandList7> command_list_;
 
     ComPtr<ID3D12RootSignature> root_signature_;
     ComPtr<ID3D12PipelineState> pipeline_state_;

@@ -258,6 +258,49 @@ ComPtr<IDXGIAdapter1> SelectAdapter(IDXGIFactory6& factory) {
     throw std::runtime_error("No Direct3D 12 feature level 12.0 hardware adapter found");
 }
 
+// The whole-resource subresource range: the sentinel first-mip 0xffffffff selects
+// every mip, slice and plane at once, which is what every transition here wants.
+constexpr D3D12_BARRIER_SUBRESOURCE_RANGE kAllSubresources{0xffffffff, 0, 0, 0, 0, 0};
+
+// One texture transition as an enhanced barrier: the sync scopes that must drain
+// and start, the accesses the resource is leaving and entering, and the layout it
+// is changing between. Enhanced barriers spell out all three where a legacy
+// transition rolled sync, access and layout into a single before/after state.
+void TextureBarrier(ID3D12GraphicsCommandList7* command_list, ID3D12Resource* resource,
+                    D3D12_BARRIER_SYNC sync_before, D3D12_BARRIER_ACCESS access_before,
+                    D3D12_BARRIER_LAYOUT layout_before, D3D12_BARRIER_SYNC sync_after,
+                    D3D12_BARRIER_ACCESS access_after, D3D12_BARRIER_LAYOUT layout_after) {
+    D3D12_TEXTURE_BARRIER barrier{};
+    barrier.SyncBefore = sync_before;
+    barrier.SyncAfter = sync_after;
+    barrier.AccessBefore = access_before;
+    barrier.AccessAfter = access_after;
+    barrier.LayoutBefore = layout_before;
+    barrier.LayoutAfter = layout_after;
+    barrier.pResource = resource;
+    barrier.Subresources = kAllSubresources;
+    barrier.Flags = D3D12_TEXTURE_BARRIER_FLAG_NONE;
+    const D3D12_BARRIER_GROUP group = CD3DX12_BARRIER_GROUP(1, &barrier);
+    command_list->Barrier(1, &group);
+}
+
+// One buffer transition. Buffers carry no layout -- only sync and access -- so a
+// buffer barrier is the same idea without the layout fields.
+void BufferBarrier(ID3D12GraphicsCommandList7* command_list, ID3D12Resource* resource,
+                   D3D12_BARRIER_SYNC sync_before, D3D12_BARRIER_ACCESS access_before,
+                   D3D12_BARRIER_SYNC sync_after, D3D12_BARRIER_ACCESS access_after) {
+    D3D12_BUFFER_BARRIER barrier{};
+    barrier.SyncBefore = sync_before;
+    barrier.SyncAfter = sync_after;
+    barrier.AccessBefore = access_before;
+    barrier.AccessAfter = access_after;
+    barrier.pResource = resource;
+    barrier.Offset = 0;
+    barrier.Size = UINT64_MAX; // The whole buffer.
+    const D3D12_BARRIER_GROUP group = CD3DX12_BARRIER_GROUP(1, &barrier);
+    command_list->Barrier(1, &group);
+}
+
 } // namespace
 
 void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
@@ -345,6 +388,18 @@ void Renderer::CreateDevice() {
             info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
             info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
         }
+    }
+
+    // Every transition in this renderer is an enhanced barrier, and every managed
+    // texture is born with an explicit barrier layout. Both need a recent runtime
+    // and driver; on the FL 12.0 hardware this targets they are effectively always
+    // present, but fail loudly rather than silently mis-synchronise where they are
+    // not.
+    D3D12_FEATURE_DATA_D3D12_OPTIONS12 options12{};
+    if (FAILED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &options12,
+                                            sizeof(options12))) ||
+        !options12.EnhancedBarriersSupported) {
+        throw std::runtime_error("This GPU or driver does not support D3D12 enhanced barriers");
     }
 
     BOOL tearing = FALSE;
@@ -448,12 +503,15 @@ void Renderer::CreateDepthBuffer() {
     clear.DepthStencil.Depth = 1.0f;
 
     const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
-    const CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex2D(
+    const CD3DX12_RESOURCE_DESC1 desc = CD3DX12_RESOURCE_DESC1::Tex2D(
         kDepthFormat, width_, height_, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                   D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear,
-                                                   IID_PPV_ARGS(&depth_stencil_)),
-                  "CreateCommittedResource(depth buffer)");
+    // Born a depth target and never anything else -- it is written every frame and
+    // never sampled -- so it stays in this layout for life and takes no barrier.
+    ThrowIfFailed(device_->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, &clear,
+                                                    nullptr, 0, nullptr,
+                                                    IID_PPV_ARGS(&depth_stencil_)),
+                  "CreateCommittedResource3(depth buffer)");
 
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
     dsv.Format = kDepthFormat;
@@ -487,15 +545,16 @@ void Renderer::CreateHdrTarget() {
     std::memcpy(clear.Color, kHdrClearColor, sizeof(clear.Color));
 
     const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
-    const CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex2D(
+    const CD3DX12_RESOURCE_DESC1 desc = CD3DX12_RESOURCE_DESC1::Tex2D(
         kHdrFormat, width_, height_, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
-    // Created in the shader-resource state it rests in between frames: Render's
-    // first act is to flip it to a render target, and its last to flip it back, so
-    // the resting state is the one the tonemap pass reads it in.
-    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear,
-                                                   IID_PPV_ARGS(&hdr_target_)),
-                  "CreateCommittedResource(HDR target)");
+    // Born in the shader-resource layout it rests in between frames: Render's first
+    // act is to flip it to a render target, and its last to flip it back, so the
+    // resting layout is the one the tonemap pass reads it in.
+    ThrowIfFailed(device_->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                    D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, &clear,
+                                                    nullptr, 0, nullptr,
+                                                    IID_PPV_ARGS(&hdr_target_)),
+                  "CreateCommittedResource3(HDR target)");
 
     // Its render-target view, in rtv_heap_ just past the swapchain buffers.
     const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
@@ -523,16 +582,17 @@ void Renderer::CreateShadowMap() {
     clear.DepthStencil.Depth = 1.0f;
 
     const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
-    const CD3DX12_RESOURCE_DESC desc =
-        CD3DX12_RESOURCE_DESC::Tex2D(kShadowResourceFormat, kShadowMapSize, kShadowMapSize, 1, 1, 1,
-                                     0, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-    // Created as a shader resource: the render loop's first act each frame is to
-    // transition it to DEPTH_WRITE, so its resting state between frames is the one
-    // the scene pass leaves it in.
-    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear,
-                                                   IID_PPV_ARGS(&shadow_map_)),
-                  "CreateCommittedResource(shadow map)");
+    const CD3DX12_RESOURCE_DESC1 desc =
+        CD3DX12_RESOURCE_DESC1::Tex2D(kShadowResourceFormat, kShadowMapSize, kShadowMapSize, 1, 1, 1,
+                                      0, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    // Born a shader resource: the render loop's first act each frame is to
+    // transition it to a depth target, so its resting layout between frames is the
+    // one the scene pass leaves it in.
+    ThrowIfFailed(device_->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                    D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, &clear,
+                                                    nullptr, 0, nullptr,
+                                                    IID_PPV_ARGS(&shadow_map_)),
+                  "CreateCommittedResource3(shadow map)");
 
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
     dsv.Format = kShadowDepthFormat;
@@ -1052,28 +1112,30 @@ void Renderer::CreateShadowPipeline() {
 }
 
 ComPtr<ID3D12Resource> Renderer::UploadBuffer(const void* data, UINT64 bytes,
-                                              D3D12_RESOURCE_STATES final_state,
+                                              D3D12_BARRIER_ACCESS access_after,
                                               std::vector<ComPtr<ID3D12Resource>>& staging) {
-    auto create = [this](UINT64 size, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state,
-                         const char* what) {
-        const CD3DX12_HEAP_PROPERTIES heap(type);
-        const CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(size);
-        ComPtr<ID3D12Resource> resource;
-        ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
-                                                       nullptr, IID_PPV_ARGS(&resource)),
-                      what);
-        return resource;
-    };
-
     // The mesh never changes, so it lives in the default heap -- video memory --
     // and is filled once through a staging copy. An upload-heap buffer would sit
-    // in system memory and be re-read across PCIe on every draw.
-    ComPtr<ID3D12Resource> buffer = create(bytes, D3D12_HEAP_TYPE_DEFAULT,
-                                           D3D12_RESOURCE_STATE_COPY_DEST,
-                                           "CreateCommittedResource(buffer)");
-    ComPtr<ID3D12Resource> upload = create(bytes, D3D12_HEAP_TYPE_UPLOAD,
-                                           D3D12_RESOURCE_STATE_GENERIC_READ,
-                                           "CreateCommittedResource(buffer staging)");
+    // in system memory and be re-read across PCIe on every draw. Buffers carry no
+    // layout, so it is born UNDEFINED; the copy below is its first access and needs
+    // no barrier to reach it.
+    const CD3DX12_HEAP_PROPERTIES default_heap(D3D12_HEAP_TYPE_DEFAULT);
+    const CD3DX12_RESOURCE_DESC1 desc = CD3DX12_RESOURCE_DESC1::Buffer(bytes);
+    ComPtr<ID3D12Resource> buffer;
+    ThrowIfFailed(device_->CreateCommittedResource3(&default_heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                    D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr,
+                                                    0, nullptr, IID_PPV_ARGS(&buffer)),
+                  "CreateCommittedResource3(buffer)");
+
+    // The staging buffer sits in the upload heap, permanently CPU-readable, so it
+    // is created the legacy way and never needs a barrier of its own.
+    const CD3DX12_HEAP_PROPERTIES upload_heap(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RESOURCE_DESC upload_desc = CD3DX12_RESOURCE_DESC::Buffer(bytes);
+    ComPtr<ID3D12Resource> upload;
+    ThrowIfFailed(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&upload)),
+                  "CreateCommittedResource(buffer staging)");
 
     void* mapped = nullptr;
     const CD3DX12_RANGE no_read(0, 0);
@@ -1082,9 +1144,10 @@ ComPtr<ID3D12Resource> Renderer::UploadBuffer(const void* data, UINT64 bytes,
     upload->Unmap(0, nullptr);
 
     command_list_->CopyBufferRegion(buffer.Get(), 0, upload.Get(), 0, bytes);
-    const CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        buffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, final_state);
-    command_list_->ResourceBarrier(1, &barrier);
+    // Hand the filled buffer to the draw: the copy must drain, and its access turns
+    // from copy-destination into the vertex or index read the caller asked for.
+    BufferBarrier(command_list_.Get(), buffer.Get(), D3D12_BARRIER_SYNC_COPY,
+                  D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_SYNC_DRAW, access_after);
 
     staging.push_back(std::move(upload));
     return buffer;
@@ -1096,14 +1159,16 @@ ComPtr<ID3D12Resource> Renderer::UploadTexture(const Image& image, UINT descript
     const auto mip_levels = static_cast<UINT16>(image.levels.size());
 
     const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
-    const CD3DX12_RESOURCE_DESC desc =
-        CD3DX12_RESOURCE_DESC::Tex2D(format, image.width, image.height, 1, mip_levels);
+    const CD3DX12_RESOURCE_DESC1 desc =
+        CD3DX12_RESOURCE_DESC1::Tex2D(format, image.width, image.height, 1, mip_levels);
 
+    // Born a copy destination for the UpdateSubresources below, then transitioned to
+    // a shader resource once the whole mip chain has landed.
     ComPtr<ID3D12Resource> texture;
-    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                   IID_PPV_ARGS(&texture)),
-                  "CreateCommittedResource(texture)");
+    ThrowIfFailed(device_->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                    D3D12_BARRIER_LAYOUT_COPY_DEST, nullptr, nullptr,
+                                                    0, nullptr, IID_PPV_ARGS(&texture)),
+                  "CreateCommittedResource3(texture)");
 
     // One staging buffer for the whole chain. UpdateSubresources knows how to
     // re-pitch each level into it: a texture's rows are aligned to 256 bytes on
@@ -1130,10 +1195,11 @@ ComPtr<ID3D12Resource> Renderer::UploadTexture(const Image& image, UINT descript
     UpdateSubresources(command_list_.Get(), texture.Get(), upload.Get(), 0, 0, mip_levels,
                        levels.data());
 
-    const CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    command_list_->ResourceBarrier(1, &barrier);
+    // The mip chain has landed; hand the texture to the pixel shader that samples it.
+    TextureBarrier(command_list_.Get(), texture.Get(), D3D12_BARRIER_SYNC_COPY,
+                   D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_LAYOUT_COPY_DEST,
+                   D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                   D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     srv.Format = format;
@@ -1209,13 +1275,13 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
         const UINT64 index_bytes = model.indices.size() * sizeof(std::uint32_t);
 
         gpu.vertex_buffer = UploadBuffer(model.vertices.data(), vertex_bytes,
-                                         D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, staging);
+                                         D3D12_BARRIER_ACCESS_VERTEX_BUFFER, staging);
         gpu.vertex_buffer_view.BufferLocation = gpu.vertex_buffer->GetGPUVirtualAddress();
         gpu.vertex_buffer_view.StrideInBytes = sizeof(Vertex);
         gpu.vertex_buffer_view.SizeInBytes = static_cast<UINT>(vertex_bytes);
 
         gpu.index_buffer = UploadBuffer(model.indices.data(), index_bytes,
-                                        D3D12_RESOURCE_STATE_INDEX_BUFFER, staging);
+                                        D3D12_BARRIER_ACCESS_INDEX_BUFFER, staging);
         gpu.index_buffer_view.BufferLocation = gpu.index_buffer->GetGPUVirtualAddress();
         gpu.index_buffer_view.Format = DXGI_FORMAT_R32_UINT;
         gpu.index_buffer_view.SizeInBytes = static_cast<UINT>(index_bytes);
@@ -1334,13 +1400,16 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
     clear.Color[3] = 1.0f;
 
     const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
-    const CD3DX12_RESOURCE_DESC cube_desc =
-        CD3DX12_RESOURCE_DESC::Tex2D(kProbeResourceFormat, kProbeSize, kProbeSize, 6, 1, 1, 0,
-                                     D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
-    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &cube_desc,
-                                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear,
-                                                   IID_PPV_ARGS(&probe_cube_)),
-                  "CreateCommittedResource(probe cube)");
+    const CD3DX12_RESOURCE_DESC1 cube_desc =
+        CD3DX12_RESOURCE_DESC1::Tex2D(kProbeResourceFormat, kProbeSize, kProbeSize, 6, 1, 1, 0,
+                                      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    // Born a shader resource, the layout it rests in once the capture below has
+    // filled it and the scene pass reflects off it.
+    ThrowIfFailed(device_->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &cube_desc,
+                                                    D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, &clear,
+                                                    nullptr, 0, nullptr,
+                                                    IID_PPV_ARGS(&probe_cube_)),
+                  "CreateCommittedResource3(probe cube)");
 
     // One render-target view per face.
     D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc{};
@@ -1365,12 +1434,13 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
     D3D12_CLEAR_VALUE depth_clear{};
     depth_clear.Format = kDepthFormat;
     depth_clear.DepthStencil.Depth = 1.0f;
-    const CD3DX12_RESOURCE_DESC depth_desc = CD3DX12_RESOURCE_DESC::Tex2D(
+    const CD3DX12_RESOURCE_DESC1 depth_desc = CD3DX12_RESOURCE_DESC1::Tex2D(
         kDepthFormat, kProbeSize, kProbeSize, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &depth_desc,
-                                                   D3D12_RESOURCE_STATE_DEPTH_WRITE, &depth_clear,
-                                                   IID_PPV_ARGS(&probe_depth_)),
-                  "CreateCommittedResource(probe depth)");
+    ThrowIfFailed(device_->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &depth_desc,
+                                                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
+                                                    &depth_clear, nullptr, 0, nullptr,
+                                                    IID_PPV_ARGS(&probe_depth_)),
+                  "CreateCommittedResource3(probe depth)");
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
     dsv.Format = kDepthFormat;
     dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
@@ -1434,11 +1504,13 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
     command_list_->RSSetViewports(1, &viewport);
     command_list_->RSSetScissorRects(1, &scissor);
 
-    // Every face from its resting shader-resource state to a render target.
-    const CD3DX12_RESOURCE_BARRIER to_rt = CD3DX12_RESOURCE_BARRIER::Transition(
-        probe_cube_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-        D3D12_RESOURCE_STATE_RENDER_TARGET);
-    command_list_->ResourceBarrier(1, &to_rt);
+    // Every face from its resting shader-resource layout to a render target. The
+    // cube was just created and nothing has touched it, so there is no prior work to
+    // drain -- SYNC_NONE with no access before.
+    TextureBarrier(command_list_.Get(), probe_cube_.Get(), D3D12_BARRIER_SYNC_NONE,
+                   D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+                   D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                   D3D12_BARRIER_LAYOUT_RENDER_TARGET);
 
     for (UINT face = 0; face < 6; ++face) {
         const XMMATRIX view_projection = XMMatrixLookToLH(eye, faces[face].dir, faces[face].up) * proj;
@@ -1458,11 +1530,12 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
         DrawInstances(scene.Instances(), view_projection, sun, 0.0f, false);
     }
 
-    // And back to a shader resource for the scene pass to reflect off of.
-    const CD3DX12_RESOURCE_BARRIER to_srv = CD3DX12_RESOURCE_BARRIER::Transition(
-        probe_cube_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    command_list_->ResourceBarrier(1, &to_srv);
+    // And back to a shader resource for the scene pass to reflect off of: the face
+    // renders must drain before any pixel-shader sample of the cube.
+    TextureBarrier(command_list_.Get(), probe_cube_.Get(), D3D12_BARRIER_SYNC_RENDER_TARGET,
+                   D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+                   D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                   D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
 
     ThrowIfFailed(command_list_->Close(), "CommandList::Close");
     ID3D12CommandList* lists[] = {command_list_.Get()};
@@ -1776,11 +1849,12 @@ void Renderer::DrawShadowCasters(std::span<const MeshInstance> instances) {
 
 void Renderer::RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props) {
     // Flip the map from the shader resource the scene pass left it as into a depth
-    // target to write.
-    const CD3DX12_RESOURCE_BARRIER to_depth = CD3DX12_RESOURCE_BARRIER::Transition(
-        shadow_map_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-        D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    command_list_->ResourceBarrier(1, &to_depth);
+    // target to write: the pixel-shader reads of last frame must drain, and it
+    // becomes a depth-stencil write.
+    TextureBarrier(command_list_.Get(), shadow_map_.Get(), D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                   D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+                   D3D12_BARRIER_SYNC_DEPTH_STENCIL, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+                   D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE);
 
     command_list_->RSSetViewports(1, &shadow_viewport_);
     command_list_->RSSetScissorRects(1, &shadow_scissor_);
@@ -1799,11 +1873,12 @@ void Renderer::RenderShadowMap(const Scene& scene, std::span<const MeshInstance>
     DrawShadowCasters(scene.Instances());
     DrawShadowCasters(props);
 
-    // And back to a shader resource for the scene pass to sample.
-    const CD3DX12_RESOURCE_BARRIER to_srv = CD3DX12_RESOURCE_BARRIER::Transition(
-        shadow_map_.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    command_list_->ResourceBarrier(1, &to_srv);
+    // And back to a shader resource for the scene pass to sample: the depth writes
+    // must drain before the pixel-shader reads that follow.
+    TextureBarrier(command_list_.Get(), shadow_map_.Get(), D3D12_BARRIER_SYNC_DEPTH_STENCIL,
+                   D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+                   D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                   D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
 }
 
 void Renderer::DrawOutlines(std::span<const MeshInstance> instances,
@@ -1903,11 +1978,12 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
 
     // The whole world renders into the linear HDR scene buffer; the tonemap pass
     // resolves it to the swapchain afterward. Flip the buffer from the shader
-    // resource the previous frame's resolve left it as into a render target.
-    const CD3DX12_RESOURCE_BARRIER hdr_to_rt = CD3DX12_RESOURCE_BARRIER::Transition(
-        hdr_target_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-        D3D12_RESOURCE_STATE_RENDER_TARGET);
-    command_list_->ResourceBarrier(1, &hdr_to_rt);
+    // resource the previous frame's resolve left it as into a render target: that
+    // pixel-shader read must drain before this frame writes it.
+    TextureBarrier(command_list_.Get(), hdr_target_.Get(), D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                   D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+                   D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                   D3D12_BARRIER_LAYOUT_RENDER_TARGET);
 
     const CD3DX12_CPU_DESCRIPTOR_HANDLE hdr_rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
                                                 static_cast<INT>(kHdrRtvIndex), rtv_size_);
@@ -1965,17 +2041,20 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     DrawInstances(held_props, view_projection, viewmodel.sun_direction, 0.0f, true);
 
     // The world is finished. Flip the HDR buffer to a shader resource for the
-    // tonemap pass, and bring the swapchain buffer up as the target the resolve and
-    // the HUD write.
-    const CD3DX12_RESOURCE_BARRIER hdr_to_srv = CD3DX12_RESOURCE_BARRIER::Transition(
-        hdr_target_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    command_list_->ResourceBarrier(1, &hdr_to_srv);
+    // tonemap pass: the world's render-target writes must drain before the resolve
+    // samples it.
+    TextureBarrier(command_list_.Get(), hdr_target_.Get(), D3D12_BARRIER_SYNC_RENDER_TARGET,
+                   D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+                   D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                   D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
 
-    const CD3DX12_RESOURCE_BARRIER to_render_target = CD3DX12_RESOURCE_BARRIER::Transition(
-        render_targets_[frame_index_].Get(), D3D12_RESOURCE_STATE_PRESENT,
-        D3D12_RESOURCE_STATE_RENDER_TARGET);
-    command_list_->ResourceBarrier(1, &to_render_target);
+    // Bring the swapchain buffer up as the target the resolve and the HUD write. The
+    // resolve overwrites every pixel, so its prior contents are discarded -- layout
+    // UNDEFINED before, with nothing to wait on.
+    TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
+                   D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_ACCESS_NO_ACCESS,
+                   D3D12_BARRIER_LAYOUT_UNDEFINED, D3D12_BARRIER_SYNC_RENDER_TARGET,
+                   D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET);
 
     const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
                                             static_cast<INT>(frame_index_), rtv_size_);
@@ -2004,10 +2083,11 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     command_list_->SetDescriptorHeaps(_countof(text_heaps), text_heaps);
     DrawText(hud_prompt);
 
-    const CD3DX12_RESOURCE_BARRIER to_present = CD3DX12_RESOURCE_BARRIER::Transition(
-        render_targets_[frame_index_].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
-        D3D12_RESOURCE_STATE_PRESENT);
-    command_list_->ResourceBarrier(1, &to_present);
+    // The frame is complete; hand the swapchain buffer back for presentation.
+    TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
+                   D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                   D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_SYNC_NONE,
+                   D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_LAYOUT_PRESENT);
 
     ThrowIfFailed(command_list_->Close(), "CommandList::Close");
 
