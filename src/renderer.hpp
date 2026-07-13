@@ -20,6 +20,9 @@
 class Renderer {
 public:
     static constexpr UINT kFrameCount = 2;
+    // Bloom pyramid depth: this many successively-halved mips. Public so the render
+    // target and descriptor heaps, sized in the .cpp, can account for them.
+    static constexpr UINT kBloomLevels = 6;
 
     // Brings up the device, swapchain and every pipeline -- everything that lives
     // for the whole session, independent of which level is loaded. No scene geometry
@@ -73,6 +76,16 @@ private:
         D3D12_GPU_DESCRIPTOR_HANDLE normal_texture;
         D3D12_GPU_DESCRIPTOR_HANDLE metallic_roughness_texture;
         D3D12_GPU_DESCRIPTOR_HANDLE occlusion_texture;
+    };
+
+    // One level of the bloom pyramid: an HDR texture at some fraction of the window,
+    // with its render-target view in rtv_heap_ and its shader-resource view in
+    // engine_heap_. The chain is recreated on resize, since the sizes track the
+    // window.
+    struct BloomTarget {
+        ComPtr<ID3D12Resource> texture;
+        UINT width = 0;
+        UINT height = 0;
     };
 
     // A Model, uploaded. The CPU-side Model that produced it is not needed again.
@@ -132,6 +145,18 @@ private:
     // before the resolve. Its own root signature (the camera and light matrices, the
     // sun, and the depth + shadow SRVs) and an additively blended PSO.
     void CreateLightShaftPipeline();
+    // The bloom pyramid's textures: kBloomLevels HDR targets, each half the size of
+    // the one above, with their RTVs and SRVs. Recreated on resize like the HDR
+    // buffer, since the sizes follow the window.
+    void CreateBloomTargets();
+    // The bloom pass pipelines: one root signature and two PSOs (the downsample,
+    // which overwrites, and the upsample, which blends additively) over bloom.hlsl.
+    void CreateBloomPipeline();
+    // Runs the bloom chain on the finished HDR scene: downsample down the pyramid
+    // thresholding the first level, then upsample and sum back up, leaving the glow
+    // in bloom level 0 for the resolve to add in. Assumes the HDR buffer is a shader
+    // resource and the engine heap is bound.
+    void RenderBloom();
     // Uploads every model the scene holds, plus the 1x1 white texture that
     // stands in for a material with no texture of its own.
     void CreateSceneGeometry(const Scene& scene);
@@ -264,6 +289,13 @@ private:
     // the scene depth and shadow map from engine_heap_ slots 1 and 2.
     ComPtr<ID3D12RootSignature> light_shaft_root_signature_;
     ComPtr<ID3D12PipelineState> light_shaft_pipeline_state_;
+
+    // The bloom pyramid: its mip textures, one root signature and the downsample /
+    // upsample PSOs. Level 0's SRV is what the resolve reads to add the glow.
+    BloomTarget bloom_targets_[kBloomLevels];
+    ComPtr<ID3D12RootSignature> bloom_root_signature_;
+    ComPtr<ID3D12PipelineState> bloom_downsample_pipeline_state_;
+    ComPtr<ID3D12PipelineState> bloom_upsample_pipeline_state_;
 
     // The reflection probe. `scene_capture_pipeline_state_` is the scene PSO with
     // the capture pixel shader (analytic sky, no cube read); it fills probe_cube_

@@ -9,23 +9,30 @@ cbuffer TonemapConstants : register(b0) {
     // A scalar on the linear scene before tonemapping. 1.0 leaves it untouched; it
     // is the hook a manual EV control or auto-exposure would drive later.
     float g_exposure;
+    // How strongly the bloom is added back into the frame.
+    float g_bloom_intensity;
 };
 
 // The HDR scene, one linear texel per output pixel. Read by integer Load rather
-// than a filtered sample: the resolve is 1:1, so there is nothing to interpolate
-// and no sampler is needed.
+// than a filtered sample: the resolve is 1:1, so there is nothing to interpolate.
 Texture2D<float4> g_hdr : register(t0);
+// The bloom pyramid's top mip, at half resolution. Sampled (not loaded) so the
+// hardware bilinearly upscales it to full res, which is also what softens it.
+Texture2D<float4> g_bloom : register(t1);
+SamplerState g_sampler : register(s0);
 
 struct VSOutput {
     float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
 };
 
-// The same no-vertex-buffer fullscreen triangle the sky pass uses: id 0,1,2 map to
-// clip-space (-1,-1),(3,-1),(-1,3), covering the screen.
+// The same no-vertex-buffer fullscreen triangle the other post passes use, with the
+// clip-space y flipped into the uv so (0,0) lands at the top-left texel.
 VSOutput VSMain(uint id : SV_VertexID) {
     const float2 uv = float2((id << 1) & 2, id & 2);
     VSOutput output;
-    output.position = float4(uv * 2.0f - 1.0f, 0.0f, 1.0f);
+    output.position = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
+    output.uv = uv;
     return output;
 }
 
@@ -56,7 +63,10 @@ float3 PbrNeutralToneMap(float3 color) {
 
 float4 PSMain(VSOutput input) : SV_TARGET {
     const int3 texel = int3(int2(input.position.xy), 0);
-    const float3 hdr = g_hdr.Load(texel).rgb * g_exposure;
-    const float3 mapped = PbrNeutralToneMap(hdr);
+    const float3 hdr = g_hdr.Load(texel).rgb;
+    // The bloom is added into the scene before tonemapping, so its glow is rolled
+    // off with the highlights that cast it rather than clipping to white.
+    const float3 bloom = g_bloom.SampleLevel(g_sampler, input.uv, 0.0f).rgb;
+    const float3 mapped = PbrNeutralToneMap((hdr + bloom * g_bloom_intensity) * g_exposure);
     return float4(LinearToSrgb(mapped), 1.0f);
 }

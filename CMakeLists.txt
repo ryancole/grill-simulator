@@ -92,6 +92,10 @@ add_hlsl_shader(grill SOURCE shaders/tonemap.hlsl ENTRY PSMain PROFILE ps_6_6 OU
 # The volumetric sun-shaft pass: marches the shadow map and adds scattered light.
 add_hlsl_shader(grill SOURCE shaders/lightshafts.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT lightshafts.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/lightshafts.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT lightshafts.ps.cso)
+# The bloom pyramid: one vertex shader, a downsample and an upsample pixel shader.
+add_hlsl_shader(grill SOURCE shaders/bloom.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT bloom.vs.cso)
+add_hlsl_shader(grill SOURCE shaders/bloom.hlsl ENTRY PSDownsample PROFILE ps_6_6 OUTPUT bloom_down.ps.cso)
+add_hlsl_shader(grill SOURCE shaders/bloom.hlsl ENTRY PSUpsample PROFILE ps_6_6 OUTPUT bloom_up.ps.cso)
 add_hlsl_shader(grill SOURCE shaders/text.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT text.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/text.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT text.ps.cso)
 add_hlsl_shader(grill SOURCE shaders/outline.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT outline.vs.cso)

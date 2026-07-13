@@ -27,17 +27,22 @@ constexpr DXGI_FORMAT kDepthSrvFormat = DXGI_FORMAT_R32_FLOAT;
 // pull back and enough precision to keep the darks from banding.
 constexpr DXGI_FORMAT kHdrFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 // The HDR target's render-target view sits just past the swapchain's own RTVs in
-// rtv_heap_, so that heap holds one more descriptor than there are frames.
+// rtv_heap_; the bloom mips' views follow it.
 constexpr UINT kHdrRtvIndex = Renderer::kFrameCount;
+constexpr UINT kBloomRtvBase = Renderer::kFrameCount + 1;
 
-// The persistent engine SRV heap and its slots. Sized past what is in use so the
-// post-process buffers to come need no reallocation. Slot 0 is the HDR buffer the
+// The persistent engine SRV heap and its slots. Slot 0 is the HDR buffer the
 // tonemap reads; 1 and 2 are the scene depth and a plain (non-comparison) view of
-// the shadow map, the two the light-shaft pass marches.
-constexpr UINT kEngineHeapSize = 8;
+// the shadow map, the two the light-shaft pass marches; then one per bloom mip
+// (Renderer::kBloomLevels of them, half the window and down).
 constexpr UINT kHdrSrvIndex = 0;
 constexpr UINT kDepthSrvIndex = 1;
 constexpr UINT kShaftShadowSrvIndex = 2;
+constexpr UINT kBloomSrvBase = 3;
+// Sized past what is in use so the post-process buffers to come need no realloc.
+constexpr UINT kEngineHeapSize = 16;
+static_assert(kBloomSrvBase + Renderer::kBloomLevels <= kEngineHeapSize,
+              "engine heap too small for bloom");
 
 // The sky the fog fades into, so the horizon has no seam.
 constexpr float kSkyColor[] = {0.52f, 0.62f, 0.76f, 1.0f};
@@ -151,6 +156,25 @@ static_assert(sizeof(LightShaftConstants) % sizeof(UINT) == 0);
 constexpr UINT kLightShaftConstantDwords = sizeof(LightShaftConstants) / sizeof(UINT);
 static_assert(kLightShaftConstantDwords + 1 <= 64,
               "A root signature holds at most 64 DWORDs in total");
+
+// Mirrors the BloomConstants cbuffer in shaders/bloom.hlsl: one texel of the source
+// mip, and two parameters the two passes read differently -- see the shader.
+struct BloomConstants {
+    XMFLOAT2 src_texel;
+    float param0;
+    float param1;
+};
+
+static_assert(sizeof(BloomConstants) % sizeof(UINT) == 0);
+constexpr UINT kBloomConstantDwords = sizeof(BloomConstants) / sizeof(UINT);
+
+// The soft-knee bright-pass on the first downsample: only what is brighter than the
+// threshold blooms, easing in over the knee. The upsample tent's radius, and how
+// strongly the finished bloom is added back in the resolve.
+constexpr float kBloomThreshold = 0.9f;
+constexpr float kBloomKnee = 0.4f;
+constexpr float kBloomUpsampleRadius = 1.0f;
+constexpr float kBloomIntensity = 0.7f;
 
 // Mirrors the OutlineConstants cbuffer in shaders/outline.hlsl. The view-
 // projection stands alone because the mesh is grown in world space before it is
@@ -346,6 +370,7 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     CreateEngineDescriptorHeap();
     CreateDepthBuffer();
     CreateHdrTarget();
+    CreateBloomTargets();
     CreateShadowMap();
     CreatePipeline();
     CreateSkyPipeline();
@@ -354,6 +379,7 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     CreateTextPipeline();
     CreateTonemapPipeline();
     CreateLightShaftPipeline();
+    CreateBloomPipeline();
 
     // Everything above is the session's, not the level's. The scene geometry, the
     // font atlas and the reflection probe come up in LoadScene, so a level can be
@@ -495,10 +521,10 @@ void Renderer::CreateSwapChain(HWND hwnd, UINT width, UINT height) {
     ThrowIfFailed(swap_chain.As(&swap_chain_), "IDXGISwapChain3 QueryInterface");
     frame_index_ = swap_chain_->GetCurrentBackBufferIndex();
 
-    // One RTV per swapchain buffer, plus one for the HDR scene buffer (kHdrRtvIndex)
-    // the whole world renders into before the tonemap pass resolves it.
+    // One RTV per swapchain buffer, one for the HDR scene buffer (kHdrRtvIndex) the
+    // whole world renders into, then one per bloom mip.
     D3D12_DESCRIPTOR_HEAP_DESC rtv_desc{};
-    rtv_desc.NumDescriptors = kFrameCount + 1;
+    rtv_desc.NumDescriptors = kFrameCount + 1 + kBloomLevels;
     rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     ThrowIfFailed(device_->CreateDescriptorHeap(&rtv_desc, IID_PPV_ARGS(&rtv_heap_)),
                   "CreateDescriptorHeap(RTV)");
@@ -615,6 +641,43 @@ void Renderer::CreateHdrTarget() {
     const CD3DX12_CPU_DESCRIPTOR_HANDLE srv_handle(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
                                                    static_cast<INT>(kHdrSrvIndex), engine_heap_size_);
     device_->CreateShaderResourceView(hdr_target_.Get(), &srv, srv_handle);
+}
+
+void Renderer::CreateBloomTargets() {
+    const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+    for (UINT i = 0; i < kBloomLevels; ++i) {
+        // Level 0 is half the window; each level halves again, floored at one texel.
+        BloomTarget& target = bloom_targets_[i];
+        target.width = std::max(1u, width_ >> (i + 1));
+        target.height = std::max(1u, height_ >> (i + 1));
+
+        const CD3DX12_RESOURCE_DESC1 desc = CD3DX12_RESOURCE_DESC1::Tex2D(
+            kHdrFormat, target.width, target.height, 1, 1, 1, 0,
+            D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        // Rests as a shader resource, like the HDR buffer: each pass flips its target
+        // to a render target and back. No optimized clear value -- the downsample
+        // overwrites a level whole and the upsample sums onto it, so it is never
+        // cleared.
+        ThrowIfFailed(device_->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                        D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, nullptr,
+                                                        nullptr, 0, nullptr,
+                                                        IID_PPV_ARGS(&target.texture)),
+                      "CreateCommittedResource3(bloom mip)");
+
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                static_cast<INT>(kBloomRtvBase + i), rtv_size_);
+        device_->CreateRenderTargetView(target.texture.Get(), nullptr, rtv);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = kHdrFormat;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = 1;
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE srv_handle(
+            engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+            static_cast<INT>(kBloomSrvBase + i), engine_heap_size_);
+        device_->CreateShaderResourceView(target.texture.Get(), &srv, srv_handle);
+    }
 }
 
 void Renderer::CreateShadowMap() {
@@ -982,17 +1045,26 @@ void Renderer::CreateOutlinePipeline() {
 }
 
 void Renderer::CreateTonemapPipeline() {
-    // b0: the exposure scalar, as a single root constant. t0: the HDR scene buffer,
-    // in the persistent engine heap. No sampler -- the pixel shader reads the buffer
-    // by integer Load, since the resolve is 1:1.
+    // b0: the exposure and bloom-intensity scalars, as root constants. t0: the HDR
+    // scene buffer, read by integer Load (the resolve is 1:1). t1: the bloom top mip,
+    // in its own table since it is not contiguous with t0 in the engine heap, and
+    // sampled through s0 so the hardware upscales it from half resolution.
     const CD3DX12_DESCRIPTOR_RANGE hdr_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+    const CD3DX12_DESCRIPTOR_RANGE bloom_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
 
-    CD3DX12_ROOT_PARAMETER parameters[2];
-    parameters[0].InitAsConstants(1, 0);
+    CD3DX12_ROOT_PARAMETER parameters[3];
+    parameters[0].InitAsConstants(2, 0);
     parameters[1].InitAsDescriptorTable(1, &hdr_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[2].InitAsDescriptorTable(1, &bloom_range, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     CD3DX12_ROOT_SIGNATURE_DESC root_desc;
-    root_desc.Init(_countof(parameters), parameters, 0, nullptr,
+    root_desc.Init(_countof(parameters), parameters, 1, &sampler,
                    D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
@@ -1124,6 +1196,171 @@ void Renderer::CreateLightShaftPipeline() {
     ThrowIfFailed(
         device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&light_shaft_pipeline_state_)),
         "CreateGraphicsPipelineState(light shafts)");
+}
+
+void Renderer::CreateBloomPipeline() {
+    // b0: the source texel size and the two pass parameters, as root constants. t0:
+    // the source texture (the HDR buffer or a bloom mip), one table into the engine
+    // heap. s0: a linear clamp sampler -- the filters lean on bilinear taps.
+    const CD3DX12_DESCRIPTOR_RANGE src_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+    CD3DX12_ROOT_PARAMETER parameters[2];
+    parameters[0].InitAsConstants(kBloomConstantDwords, 0);
+    parameters[1].InitAsDescriptorTable(1, &src_range, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    root_desc.Init(_countof(parameters), parameters, 1, &sampler,
+                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr =
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr)) {
+        std::string message = error
+                                  ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                                error->GetBufferSize())
+                                  : "unknown error";
+        throw std::runtime_error("D3D12SerializeRootSignature(bloom) failed: " + message);
+    }
+    ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                               signature->GetBufferSize(),
+                                               IID_PPV_ARGS(&bloom_root_signature_)),
+                  "CreateRootSignature(bloom)");
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "bloom.vs.cso");
+    const std::vector<std::byte> down_ps = ReadBinaryFile(shader_dir / "bloom_down.ps.cso");
+    const std::vector<std::byte> up_ps = ReadBinaryFile(shader_dir / "bloom_up.ps.cso");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.InputLayout = {nullptr, 0};
+    pso.pRootSignature = bloom_root_signature_.Get();
+    pso.VS = {vs.data(), vs.size()};
+    pso.PS = {down_ps.data(), down_ps.size()};
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = kHdrFormat;
+    pso.SampleDesc.Count = 1;
+
+    // The downsample overwrites its target, so it keeps the default opaque blend.
+    ThrowIfFailed(
+        device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&bloom_downsample_pipeline_state_)),
+        "CreateGraphicsPipelineState(bloom downsample)");
+
+    // The upsample sums each mip onto the larger one, so it blends additively.
+    pso.PS = {up_ps.data(), up_ps.size()};
+    D3D12_RENDER_TARGET_BLEND_DESC& blend = pso.BlendState.RenderTarget[0];
+    blend.BlendEnable = TRUE;
+    blend.SrcBlend = D3D12_BLEND_ONE;
+    blend.DestBlend = D3D12_BLEND_ONE;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ZERO;
+    blend.DestBlendAlpha = D3D12_BLEND_ONE;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    ThrowIfFailed(
+        device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&bloom_upsample_pipeline_state_)),
+        "CreateGraphicsPipelineState(bloom upsample)");
+}
+
+void Renderer::RenderBloom() {
+    // Assumes the HDR buffer is a shader resource and the engine heap is bound (the
+    // shaft pass leaves both that way). Every bloom mip rests as a shader resource
+    // and is flipped to a render target for the one pass that writes it.
+    command_list_->SetGraphicsRootSignature(bloom_root_signature_.Get());
+    command_list_->IASetVertexBuffers(0, 0, nullptr);
+
+    const D3D12_GPU_DESCRIPTOR_HANDLE engine_base =
+        engine_heap_->GetGPUDescriptorHandleForHeapStart();
+    const auto srv = [&](UINT slot) {
+        return CD3DX12_GPU_DESCRIPTOR_HANDLE(engine_base, static_cast<INT>(slot), engine_heap_size_);
+    };
+    const auto set_target = [&](UINT level) {
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                static_cast<INT>(kBloomRtvBase + level), rtv_size_);
+        command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        const CD3DX12_VIEWPORT vp(0.0f, 0.0f, static_cast<float>(bloom_targets_[level].width),
+                                  static_cast<float>(bloom_targets_[level].height));
+        const CD3DX12_RECT sc(0, 0, static_cast<LONG>(bloom_targets_[level].width),
+                              static_cast<LONG>(bloom_targets_[level].height));
+        command_list_->RSSetViewports(1, &vp);
+        command_list_->RSSetScissorRects(1, &sc);
+    };
+    const auto to_rt = [&](UINT level) {
+        TextureBarrier(command_list_.Get(), bloom_targets_[level].texture.Get(),
+                       D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                       D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_SYNC_RENDER_TARGET,
+                       D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET);
+    };
+    const auto to_srv = [&](UINT level) {
+        TextureBarrier(command_list_.Get(), bloom_targets_[level].texture.Get(),
+                       D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                       D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                       D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    };
+
+    // Downsample down the pyramid: the HDR buffer into level 0 (with the bright-pass
+    // knee), then each level into the next. Every step overwrites its whole target.
+    command_list_->SetPipelineState(bloom_downsample_pipeline_state_.Get());
+    for (UINT i = 0; i < kBloomLevels; ++i) {
+        BloomConstants constants{};
+        if (i == 0) {
+            constants.src_texel = {1.0f / static_cast<float>(width_),
+                                   1.0f / static_cast<float>(height_)};
+            constants.param0 = kBloomThreshold;
+            constants.param1 = kBloomKnee;
+        } else {
+            constants.src_texel = {1.0f / static_cast<float>(bloom_targets_[i - 1].width),
+                                   1.0f / static_cast<float>(bloom_targets_[i - 1].height)};
+            constants.param0 = 0.0f; // No threshold past the first level.
+            constants.param1 = 0.0f;
+        }
+
+        to_rt(i);
+        set_target(i);
+        command_list_->SetGraphicsRoot32BitConstants(0, kBloomConstantDwords, &constants, 0);
+        command_list_->SetGraphicsRootDescriptorTable(1, i == 0 ? srv(kHdrSrvIndex)
+                                                                 : srv(kBloomSrvBase + i - 1));
+        command_list_->DrawInstanced(3, 1, 0, 0);
+        to_srv(i);
+    }
+
+    // Upsample back up, summing each smaller mip into the one above it with the tent
+    // filter. The additive blend keeps each level's own downsampled content, so the
+    // glow accumulates across scales and lands, wide and soft, in level 0.
+    command_list_->SetPipelineState(bloom_upsample_pipeline_state_.Get());
+    for (int i = static_cast<int>(kBloomLevels) - 2; i >= 0; --i) {
+        BloomConstants constants{};
+        constants.src_texel = {1.0f / static_cast<float>(bloom_targets_[i + 1].width),
+                               1.0f / static_cast<float>(bloom_targets_[i + 1].height)};
+        constants.param0 = kBloomUpsampleRadius;
+        constants.param1 = 0.0f;
+
+        to_rt(static_cast<UINT>(i));
+        set_target(static_cast<UINT>(i));
+        command_list_->SetGraphicsRoot32BitConstants(0, kBloomConstantDwords, &constants, 0);
+        command_list_->SetGraphicsRootDescriptorTable(1, srv(kBloomSrvBase + i + 1));
+        command_list_->DrawInstanced(3, 1, 0, 0);
+        to_srv(static_cast<UINT>(i));
+    }
 }
 
 void Renderer::UpdateShadowProjection() {
@@ -2236,6 +2473,13 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                    D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
                    D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
 
+    // Bloom: build the glow pyramid from the finished HDR scene, leaving it in bloom
+    // level 0 for the resolve to add in. It runs its own per-mip viewports, so the
+    // full-window one is restored afterward for the resolve and HUD.
+    RenderBloom();
+    command_list_->RSSetViewports(1, &viewport_);
+    command_list_->RSSetScissorRects(1, &scissor_);
+
     // Bring the swapchain buffer up as the target the resolve and the HUD write. The
     // resolve overwrites every pixel, so its prior contents are discarded -- layout
     // UNDEFINED before, with nothing to wait on.
@@ -2249,16 +2493,22 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // No depth: the resolve and the HUD both write flat over the frame.
     command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 
-    // The resolve pass: tonemap the HDR scene buffer onto the swapchain. It reads
-    // the buffer's SRV from the persistent engine heap, still bound from the shaft
-    // pass; the fullscreen triangle comes from SV_VertexID, so no vertex buffer.
+    // The resolve pass: tonemap the HDR scene plus the bloom onto the swapchain. Both
+    // SRVs live in the engine heap, still bound from the bloom pass; the fullscreen
+    // triangle comes from SV_VertexID, so no vertex buffer.
     command_list_->SetGraphicsRootSignature(tonemap_root_signature_.Get());
     command_list_->SetPipelineState(tonemap_pipeline_state_.Get());
-    const float exposure = 1.0f;
-    command_list_->SetGraphicsRoot32BitConstants(0, 1, &exposure, 0);
-    const CD3DX12_GPU_DESCRIPTOR_HANDLE hdr_srv(engine_heap_->GetGPUDescriptorHandleForHeapStart(),
-                                                static_cast<INT>(kHdrSrvIndex), engine_heap_size_);
-    command_list_->SetGraphicsRootDescriptorTable(1, hdr_srv);
+    const float tonemap_constants[] = {1.0f, kBloomIntensity}; // exposure, bloom intensity
+    command_list_->SetGraphicsRoot32BitConstants(0, _countof(tonemap_constants), tonemap_constants,
+                                                 0);
+    const D3D12_GPU_DESCRIPTOR_HANDLE engine_base =
+        engine_heap_->GetGPUDescriptorHandleForHeapStart();
+    command_list_->SetGraphicsRootDescriptorTable(
+        1, CD3DX12_GPU_DESCRIPTOR_HANDLE(engine_base, static_cast<INT>(kHdrSrvIndex),
+                                         engine_heap_size_));
+    command_list_->SetGraphicsRootDescriptorTable(
+        2, CD3DX12_GPU_DESCRIPTOR_HANDLE(engine_base, static_cast<INT>(kBloomSrvBase),
+                                         engine_heap_size_));
     command_list_->IASetVertexBuffers(0, 0, nullptr);
     command_list_->DrawInstanced(3, 1, 0, 0);
 
@@ -2333,10 +2583,13 @@ void Renderer::Resize(UINT width, UINT height) {
         fence_values_[i] = fence_values_[frame_index_];
     }
     depth_stencil_.Reset();
-    // The HDR scene buffer is window-sized too, so it is rebuilt with the rest. The
-    // engine heap it is viewed through persists; CreateHdrTarget just rewrites the
-    // descriptor.
+    // The HDR scene buffer and the bloom mips are window-sized too, so they are
+    // rebuilt with the rest. The engine heap they are viewed through persists;
+    // CreateHdrTarget and CreateBloomTargets just rewrite the descriptors.
     hdr_target_.Reset();
+    for (BloomTarget& target : bloom_targets_) {
+        target.texture.Reset();
+    }
 
     DXGI_SWAP_CHAIN_DESC desc{};
     ThrowIfFailed(swap_chain_->GetDesc(&desc), "SwapChain::GetDesc");
@@ -2351,6 +2604,7 @@ void Renderer::Resize(UINT width, UINT height) {
     CreateRenderTargetViews();
     CreateDepthBuffer();
     CreateHdrTarget();
+    CreateBloomTargets();
 }
 
 void Renderer::Shutdown() {
