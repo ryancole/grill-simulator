@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -63,6 +64,18 @@ public:
                 std::span<const MeshInstance> held_props,
                 const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
                 std::string_view hud_prompt);
+    // Draws the launch/pause menu as its own complete frame: a solid backdrop, a
+    // `title`, and the vertical list of `entries` with the one at `selected` picked
+    // out. Owns the swapchain buffer from clear to present, so the game loop calls
+    // this *instead of* Render while the menu is up -- no level is stepped or drawn
+    // behind it. Reads the font atlas from the per-level texture heap, so a level
+    // must be loaded (its geometry simply is not drawn).
+    void RenderMenu(std::string_view title, std::span<const std::string> entries, int selected);
+    // Hit-tests the menu layout: the entry index whose row the client-space point
+    // (x, y) falls in for a menu of `entry_count` entries, or -1 when the point is
+    // over no entry. Uses the same metrics RenderMenu draws with, so hover and click
+    // line up with what is on screen. Rows span the full width, so only y matters.
+    int MenuEntryAt(int x, int y, int entry_count) const;
     void Shutdown();
 
     float AspectRatio() const;
@@ -184,8 +197,30 @@ private:
     void LoadFontAtlas(std::vector<ComPtr<ID3D12Resource>>& staging);
     // Lays `text` out into a centred line near the bottom of the screen and draws
     // it -- a dark shadow pass, then the text -- into the current frame. A no-op
-    // for empty text. Assumes the render target is already bound.
+    // for empty text. Assumes the render target is already bound. This is the HUD
+    // prompt; the menu draws its own lines through the shared helpers below.
     void DrawText(std::string_view text);
+    // Draws the menu overlay -- the title and the highlighted list of entries --
+    // into the current frame, over whatever backdrop the caller has cleared. All
+    // lines are packed into this frame's text vertex region back-to-back and only
+    // then drawn, so they never alias one another in the shared buffer the way
+    // repeated DrawText calls would.
+    void DrawMenu(std::string_view title, std::span<const std::string> entries, int selected);
+
+    // Writes the glyph quads for one horizontally-centred line into this frame's
+    // text vertex region, beginning at vertex index `first`, and returns the new
+    // running vertex count. `baseline` and `pixel` (the glyph height) are in pixels,
+    // origin top-left. It only fills the buffer -- the caller picks the colour and
+    // issues the draw -- so several lines can share one fill before any is drawn.
+    // Stops early if the region fills; empty text writes nothing.
+    UINT LayoutLine(std::string_view text, float baseline, float pixel, UINT first);
+    // Binds the text pipeline, its root signature, the atlas table and this frame's
+    // text vertex buffer, ready for one or more DrawTextRun calls.
+    void BindTextPipeline();
+    // Issues the shadow-then-fill draw pair for the run of `count` vertices starting
+    // at `first`, tinting the fill `color` (the shadow is a translucent black scaled
+    // by the fill's alpha). Assumes BindTextPipeline has run.
+    void DrawTextRun(UINT first, UINT count, DirectX::XMFLOAT4 color);
 
     // Fills a default-heap buffer through a staging copy. The staging resource is
     // appended to `staging`, which the caller must keep alive until the GPU has
