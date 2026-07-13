@@ -2,6 +2,7 @@
 
 #include <DirectXMath.h>
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -30,10 +31,9 @@ struct Placement {
 };
 
 // Everything that makes one level its own place: a name, where the player starts,
-// which way the sun falls, and the things standing in it. Deliberately just data
-// returned by a function (levels::Backyard) rather than parsed from a file -- the
-// struct is the schema, and it can be serialised later once the levels have stopped
-// reshaping it.
+// which way the sun falls, and the things standing in it. Plain data, parsed from a
+// `.level` text file by LoadFromFile -- this struct is that format's schema, so a
+// field added here is a field the loader (and the files) grow.
 struct LevelDef {
     std::string name;
 
@@ -54,24 +54,16 @@ struct LevelDef {
 
 namespace levels {
 
-// Authoring helpers so a level reads the way Scene's constructor used to: a box
-// by centre/size/yaw, a prop by model and transform. Each returns one Placement.
-Placement Box(DirectX::XMFLOAT3 center, DirectX::XMFLOAT3 size, float yaw_degrees,
-              DirectX::XMFLOAT3 color, float checker = 0.0f);
-Placement Prop(std::string model, DirectX::FXMMATRIX transform,
-               DirectX::XMFLOAT3 tint = {1.0f, 1.0f, 1.0f});
-Placement DynamicProp(std::string model, DirectX::FXMMATRIX transform, float mass,
-                      float knock_rating, DirectX::XMFLOAT3 tint = {1.0f, 1.0f, 1.0f});
-
-// The original backyard: the one scene the game shipped with, now expressed as
-// data. Building a Scene from it is identical to what the old constructor did by
-// hand.
-LevelDef Backyard();
-
-// A concrete rooftop deck: the same props rearranged on a walled slab, no grass or
-// trees, with the sun swung low from the west. The second level, and the proof
-// that switching levels works on genuinely different content -- different ground,
-// layout, spawn and sun.
-LevelDef Rooftop();
+// Reads a level from a `.level` TOML file (see assets/levels/backyard.level, which
+// documents the format). The top level carries name/spawn/facing/sun; a `box` array
+// and a `prop` array then hold the objects, each storing the authoring parameters it
+// is placed by (a box's centre/size/yaw/colour, a prop's pos/yaw/scale) which the
+// loader recomposes into the same transforms the code once built by hand. Boxes are
+// placed before props. Throws std::runtime_error -- naming the file, and the line for
+// a TOML syntax error -- on anything it cannot parse.
+//
+// Levels live in files rather than code so a new one is a text edit, not a rebuild;
+// the LevelDef struct above is the format's schema, parsed with toml++.
+LevelDef LoadFromFile(const std::filesystem::path& path);
 
 } // namespace levels

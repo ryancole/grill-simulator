@@ -1,0 +1,32 @@
+# The rooftop: a concrete deck ringed by a parapet, no grass or trees, with the same
+# props rearranged and the sun swung low from the west. A TOML file; see
+# backyard.level for the format.
+
+name = "Rooftop"
+spawn = [-7.5, 0.0, 0.0]
+facing = 90.0
+sun = [-0.55, 0.45, 0.15]
+
+box = [
+  # The deck, darker than the backyard's patio, then a knee-high parapet around the
+  # edge (overlapping at the corners).
+  {center = [0.0, -0.15, 0.0], size = [18.0, 0.3, 18.0], color = [0.38, 0.37, 0.36], checker = 1.5},
+  {center = [0.0, 0.6, 9.0],   size = [18.5, 1.2, 0.3],  color = [0.62, 0.60, 0.57]},
+  {center = [0.0, 0.6, -9.0],  size = [18.5, 1.2, 0.3],  color = [0.62, 0.60, 0.57]},
+  {center = [9.0, 0.6, 0.0],   size = [0.3, 1.2, 18.5],  color = [0.62, 0.60, 0.57]},
+  {center = [-9.0, 0.6, 0.0],  size = [0.3, 1.2, 18.5],  color = [0.62, 0.60, 0.57]},
+]
+
+prop = [
+  # Grill dead ahead of the west-edge spawn, cooler off to one side.
+  {model = "grill-basic.glb",  pos = [1.5, 0.0, 0.0],  dynamic = true, mass = 12.0, knock = 8.0},
+  {model = "cooler-basic.glb", pos = [3.8, 0.0, -2.6], dynamic = true, mass = 14.0, knock = 7.0},
+
+  # A bench along the north parapet, turned to face back into the deck.
+  {model = "bench-basic.glb", pos = [-1.0, 0.0, 7.4], yaw = 180.0},
+
+  # Crates: a stack in the far corner and one set loose near the south wall.
+  {model = "crate.glb", pos = [6.0, 0.0, 5.0]},
+  {model = "crate.glb", pos = [6.0, 0.8, 5.0], yaw = 20.0, scale = 0.875},
+  {model = "crate.glb", pos = [5.5, 0.0, -5.0]},
+]
