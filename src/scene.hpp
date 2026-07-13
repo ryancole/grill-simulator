@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <vector>
 
+struct LevelDef;
+
 // One placement of one model. The renderer draws every primitive of `model`
 // under `transform`, and the scene never says anything about how the model is
 // built -- a glTF from disk and the unit cube built in code place identically.
@@ -52,10 +54,13 @@ struct DynamicBody {
     float knock_rating = 1.0f;
 };
 
-// A backyard: a grill loaded from glTF, and everything else still a box.
+// The runtime side of a level: it takes a LevelDef (pure data -- see level.hpp)
+// and builds the GPU models, draw instances, static colliders and dynamic bodies
+// the rest of the game reads. The level says what stands where; the Scene is what
+// that turns into once models are loaded and colliders are cut.
 class Scene {
 public:
-    Scene();
+    explicit Scene(const LevelDef& level);
 
     const std::vector<Model>& Models() const { return models_; }
     const std::vector<MeshInstance>& Instances() const { return instances_; }
@@ -98,8 +103,6 @@ private:
     // where the body spawns, and `mass` sets how heavy it is to shove.
     void AddDynamicInstance(std::uint32_t model, DirectX::FXMMATRIX transform,
                             DirectX::XMFLOAT3 tint, float mass, float knock_rating);
-    void AddBox(DirectX::XMFLOAT3 center, DirectX::XMFLOAT3 size, float yaw_degrees,
-                DirectX::XMFLOAT3 color, float checker = 0.0f);
 
     std::vector<Model> models_;
     std::vector<MeshInstance> instances_;

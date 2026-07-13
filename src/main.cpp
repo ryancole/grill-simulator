@@ -3,6 +3,7 @@
 #include "dx_common.hpp"
 #include "furniture.hpp"
 #include "input.hpp"
+#include "level.hpp"
 #include "physics.hpp"
 #include "props.hpp"
 #include "renderer.hpp"
@@ -30,7 +31,7 @@ constexpr float kMaxFrameSeconds = 0.1f;
 // declaration order, and the arms are drawn as instances of the scene's cube.
 struct Game {
     Renderer renderer;
-    Scene scene;
+    Scene scene{levels::Backyard()};
     // Physics comes up before anything that will register bodies with it (the
     // props and, later, the player controller), and tears down after them.
     Physics physics;

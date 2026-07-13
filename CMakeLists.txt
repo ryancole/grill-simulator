@@ -38,6 +38,7 @@ add_executable(grill WIN32
   src/collision.cpp
   src/image.cpp
   src/input.cpp
+  src/level.cpp
   src/model.cpp
   src/scene.cpp
   src/physics.cpp
