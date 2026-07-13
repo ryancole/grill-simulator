@@ -16,6 +16,11 @@ constexpr XMFLOAT3 kGrass{0.24f, 0.36f, 0.18f};
 constexpr XMFLOAT3 kConcrete{0.55f, 0.54f, 0.51f};
 constexpr XMFLOAT3 kFenceWood{0.45f, 0.32f, 0.21f};
 
+// The rooftop's palette: a darker weathered deck than the patio slab, and a paler
+// rendered (plastered) parapet around its edge.
+constexpr XMFLOAT3 kDeck{0.38f, 0.37f, 0.36f};
+constexpr XMFLOAT3 kParapet{0.62f, 0.60f, 0.57f};
+
 } // namespace
 
 namespace levels {
@@ -110,6 +115,54 @@ LevelDef Backyard() {
                  XMMatrixRotationY(XMConvertToRadians(-15.0f)) *
                  XMMatrixTranslation(8.5f, 0.0f, -6.0f),
              kWhite),
+    };
+
+    return level;
+}
+
+LevelDef Rooftop() {
+    LevelDef level;
+    level.name = "Rooftop";
+
+    // The player starts against the west parapet looking east (+X) across the deck,
+    // with the grill dead ahead -- a different entrance and heading from the
+    // backyard's south-facing spawn, which is the point of carrying these in data.
+    level.player_spawn = {-7.5f, 0.0f, 0.0f};
+    level.player_facing = 90.0f;
+
+    // A low sun swung round to the west, so the props throw long shadows east across
+    // the deck rather than the backyard's short ones. The gradient sky does not read
+    // this, so nothing else has to change for the light to fall differently.
+    level.sun_direction = {-0.55f, 0.45f, 0.15f};
+
+    level.placements = {
+        // The deck: one concrete slab, checkered like the patio but darker.
+        Box({0.0f, -0.15f, 0.0f}, {18.0f, 0.3f, 18.0f}, 0.0f, kDeck, 1.5f),
+
+        // A knee-high parapet around the roof's edge, overlapping at the corners.
+        Box({0.0f, 0.6f, 9.0f}, {18.5f, 1.2f, 0.3f}, 0.0f, kParapet),
+        Box({0.0f, 0.6f, -9.0f}, {18.5f, 1.2f, 0.3f}, 0.0f, kParapet),
+        Box({9.0f, 0.6f, 0.0f}, {0.3f, 1.2f, 18.5f}, 0.0f, kParapet),
+        Box({-9.0f, 0.6f, 0.0f}, {0.3f, 1.2f, 18.5f}, 0.0f, kParapet),
+
+        // Grill dead ahead of the spawn, cooler off to one side -- both still the
+        // knock-over-able dynamic bodies, with the same weights and ratings.
+        DynamicProp("grill-basic.glb", XMMatrixTranslation(1.5f, 0.0f, 0.0f), 12.0f, 8.0f, kWhite),
+        DynamicProp("cooler-basic.glb", XMMatrixTranslation(3.8f, 0.0f, -2.6f), 14.0f, 7.0f, kWhite),
+
+        // A bench along the north parapet, turned to face back into the deck.
+        Prop("bench-basic.glb",
+             XMMatrixRotationY(XMConvertToRadians(180.0f)) * XMMatrixTranslation(-1.0f, 0.0f, 7.4f),
+             kWhite),
+
+        // Crates: a stack in the far corner and one set loose near the south wall.
+        Prop("crate.glb", XMMatrixTranslation(6.0f, 0.0f, 5.0f), kWhite),
+        Prop("crate.glb",
+             XMMatrixScaling(0.875f, 0.875f, 0.875f) *
+                 XMMatrixRotationY(XMConvertToRadians(20.0f)) *
+                 XMMatrixTranslation(6.0f, 0.8f, 5.0f),
+             kWhite),
+        Prop("crate.glb", XMMatrixTranslation(5.5f, 0.0f, -5.0f), kWhite),
     };
 
     return level;

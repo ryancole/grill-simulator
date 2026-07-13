@@ -1,5 +1,6 @@
 #include "world.hpp"
 
+#include "level.hpp"
 #include "physics.hpp"
 #include "renderer.hpp"
 
@@ -12,9 +13,11 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
       furniture_(scene_, physics),
       renderer_(&renderer),
       physics_(&physics) {
-    // Hand the freshly built Scene to the persistent systems: the renderer uploads
-    // its geometry, and the immovable colliders become static actors in the physics
-    // scene the props and furniture already registered their bodies with.
+    // Hand the freshly built Scene to the persistent systems. Aim the sun first, so
+    // the reflection probe LoadScene captures is lit the level's way; then upload
+    // the geometry, and drop the immovable colliders into the physics scene the
+    // props and furniture already registered their bodies with.
+    renderer.SetSunDirection(level.sun_direction);
     renderer.LoadScene(scene_);
     physics.AddStaticWorld(scene_.Colliders());
 }

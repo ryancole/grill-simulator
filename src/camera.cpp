@@ -186,18 +186,16 @@ Camera::~Camera() {
     delete static_cast<ControllerHitReport*>(report_);
 }
 
-void Camera::Respawn() {
-    yaw_ = 0.0f;
+void Camera::Respawn(XMFLOAT3 foot, float facing_degrees) {
+    yaw_ = XMConvertToRadians(facing_degrees);
     pitch_ = 0.0f;
     velocity_ = {0.0f, 0.0f};
     vertical_speed_ = 0.0f;
     grounded_ = true;
-    // The same eye the camera spawns at (see position_'s initialiser). The foot is
-    // an eye-height below it; setFootPosition places the capsule's underside, and
-    // the controller carries the eye back up on the next Update.
-    position_ = {0.0f, kEyeHeight, -7.0f};
-    controller_->setFootPosition(
-        PxExtendedVec3(position_.x, position_.y - kEyeHeight, position_.z));
+    // The eye rides an eye-height above the feet; setFootPosition places the
+    // capsule's underside, and the controller carries the eye back up next Update.
+    position_ = {foot.x, foot.y + kEyeHeight, foot.z};
+    controller_->setFootPosition(PxExtendedVec3(foot.x, foot.y, foot.z));
 }
 
 void Camera::Look(float dx, float dy) {

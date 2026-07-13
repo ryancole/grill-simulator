@@ -29,12 +29,26 @@ struct Placement {
     float knock_rating = 1.0f;
 };
 
-// Everything that makes one level its own place: a name and the things standing
-// in it. Deliberately just data returned by a function (levels::Backyard) rather
-// than parsed from a file -- the struct is the schema, and it can be serialised
-// later once a second and third level have stopped reshaping it.
+// Everything that makes one level its own place: a name, where the player starts,
+// which way the sun falls, and the things standing in it. Deliberately just data
+// returned by a function (levels::Backyard) rather than parsed from a file -- the
+// struct is the schema, and it can be serialised later once the levels have stopped
+// reshaping it.
 struct LevelDef {
     std::string name;
+
+    // Where the player's feet start, on the ground (y is the standing height, 0 on
+    // a flat yard). The camera adds eye height and drops the capsule here on load.
+    DirectX::XMFLOAT3 player_spawn{0.0f, 0.0f, -7.0f};
+    // Which way the player faces at spawn, in degrees: 0 looks north (+Z), the way
+    // the backyard's grill sits from its south-end spawn.
+    float player_facing = 0.0f;
+
+    // The unit vector pointing at the sun, in world space. Drives the shadow map's
+    // direction and the scene's direct light; the gradient sky ignores it, so a
+    // level can re-angle the sun with no other change. Normalised on use.
+    DirectX::XMFLOAT3 sun_direction{0.35f, 0.78f, -0.5f};
+
     std::vector<Placement> placements;
 };
 
@@ -53,5 +67,11 @@ Placement DynamicProp(std::string model, DirectX::FXMMATRIX transform, float mas
 // data. Building a Scene from it is identical to what the old constructor did by
 // hand.
 LevelDef Backyard();
+
+// A concrete rooftop deck: the same props rearranged on a walled slab, no grass or
+// trees, with the sun swung low from the west. The second level, and the proof
+// that switching levels works on genuinely different content -- different ground,
+// layout, spawn and sun.
+LevelDef Rooftop();
 
 } // namespace levels

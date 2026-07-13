@@ -14,6 +14,7 @@
 #include <DirectXMath.h>
 
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <optional>
 
@@ -159,7 +160,7 @@ int Run(HINSTANCE instance, int show_command) {
     AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
 
     HWND hwnd = CreateWindowExW(0, kWindowClass,
-                                L"Grill Simulator - click to look, WASD to walk, E to grab",
+                                L"Grill Simulator - WASD walk, E grab, 1/2 levels, R reload",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                 bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr,
                                 nullptr, instance, &game);
@@ -171,16 +172,24 @@ int Run(HINSTANCE instance, int show_command) {
     // The device and pipelines first -- the session's, independent of any level.
     game.renderer.Initialize(hwnd, kDefaultWidth, kDefaultHeight);
 
-    // Loads a level: unloads whatever is current (handing its GPU geometry and
-    // physics actors back), builds the new one, and drops the player at its spawn.
-    // The renderer uploads the scene and the static colliders become PhysX actors
-    // inside the World constructor, so a swap is just this.
-    auto load_level = [&game](const LevelDef& level) {
+    // The levels the player switches between, in the order the number keys select
+    // them. Each is a factory, so every (re)load builds a fresh copy -- a level that
+    // was knocked about is restored, not resumed.
+    const std::array<LevelDef (*)(), 2> levels_table = {&levels::Backyard, &levels::Rooftop};
+    int current_level = 0;
+
+    // Loads a level by index: unloads whatever is current (handing its GPU geometry
+    // and physics actors back), builds the new one, and drops the player at its
+    // spawn facing its way. The renderer uploads the scene, aims the sun and the
+    // static colliders become PhysX actors inside the World constructor.
+    auto load_level = [&](int index) {
+        current_level = index;
+        const LevelDef level = levels_table[index]();
         game.world.reset();
         game.world.emplace(level, game.renderer, game.physics);
-        game.camera.Respawn();
+        game.camera.Respawn(level.player_spawn, level.player_facing);
     };
-    load_level(levels::Backyard());
+    load_level(0);
 
     ShowWindow(hwnd, show_command);
 
@@ -189,11 +198,18 @@ int Run(HINSTANCE instance, int show_command) {
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&previous);
 
-    // R reloads the current level: proves the whole load/unload path (renderer
-    // geometry, physics actors, props and furniture) tears down and rebuilds cleanly
-    // before there is a second level to switch to. Edge-triggered so a held key
-    // reloads once, not every frame.
-    bool reload_was_down = false;
+    // Level controls, all edge-triggered so a held key fires once: 1 and 2 switch to
+    // the backyard and the rooftop, R reloads whatever is current (restoring a level
+    // knocked about in play). `edge` reads a key and reports the frame it goes down.
+    bool key1_was = false;
+    bool key2_was = false;
+    bool keyr_was = false;
+    auto edge = [&game](int vk, bool& was) {
+        const bool down = game.input.IsKeyDown(vk);
+        const bool went_down = down && !was;
+        was = down;
+        return went_down;
+    };
 
     MSG message{};
     while (message.message != WM_QUIT) {
@@ -213,13 +229,19 @@ int Run(HINSTANCE instance, int show_command) {
                      kMaxFrameSeconds);
         previous = now;
 
-        // Swap the level before anything reads it this frame, so the step and draw
-        // below run entirely on the freshly loaded world.
-        const bool reload_down = game.input.IsKeyDown('R');
-        if (reload_down && !reload_was_down) {
-            load_level(levels::Backyard());
+        // Read all three every frame so each key's state stays current, then act on
+        // at most one. Swapping here, before anything reads the world this frame,
+        // means the step and draw below run entirely on the freshly loaded level.
+        const bool pick_backyard = edge('1', key1_was);
+        const bool pick_rooftop = edge('2', key2_was);
+        const bool reload = edge('R', keyr_was);
+        if (pick_backyard) {
+            load_level(0);
+        } else if (pick_rooftop) {
+            load_level(1);
+        } else if (reload) {
+            load_level(current_level);
         }
-        reload_was_down = reload_down;
 
         // Advance the physics scene on its fixed clock: the props, furniture and the
         // player's controller all move on it. Simulate first, then read poses.
