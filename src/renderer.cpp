@@ -329,6 +329,17 @@ constexpr float kTextHeightFraction = 0.040f;
 // The shadow's offset from the text, in pixels, down and to the right.
 constexpr float kTextShadowPixels = 1.25f;
 
+// The launch menu. A dark neutral backdrop so the warm text reads over it; the
+// title sits in the upper third with the entries stacked below the middle. All
+// sizes are fractions of the back buffer height, matching kTextHeightFraction, so
+// the menu keeps its proportions across resolutions.
+constexpr float kMenuClearColor[] = {0.07f, 0.07f, 0.085f, 1.0f};
+constexpr float kMenuTitleFraction = 0.11f;  // Title glyph height / back buffer.
+constexpr float kMenuEntryFraction = 0.055f; // Entry glyph height / back buffer.
+constexpr float kMenuTitleBaselineFraction = 0.32f;  // Title baseline, from the top.
+constexpr float kMenuFirstEntryBaselineFraction = 0.52f; // First entry's baseline.
+constexpr float kMenuEntrySpacingFactor = 1.8f; // Line pitch, in entry glyph heights.
+
 #ifndef NDEBUG
 constexpr bool kEnableDebugLayer = true;
 #else
@@ -2105,15 +2116,12 @@ void Renderer::CreateTextPipeline() {
     text_vertex_mapped_ = static_cast<std::byte*>(mapped);
 }
 
-void Renderer::DrawText(std::string_view text) {
-    if (text.empty() || width_ == 0 || height_ == 0) {
-        return;
+UINT Renderer::LayoutLine(std::string_view text, float baseline, float pixel, UINT first) {
+    if (text.empty()) {
+        return first;
     }
 
-    const float pixel = static_cast<float>(height_) * kTextHeightFraction;
-
-    // Centre the line: total advance sets the left edge, and the baseline sits a
-    // little above the bottom of the screen.
+    // Centre the line: total advance sets the left edge, then the pen walks right.
     float total_width = 0.0f;
     for (const char c : text) {
         if (const Glyph* glyph = font_.Find(static_cast<unsigned char>(c))) {
@@ -2121,7 +2129,6 @@ void Renderer::DrawText(std::string_view text) {
         }
     }
     float pen_x = (static_cast<float>(width_) - total_width) * 0.5f;
-    const float baseline = static_cast<float>(height_) - pixel * 2.2f;
 
     const float atlas_w = static_cast<float>(atlas_width_);
     const float atlas_h = static_cast<float>(atlas_height_);
@@ -2135,7 +2142,7 @@ void Renderer::DrawText(std::string_view text) {
     auto* vertices = reinterpret_cast<TextVertex*>(text_vertex_mapped_ +
                                                    static_cast<size_t>(frame_index_) *
                                                        kTextRegionBytes);
-    UINT count = 0;
+    UINT count = first;
     for (const char c : text) {
         const Glyph* glyph = font_.Find(static_cast<unsigned char>(c));
         if (glyph == nullptr) {
@@ -2168,38 +2175,120 @@ void Renderer::DrawText(std::string_view text) {
         }
         pen_x += glyph->advance * pixel;
     }
-    if (count == 0) {
-        return;
-    }
+    return count;
+}
 
+void Renderer::BindTextPipeline() {
     command_list_->SetPipelineState(text_pipeline_state_.Get());
     command_list_->SetGraphicsRootSignature(text_root_signature_.Get());
     command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     command_list_->SetGraphicsRootDescriptorTable(1, TextureHandle(atlas_descriptor_));
 
+    // The whole frame region, so a run drawn from any start vertex is in bounds.
     D3D12_VERTEX_BUFFER_VIEW vbv{};
     vbv.BufferLocation = text_vertex_buffer_->GetGPUVirtualAddress() +
                          static_cast<UINT64>(frame_index_) * kTextRegionBytes;
     vbv.StrideInBytes = sizeof(TextVertex);
-    vbv.SizeInBytes = count * sizeof(TextVertex);
+    vbv.SizeInBytes = kTextRegionBytes;
     command_list_->IASetVertexBuffers(0, 1, &vbv);
+}
+
+void Renderer::DrawTextRun(UINT first, UINT count, XMFLOAT4 color) {
+    if (count == 0) {
+        return;
+    }
 
     TextConstants constants{};
     constants.unit_range = {kDistanceRange / static_cast<float>(atlas_width_),
                             kDistanceRange / static_cast<float>(atlas_height_)};
 
     // A soft drop shadow first, nudged down and right, so the text reads over a
-    // bright sky or a dark fence alike; then the text itself over the top.
-    constants.color = {0.0f, 0.0f, 0.0f, 0.75f};
+    // bright sky or a dark fence alike; then the text itself over the top. The
+    // shadow tracks the fill's alpha so a faded line fades its shadow with it.
+    constants.color = {0.0f, 0.0f, 0.0f, 0.75f * color.w};
     constants.ndc_offset = {2.0f * kTextShadowPixels / static_cast<float>(width_),
                             -2.0f * kTextShadowPixels / static_cast<float>(height_)};
     command_list_->SetGraphicsRoot32BitConstants(0, kTextConstantDwords, &constants, 0);
-    command_list_->DrawInstanced(count, 1, 0, 0);
+    command_list_->DrawInstanced(count, 1, first, 0);
 
-    constants.color = {1.0f, 1.0f, 1.0f, 1.0f};
+    constants.color = color;
     constants.ndc_offset = {0.0f, 0.0f};
     command_list_->SetGraphicsRoot32BitConstants(0, kTextConstantDwords, &constants, 0);
-    command_list_->DrawInstanced(count, 1, 0, 0);
+    command_list_->DrawInstanced(count, 1, first, 0);
+}
+
+void Renderer::DrawText(std::string_view text) {
+    if (text.empty() || width_ == 0 || height_ == 0) {
+        return;
+    }
+
+    const float pixel = static_cast<float>(height_) * kTextHeightFraction;
+    // The baseline sits a little above the bottom of the screen.
+    const float baseline = static_cast<float>(height_) - pixel * 2.2f;
+    const UINT count = LayoutLine(text, baseline, pixel, 0);
+    if (count == 0) {
+        return;
+    }
+
+    BindTextPipeline();
+    DrawTextRun(0, count, XMFLOAT4{1.0f, 1.0f, 1.0f, 1.0f});
+}
+
+void Renderer::DrawMenu(std::string_view title, std::span<const std::string> entries,
+                        int selected) {
+    if (width_ == 0 || height_ == 0) {
+        return;
+    }
+
+    const float h = static_cast<float>(height_);
+    const float title_pixel = h * kMenuTitleFraction;
+    const float entry_pixel = h * kMenuEntryFraction;
+    const float spacing = entry_pixel * kMenuEntrySpacingFactor;
+
+    // The warm palette: an amber title, the selected entry the same amber the
+    // pick-up glow uses, and the rest a quiet grey. Locals rather than file
+    // constants so no XMFLOAT4 needs to be constexpr-constructible.
+    const XMFLOAT4 title_color{1.0f, 0.82f, 0.48f, 1.0f};
+    const XMFLOAT4 selected_color{1.0f, 0.78f, 0.35f, 1.0f};
+    const XMFLOAT4 entry_color{0.72f, 0.72f, 0.75f, 1.0f};
+
+    // Pack every line into this frame's text region first, remembering each one's
+    // vertex range and colour, then draw them all -- so the lines do not overwrite
+    // one another in the shared buffer.
+    struct Run {
+        UINT first;
+        UINT count;
+        XMFLOAT4 color;
+    };
+    std::vector<Run> runs;
+    runs.reserve(entries.size() + 1);
+
+    UINT cursor = 0;
+    const UINT title_first = cursor;
+    cursor = LayoutLine(title, h * kMenuTitleBaselineFraction, title_pixel, cursor);
+    runs.push_back({title_first, cursor - title_first, title_color});
+
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const bool is_selected = static_cast<int>(i) == selected;
+        // Carets flank the selected entry so the highlight reads even in a still
+        // screenshot, not only by its colour.
+        const std::string line = is_selected ? "> " + entries[i] + " <" : entries[i];
+        const float baseline =
+            h * kMenuFirstEntryBaselineFraction + static_cast<float>(i) * spacing;
+        const UINT entry_first = cursor;
+        cursor = LayoutLine(line, baseline, entry_pixel, cursor);
+        runs.push_back(
+            {entry_first, cursor - entry_first, is_selected ? selected_color : entry_color});
+    }
+
+    if (cursor == 0) {
+        return;
+    }
+
+    BindTextPipeline();
+    for (const Run& run : runs) {
+        DrawTextRun(run.first, run.count, run.color);
+    }
 }
 
 void Renderer::DrawInstances(std::span<const MeshInstance> instances,
@@ -2592,6 +2681,77 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     ThrowIfFailed(swap_chain_->Present(1, 0), "SwapChain::Present");
 
     MoveToNextFrame();
+}
+
+void Renderer::RenderMenu(std::string_view title, std::span<const std::string> entries,
+                          int selected) {
+    ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
+    ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
+    ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
+
+    // The font atlas SRV lives in the per-level texture heap; the menu text samples
+    // it, so bind that heap. A level is loaded behind the menu (its geometry just is
+    // not drawn), so the heap and the atlas are present.
+    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
+
+    command_list_->RSSetViewports(1, &viewport_);
+    command_list_->RSSetScissorRects(1, &scissor_);
+
+    // Bring the swapchain buffer up as a render target and clear it to the menu
+    // backdrop. The clear overwrites every pixel, so its prior contents are
+    // discarded -- layout UNDEFINED before, with nothing to wait on.
+    TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
+                   D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_ACCESS_NO_ACCESS,
+                   D3D12_BARRIER_LAYOUT_UNDEFINED, D3D12_BARRIER_SYNC_RENDER_TARGET,
+                   D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET);
+
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                            static_cast<INT>(frame_index_), rtv_size_);
+    command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    command_list_->ClearRenderTargetView(rtv, kMenuClearColor, 0, nullptr);
+
+    DrawMenu(title, entries, selected);
+
+    // The frame is complete; hand the swapchain buffer back for presentation.
+    TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
+                   D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                   D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_SYNC_NONE,
+                   D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_LAYOUT_PRESENT);
+
+    ThrowIfFailed(command_list_->Close(), "CommandList::Close");
+
+    ID3D12CommandList* lists[] = {command_list_.Get()};
+    queue_->ExecuteCommandLists(_countof(lists), lists);
+
+    ThrowIfFailed(swap_chain_->Present(1, 0), "SwapChain::Present");
+
+    MoveToNextFrame();
+}
+
+int Renderer::MenuEntryAt(int x, int y, int entry_count) const {
+    if (height_ == 0 || entry_count <= 0) {
+        return -1;
+    }
+    (void)x; // Rows span the full width, so only the vertical position matters.
+
+    const float h = static_cast<float>(height_);
+    const float entry_pixel = h * kMenuEntryFraction;
+    const float spacing = entry_pixel * kMenuEntrySpacingFactor;
+    const float fy = static_cast<float>(y);
+
+    for (int i = 0; i < entry_count; ++i) {
+        const float baseline =
+            h * kMenuFirstEntryBaselineFraction + static_cast<float>(i) * spacing;
+        // The band is centred on the line's visual middle (the baseline sits near
+        // the glyphs' feet) and is one line-pitch tall, so consecutive rows tile
+        // with no gaps between them.
+        const float center = baseline - entry_pixel * 0.3f;
+        if (fy >= center - spacing * 0.5f && fy < center + spacing * 0.5f) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 void Renderer::MoveToNextFrame() {

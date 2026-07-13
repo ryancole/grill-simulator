@@ -30,6 +30,12 @@ enum class Action {
     ReloadLevel,
     SelectLevel1,
     SelectLevel2,
+    // Menu navigation, read only while the launch/pause menu is up. They share
+    // keys with movement (Up/W, Down/S, Enter/Space) with no conflict, since the
+    // menu and the gameplay walk are never read on the same frame.
+    MenuUp,
+    MenuDown,
+    MenuConfirm,
     Count,
 };
 

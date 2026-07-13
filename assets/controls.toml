@@ -27,3 +27,9 @@ interact     = "E"
 reload_level   = "R"
 select_level_1 = "1"
 select_level_2 = "2"
+
+# Menu navigation (the launch screen, and later the pause menu). Bound to both the
+# arrow keys and the movement keys so either hand can drive the list.
+menu_up      = ["Up", "W"]
+menu_down    = ["Down", "S"]
+menu_confirm = ["Enter", "Space"]

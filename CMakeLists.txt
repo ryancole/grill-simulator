@@ -44,6 +44,7 @@ add_executable(grill WIN32
   src/image.cpp
   src/input.cpp
   src/level.cpp
+  src/menu.cpp
   src/model.cpp
   src/scene.cpp
   src/physics.cpp

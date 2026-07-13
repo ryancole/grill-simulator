@@ -15,6 +15,18 @@ public:
     void OnKey(WPARAM key, bool down);
     void OnRawInput(const RAWINPUT& raw);
 
+    // A left-button click awaiting a reader. WM_LBUTTONDOWN records it while the
+    // menu is up; the menu reads it (ConsumeLeftClick) to confirm the hovered entry.
+    // Kept apart from mouse-look so a click means "confirm" on the menu and "capture
+    // the cursor" in play.
+    void OnLeftButtonDown() { left_click_pending_ = true; }
+    // Whether a left click has arrived since the last call; clears it.
+    bool ConsumeLeftClick() {
+        const bool clicked = left_click_pending_;
+        left_click_pending_ = false;
+        return clicked;
+    }
+
     bool IsKeyDown(int virtual_key) const;
     // Forgets every held key. Keyups are not delivered while the window is in
     // the background, so without this the player keeps walking after Alt+Tab.
@@ -44,4 +56,7 @@ private:
     bool has_absolute_ = false;
 
     bool mouse_look_ = false;
+
+    // Set on a left-button press, cleared when the menu consumes it.
+    bool left_click_pending_ = false;
 };

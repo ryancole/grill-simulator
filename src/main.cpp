@@ -5,6 +5,7 @@
 #include "furniture.hpp"
 #include "input.hpp"
 #include "level.hpp"
+#include "menu.hpp"
 #include "physics.hpp"
 #include "props.hpp"
 #include "renderer.hpp"
@@ -18,6 +19,9 @@
 #include <array>
 #include <fstream>
 #include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 using namespace DirectX;
 
@@ -48,6 +52,12 @@ struct Game {
     // actions, loaded from controls.toml in Run before the loop starts.
     Actions actions;
     Audio audio;
+
+    // The top-level mode. Launches into the menu; a level is loaded behind it (for
+    // the font atlas the menu draws with, and so play can start the instant an entry
+    // is chosen). WindowProc reads and flips this on Escape, so it lives here rather
+    // than as a Run local.
+    GameState state = GameState::Menu;
 
     // The current level. Empty until the first is loaded, and reset() then re-emplaced
     // to switch. Destroying it hands the level's renderer geometry and physics actors
@@ -112,14 +122,22 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
     case WM_LBUTTONDOWN:
-        game->input.SetMouseLook(hwnd, true);
+        if (game->state == GameState::Playing) {
+            // In play a click captures the cursor for mouse-look.
+            game->input.SetMouseLook(hwnd, true);
+        } else {
+            // On the menu the cursor stays free; the click confirms whatever entry
+            // it lands on, which the menu loop resolves and acts on.
+            game->input.OnLeftButtonDown();
+        }
         return 0;
     case WM_KEYDOWN:
         if (wparam == VK_ESCAPE) {
-            // Escape backs out one level: first it frees the cursor, then it
-            // closes the game.
-            if (game->input.mouse_look()) {
+            // Escape backs out one level. In play it drops the mouse look and raises
+            // the menu; from the menu -- already the top level -- it closes the game.
+            if (game->state == GameState::Playing) {
                 game->input.SetMouseLook(hwnd, false);
+                game->state = GameState::Menu;
             } else {
                 PostMessageW(hwnd, WM_CLOSE, 0, 0);
             }
@@ -180,6 +198,8 @@ int Run(HINSTANCE instance, int show_command) {
     // assets/levels, in the order the number keys select them. Loading is by file so
     // a level is a text edit, not a rebuild.
     const std::array<const char*, 2> level_files = {"backyard.level", "rooftop.level"};
+    // The names the menu shows for each level, parallel to level_files.
+    const std::array<const char*, 2> level_names = {"Backyard", "Rooftop"};
     const std::filesystem::path levels_dir = ExecutableDirectory() / "assets" / "levels";
     int current_level = 0;
 
@@ -201,9 +221,28 @@ int Run(HINSTANCE instance, int show_command) {
         game.world.emplace(level, game.renderer, game.physics);
         game.camera.Respawn(level.player_spawn, level.player_facing);
     };
+    // A level is loaded at startup even though the game launches into the menu: the
+    // menu draws with the font atlas that rides a level's upload, and having one
+    // resident means play begins the instant an entry is chosen.
     load_level(0);
 
+    // The launch menu: one entry per level, in level_files order, then Exit. So a
+    // chosen index below is either a level to load or -- at exit_entry, the entry
+    // just past the last level -- the signal to close the game.
+    std::vector<std::string> menu_entries;
+    for (const char* name : level_names) {
+        menu_entries.emplace_back(name);
+    }
+    menu_entries.emplace_back("Exit");
+    const int exit_entry = static_cast<int>(level_names.size());
+    Menu menu(std::move(menu_entries));
+
     ShowWindow(hwnd, show_command);
+
+    // The cursor's client position last frame, so the menu applies a hover only when
+    // the mouse actually moves -- a resting mouse must not override the keyboard's
+    // selection. Starts off-screen so the first real position counts as a move.
+    POINT last_cursor{-1, -1};
 
     LARGE_INTEGER frequency{};
     LARGE_INTEGER previous{};
@@ -233,6 +272,60 @@ int Run(HINSTANCE instance, int show_command) {
         // and the grab further down -- sees the same snapshot and the edge queries
         // fire exactly once per press.
         game.actions.Update(game.input);
+
+        // The menu owns the whole frame while it is up: navigate the list (by mouse
+        // or keyboard), act on a confirm, and draw it. The world behind is neither
+        // stepped nor drawn, so nothing below this block runs until play resumes.
+        if (game.state == GameState::Menu) {
+            const int entry_count = static_cast<int>(menu.entries().size());
+            bool confirm = false;
+
+            // Mouse: hovering an entry highlights it, but only when the cursor
+            // actually moves, so a resting mouse does not fight the keyboard. A left
+            // click confirms whichever entry it lands on; a click on empty space is
+            // consumed and ignored.
+            POINT cursor{};
+            if (GetCursorPos(&cursor) && ScreenToClient(hwnd, &cursor)) {
+                const int hovered = game.renderer.MenuEntryAt(cursor.x, cursor.y, entry_count);
+                if (hovered >= 0 && (cursor.x != last_cursor.x || cursor.y != last_cursor.y)) {
+                    menu.SetSelected(hovered);
+                }
+                last_cursor = cursor;
+                if (game.input.ConsumeLeftClick() && hovered >= 0) {
+                    menu.SetSelected(hovered);
+                    confirm = true;
+                }
+            } else {
+                game.input.ConsumeLeftClick(); // Clear a click we cannot place.
+            }
+
+            // Keyboard: arrows/WS move the highlight, Enter/Space confirms.
+            if (game.actions.WasPressed(Action::MenuUp)) {
+                menu.MoveUp();
+            }
+            if (game.actions.WasPressed(Action::MenuDown)) {
+                menu.MoveDown();
+            }
+            if (game.actions.WasPressed(Action::MenuConfirm)) {
+                confirm = true;
+            }
+
+            if (confirm) {
+                const int choice = menu.selected();
+                if (choice == exit_entry) {
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                } else {
+                    // Load the chosen level (re-reading its file) and drop into play.
+                    // The switch takes effect next frame; this one still draws the
+                    // menu, which is identical, so the hand-off is invisible.
+                    load_level(choice);
+                    game.state = GameState::Playing;
+                }
+            }
+
+            game.renderer.RenderMenu("GRILL SIMULATOR", menu.entries(), menu.selected());
+            continue;
+        }
 
         // The level controls are all edge-triggered so a held key fires once: 1 and 2
         // switch to the backyard and the rooftop, R reloads whatever is current

@@ -38,6 +38,9 @@ constexpr ActionSpec kSpecs[] = {
     {Action::ReloadLevel, "reload_level", "R"},
     {Action::SelectLevel1, "select_level_1", "1"},
     {Action::SelectLevel2, "select_level_2", "2"},
+    {Action::MenuUp, "menu_up", "Up"},
+    {Action::MenuDown, "menu_down", "Down"},
+    {Action::MenuConfirm, "menu_confirm", "Enter"},
 };
 
 // Every action must carry a spec, or its binding would never be seeded. Guards
