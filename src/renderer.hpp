@@ -127,6 +127,11 @@ private:
     // signature (an exposure constant and the HDR buffer's SRV) and a PSO with depth
     // off, targeting the back buffer.
     void CreateTonemapPipeline();
+    // The volumetric sun-shaft pass: a fullscreen pixel shader that marches the sun's
+    // shadow map along each view ray and adds the scattered light into the HDR buffer
+    // before the resolve. Its own root signature (the camera and light matrices, the
+    // sun, and the depth + shadow SRVs) and an additively blended PSO.
+    void CreateLightShaftPipeline();
     // Uploads every model the scene holds, plus the 1x1 white texture that
     // stands in for a material with no texture of its own.
     void CreateSceneGeometry(const Scene& scene);
@@ -179,9 +184,10 @@ private:
     // rendered afterward paints over it. Switches to the sky pipeline and root
     // signature; the caller restores whatever it needs next.
     // `capture` picks the pixel shader: the on-screen pass leaves its radiance
-    // linear for the HDR buffer, the probe capture encodes to sRGB for the 8-bit cube.
+    // linear for the HDR buffer, the probe capture encodes to sRGB for the 8-bit
+    // cube. `time` drifts the cloud layer; the capture passes 0 for a still probe.
     void DrawSky(const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
-                 bool capture);
+                 float time, bool capture);
 
     // The shadow pass: draws every caster depth-only into the shadow map from the
     // sun's point of view, wrapped in the barriers that flip the map between
@@ -253,6 +259,11 @@ private:
     // from SV_VertexID).
     ComPtr<ID3D12RootSignature> tonemap_root_signature_;
     ComPtr<ID3D12PipelineState> tonemap_pipeline_state_;
+
+    // The volumetric sun-shaft pass, additively blended into the HDR buffer. Reads
+    // the scene depth and shadow map from engine_heap_ slots 1 and 2.
+    ComPtr<ID3D12RootSignature> light_shaft_root_signature_;
+    ComPtr<ID3D12PipelineState> light_shaft_pipeline_state_;
 
     // The reflection probe. `scene_capture_pipeline_state_` is the scene PSO with
     // the capture pixel shader (analytic sky, no cube read); it fills probe_cube_

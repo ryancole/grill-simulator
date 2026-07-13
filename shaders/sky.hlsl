@@ -8,7 +8,9 @@ cbuffer SkyConstants : register(b0) {
     // Clip space back to world: the inverse of the camera's view-projection.
     row_major float4x4 g_inv_view_projection;
     float3 g_camera_position;
-    float g_pad0;
+    // Seconds since the renderer came up, so the cloud layer drifts. The probe
+    // capture passes 0, baking a still cloudscape into the static reflection.
+    float g_time;
 };
 
 struct VSOutput {
@@ -37,7 +39,7 @@ float3 SkyRadiance(VSOutput input) {
     float4 world = mul(float4(input.clip, 1.0f, 1.0f), g_inv_view_projection);
     world /= world.w;
     const float3 dir = normalize(world.xyz - g_camera_position);
-    return SampleSky(dir);
+    return SampleSky(dir, g_time);
 }
 
 // The on-screen background: into the linear HDR scene buffer, so no encode here --

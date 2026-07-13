@@ -15,7 +15,12 @@ using namespace DirectX;
 namespace {
 
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+// The scene depth buffer is typeless so it can be read two ways, exactly as the
+// shadow map is: a D32 depth view to render into, and an R32_FLOAT resource view
+// the light-shaft pass samples to know how far to march each view ray.
+constexpr DXGI_FORMAT kDepthResourceFormat = DXGI_FORMAT_R32_TYPELESS;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
+constexpr DXGI_FORMAT kDepthSrvFormat = DXGI_FORMAT_R32_FLOAT;
 
 // The HDR scene buffer the whole world renders into, in linear light: a 16-bit
 // float per channel, enough range to hold values above 1 for the tonemapper to
@@ -25,10 +30,14 @@ constexpr DXGI_FORMAT kHdrFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 // rtv_heap_, so that heap holds one more descriptor than there are frames.
 constexpr UINT kHdrRtvIndex = Renderer::kFrameCount;
 
-// The persistent engine SRV heap and the HDR buffer's slot in it. Sized past the
-// one slot in use so the post-process buffers to come need no reallocation.
+// The persistent engine SRV heap and its slots. Sized past what is in use so the
+// post-process buffers to come need no reallocation. Slot 0 is the HDR buffer the
+// tonemap reads; 1 and 2 are the scene depth and a plain (non-comparison) view of
+// the shadow map, the two the light-shaft pass marches.
 constexpr UINT kEngineHeapSize = 8;
 constexpr UINT kHdrSrvIndex = 0;
+constexpr UINT kDepthSrvIndex = 1;
+constexpr UINT kShaftShadowSrvIndex = 2;
 
 // The sky the fog fades into, so the horizon has no seam.
 constexpr float kSkyColor[] = {0.52f, 0.62f, 0.76f, 1.0f};
@@ -106,7 +115,8 @@ constexpr UINT kShadowConstantDwords = sizeof(ShadowConstants) / sizeof(UINT);
 struct SkyConstants {
     XMFLOAT4X4 inv_view_projection;
     XMFLOAT3 camera_position;
-    float pad0;
+    // Seconds since start-up, drifting the cloud layer. Mirrors g_time in sky.hlsl.
+    float time;
 };
 
 static_assert(sizeof(SkyConstants) % sizeof(UINT) == 0);
@@ -119,8 +129,28 @@ constexpr UINT kSkyConstantDwords = sizeof(SkyConstants) / sizeof(UINT);
 struct FrameConstants {
     XMFLOAT4X4 light_view_projection;
     XMFLOAT3 camera_position;
-    float pad0;
+    // Seconds since start-up, drifting the cloud the fog fades into. Mirrors g_time
+    // in scene.hlsl.
+    float time;
 };
+
+// Mirrors the LightShaftConstants cbuffer in shaders/lightshafts.hlsl: the inverse
+// view-projection that rebuilds a pixel's world point from depth, the sun's view-
+// projection the march samples the shadow map through, the eye, and the sun. Each
+// float3 opens a fresh cbuffer row, so a pad DWORD follows it, matching the HLSL.
+struct LightShaftConstants {
+    XMFLOAT4X4 inv_view_projection;
+    XMFLOAT4X4 light_view_projection;
+    XMFLOAT3 camera_position;
+    float pad0;
+    XMFLOAT3 sun_direction;
+    float pad1;
+};
+
+static_assert(sizeof(LightShaftConstants) % sizeof(UINT) == 0);
+constexpr UINT kLightShaftConstantDwords = sizeof(LightShaftConstants) / sizeof(UINT);
+static_assert(kLightShaftConstantDwords + 1 <= 64,
+              "A root signature holds at most 64 DWORDs in total");
 
 // Mirrors the OutlineConstants cbuffer in shaders/outline.hlsl. The view-
 // projection stands alone because the mesh is grown in world space before it is
@@ -311,8 +341,10 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     CreateCommandObjects();
     CreateSwapChain(hwnd, width, height);
     CreateRenderTargetViews();
-    CreateDepthBuffer();
+    // The engine heap holds the session-level SRVs the depth buffer, HDR target and
+    // shadow map each place into it below, so it comes up before any of them.
     CreateEngineDescriptorHeap();
+    CreateDepthBuffer();
     CreateHdrTarget();
     CreateShadowMap();
     CreatePipeline();
@@ -321,6 +353,7 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     CreateShadowPipeline();
     CreateTextPipeline();
     CreateTonemapPipeline();
+    CreateLightShaftPipeline();
 
     // Everything above is the session's, not the level's. The scene geometry, the
     // font atlas and the reflection probe come up in LoadScene, so a level can be
@@ -504,11 +537,12 @@ void Renderer::CreateDepthBuffer() {
 
     const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
     const CD3DX12_RESOURCE_DESC1 desc = CD3DX12_RESOURCE_DESC1::Tex2D(
-        kDepthFormat, width_, height_, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-    // Born a depth target and never anything else -- it is written every frame and
-    // never sampled -- so it stays in this layout for life and takes no barrier.
+        kDepthResourceFormat, width_, height_, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    // Born a shader resource, the layout it rests in between frames: Render flips it
+    // to a depth target for the world pass and back to a shader resource for the
+    // light-shaft pass, which samples it to stop each marched ray at the surface.
     ThrowIfFailed(device_->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, &clear,
+                                                    D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, &clear,
                                                     nullptr, 0, nullptr,
                                                     IID_PPV_ARGS(&depth_stencil_)),
                   "CreateCommittedResource3(depth buffer)");
@@ -520,6 +554,17 @@ void Renderer::CreateDepthBuffer() {
     // CreateShadowMap and untouched by a resize.
     device_->CreateDepthStencilView(depth_stencil_.Get(), &dsv,
                                     dsv_heap_->GetCPUDescriptorHandleForHeapStart());
+
+    // The R32 resource view the light-shaft pass samples, in the persistent engine
+    // heap alongside the HDR buffer. Rewritten here on resize, since the resource is.
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = kDepthSrvFormat;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                               static_cast<INT>(kDepthSrvIndex), engine_heap_size_);
+    device_->CreateShaderResourceView(depth_stencil_.Get(), &srv, handle);
 }
 
 void Renderer::CreateEngineDescriptorHeap() {
@@ -600,6 +645,20 @@ void Renderer::CreateShadowMap() {
     const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(dsv_heap_->GetCPUDescriptorHandleForHeapStart(),
                                                static_cast<INT>(kShadowDsvIndex), dsv_size_);
     device_->CreateDepthStencilView(shadow_map_.Get(), &dsv, handle);
+
+    // A plain (non-comparison) R32 view of the map in the persistent engine heap,
+    // for the light-shaft pass to sample and compare by hand. The scene pass keeps
+    // its own comparison-sampled view in the per-level texture heap; both look at
+    // this one resource. Written once -- the map is fixed size and survives a resize.
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = kShadowSrvFormat;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE shaft_handle(
+        engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+        static_cast<INT>(kShaftShadowSrvIndex), engine_heap_size_);
+    device_->CreateShaderResourceView(shadow_map_.Get(), &srv, shaft_handle);
 
     // The shadow pass rasterizes the whole map every frame.
     shadow_viewport_ = CD3DX12_VIEWPORT(0.0f, 0.0f, static_cast<float>(kShadowMapSize),
@@ -804,7 +863,8 @@ void Renderer::CreateSkyPipeline() {
         "CreateGraphicsPipelineState(sky capture)");
 }
 
-void Renderer::DrawSky(const XMMATRIX& view_projection, XMFLOAT3 camera_position, bool capture) {
+void Renderer::DrawSky(const XMMATRIX& view_projection, XMFLOAT3 camera_position, float time,
+                       bool capture) {
     // The capture variant encodes to sRGB for the 8-bit probe cube; the on-screen
     // one leaves its radiance linear for the HDR buffer.
     command_list_->SetPipelineState(
@@ -816,6 +876,7 @@ void Renderer::DrawSky(const XMMATRIX& view_projection, XMFLOAT3 camera_position
     SkyConstants constants{};
     XMStoreFloat4x4(&constants.inv_view_projection, XMMatrixInverse(nullptr, view_projection));
     constants.camera_position = camera_position;
+    constants.time = time;
     command_list_->SetGraphicsRoot32BitConstants(0, kSkyConstantDwords, &constants, 0);
 
     // Three vertices, no buffer: the vertex shader builds the triangle from the id.
@@ -980,6 +1041,89 @@ void Renderer::CreateTonemapPipeline() {
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&tonemap_pipeline_state_)),
                   "CreateGraphicsPipelineState(tonemap)");
+}
+
+void Renderer::CreateLightShaftPipeline() {
+    // b0: the camera and light matrices, the eye and the sun, as root constants.
+    // t0, t1: the scene depth and the shadow map, one two-entry table into the
+    // engine heap. s0: a point clamp sampler -- the march reads raw stored depths,
+    // so there is nothing to filter.
+    const CD3DX12_DESCRIPTOR_RANGE srv_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
+
+    CD3DX12_ROOT_PARAMETER parameters[2];
+    parameters[0].InitAsConstants(kLightShaftConstantDwords, 0);
+    parameters[1].InitAsDescriptorTable(1, &srv_range, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_POINT,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    root_desc.Init(_countof(parameters), parameters, 1, &sampler,
+                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr =
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr)) {
+        std::string message = error
+                                  ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                                error->GetBufferSize())
+                                  : "unknown error";
+        throw std::runtime_error("D3D12SerializeRootSignature(light shafts) failed: " + message);
+    }
+    ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                               signature->GetBufferSize(),
+                                               IID_PPV_ARGS(&light_shaft_root_signature_)),
+                  "CreateRootSignature(light shafts)");
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "lightshafts.vs.cso");
+    const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "lightshafts.ps.cso");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    // No input layout: the fullscreen triangle comes from SV_VertexID.
+    pso.InputLayout = {nullptr, 0};
+    pso.pRootSignature = light_shaft_root_signature_.Get();
+    pso.VS = {vs.data(), vs.size()};
+    pso.PS = {ps.data(), ps.size()};
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+    // Additive: the scattered light is added onto the HDR scene, never covering it.
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    D3D12_RENDER_TARGET_BLEND_DESC& blend = pso.BlendState.RenderTarget[0];
+    blend.BlendEnable = TRUE;
+    blend.SrcBlend = D3D12_BLEND_ONE;
+    blend.DestBlend = D3D12_BLEND_ONE;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ZERO;
+    blend.DestBlendAlpha = D3D12_BLEND_ONE;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    // No depth at all: the pass adds light over the whole frame, and the scene depth
+    // it needs is bound as a shader resource here, not a depth target.
+    pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    // Into the HDR scene buffer, before the resolve.
+    pso.RTVFormats[0] = kHdrFormat;
+    pso.SampleDesc.Count = 1;
+
+    ThrowIfFailed(
+        device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&light_shaft_pipeline_state_)),
+        "CreateGraphicsPipelineState(light shafts)");
 }
 
 void Renderer::UpdateShadowProjection() {
@@ -1523,7 +1667,8 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
         command_list_->ClearDepthStencilView(probe_dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
         // The gradient sky behind, then the static yard lit by the analytic sky.
-        DrawSky(view_projection, kProbePosition, true);
+        // Time 0 bakes a still cloudscape into the probe the metals reflect.
+        DrawSky(view_projection, kProbePosition, 0.0f, true);
         command_list_->SetGraphicsRootSignature(root_signature_.Get());
         command_list_->SetPipelineState(scene_capture_pipeline_state_.Get());
         command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1946,6 +2091,12 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
 
+    // Wall-clock seconds since start-up, on one clock for the whole frame: the sky's
+    // drifting clouds, the fog that fades into them, and the outline's pulse all read
+    // from it.
+    const float seconds =
+        std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time_).count();
+
     // Refresh this frame's slice of the frame constants -- the eye moved -- and
     // point the scene pass's CBV at it. Its own region, so the write cannot race
     // the GPU still reading the previous frame's.
@@ -1954,6 +2105,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     FrameConstants frame{};
     frame.light_view_projection = light_view_projection_;
     frame.camera_position = camera_position;
+    frame.time = seconds;
     std::memcpy(frame_region, &frame, sizeof(frame));
     frame_constants_address_ =
         frame_constants_->GetGPUVirtualAddress() +
@@ -1985,6 +2137,13 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                    D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
                    D3D12_BARRIER_LAYOUT_RENDER_TARGET);
 
+    // The depth buffer rests as a shader resource for the light-shaft pass; flip it
+    // to a depth target for the world pass about to write it.
+    TextureBarrier(command_list_.Get(), depth_stencil_.Get(), D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                   D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+                   D3D12_BARRIER_SYNC_DEPTH_STENCIL, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+                   D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE);
+
     const CD3DX12_CPU_DESCRIPTOR_HANDLE hdr_rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
                                                 static_cast<INT>(kHdrRtvIndex), rtv_size_);
     // Slot 0 of the DSV heap: the scene's depth buffer, not the shadow map's.
@@ -1997,7 +2156,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // The gradient sky, filling the frame behind the yard. Depth is off, so the
     // geometry that follows paints over it. DrawSky binds its own pipeline and root
     // signature, so the scene's are restored before the first instance is drawn.
-    DrawSky(view_projection, camera_position, false);
+    DrawSky(view_projection, camera_position, seconds, false);
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
 
@@ -2013,9 +2172,8 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // Paint the glowing halo around the object the player is aiming at. It runs
     // with depth off, so it washes across the object as well as the ground around
     // it; re-painting the object on top afterward leaves only the ring outside
-    // its silhouette, and does so evenly on every side.
-    const float seconds =
-        std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time_).count();
+    // its silhouette, and does so evenly on every side. It pulses on `seconds`,
+    // the same clock the clouds drift on.
     DrawOutlines(highlight, view_projection, seconds);
     if (!highlight.empty()) {
         // DrawOutlines left its own PSO and root signature bound; restore the
@@ -2040,8 +2198,38 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // clipped by the wall the player is facing.
     DrawInstances(held_props, view_projection, viewmodel.sun_direction, 0.0f, true);
 
-    // The world is finished. Flip the HDR buffer to a shader resource for the
-    // tonemap pass: the world's render-target writes must drain before the resolve
+    // The volumetric sun shafts, added into the HDR scene. The world's depth writes
+    // must drain, then the depth buffer becomes a shader resource the march reads to
+    // stop each ray at the surface. It is unbound as a depth target for this pass --
+    // the shafts render into the HDR buffer alone, additively, no depth.
+    TextureBarrier(command_list_.Get(), depth_stencil_.Get(), D3D12_BARRIER_SYNC_DEPTH_STENCIL,
+                   D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+                   D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                   D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+
+    command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, nullptr);
+    // The shaft pass reads the depth and shadow SRVs from the persistent engine heap,
+    // which the tonemap pass below also binds -- so it stays bound through both.
+    ID3D12DescriptorHeap* engine_heaps[] = {engine_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(engine_heaps), engine_heaps);
+    command_list_->SetGraphicsRootSignature(light_shaft_root_signature_.Get());
+    command_list_->SetPipelineState(light_shaft_pipeline_state_.Get());
+
+    LightShaftConstants shaft{};
+    XMStoreFloat4x4(&shaft.inv_view_projection, XMMatrixInverse(nullptr, view_projection));
+    shaft.light_view_projection = light_view_projection_;
+    shaft.camera_position = camera_position;
+    shaft.sun_direction = sun_direction_;
+    command_list_->SetGraphicsRoot32BitConstants(0, kLightShaftConstantDwords, &shaft, 0);
+    const CD3DX12_GPU_DESCRIPTOR_HANDLE shaft_srv(
+        engine_heap_->GetGPUDescriptorHandleForHeapStart(), static_cast<INT>(kDepthSrvIndex),
+        engine_heap_size_);
+    command_list_->SetGraphicsRootDescriptorTable(1, shaft_srv);
+    command_list_->IASetVertexBuffers(0, 0, nullptr);
+    command_list_->DrawInstanced(3, 1, 0, 0);
+
+    // The world and its shafts are finished. Flip the HDR buffer to a shader resource
+    // for the tonemap pass: the render-target writes must drain before the resolve
     // samples it.
     TextureBarrier(command_list_.Get(), hdr_target_.Get(), D3D12_BARRIER_SYNC_RENDER_TARGET,
                    D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
@@ -2062,10 +2250,8 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 
     // The resolve pass: tonemap the HDR scene buffer onto the swapchain. It reads
-    // the buffer's SRV from the persistent engine heap, so bind that heap for the
-    // draw; the fullscreen triangle comes from SV_VertexID, so no vertex buffer.
-    ID3D12DescriptorHeap* engine_heaps[] = {engine_heap_.Get()};
-    command_list_->SetDescriptorHeaps(_countof(engine_heaps), engine_heaps);
+    // the buffer's SRV from the persistent engine heap, still bound from the shaft
+    // pass; the fullscreen triangle comes from SV_VertexID, so no vertex buffer.
     command_list_->SetGraphicsRootSignature(tonemap_root_signature_.Get());
     command_list_->SetPipelineState(tonemap_pipeline_state_.Get());
     const float exposure = 1.0f;

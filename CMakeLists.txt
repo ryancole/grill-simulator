@@ -89,6 +89,9 @@ add_hlsl_shader(grill SOURCE shaders/sky.hlsl ENTRY PSMainCapture PROFILE ps_6_6
 # The resolve pass: tonemaps the linear HDR scene buffer and encodes it to sRGB.
 add_hlsl_shader(grill SOURCE shaders/tonemap.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT tonemap.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/tonemap.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT tonemap.ps.cso)
+# The volumetric sun-shaft pass: marches the shadow map and adds scattered light.
+add_hlsl_shader(grill SOURCE shaders/lightshafts.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT lightshafts.vs.cso)
+add_hlsl_shader(grill SOURCE shaders/lightshafts.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT lightshafts.ps.cso)
 add_hlsl_shader(grill SOURCE shaders/text.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT text.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/text.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT text.ps.cso)
 add_hlsl_shader(grill SOURCE shaders/outline.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT outline.vs.cso)
