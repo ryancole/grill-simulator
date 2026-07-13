@@ -1,5 +1,7 @@
 #pragma once
 
+#include "environment.hpp"
+
 #include <DirectXMath.h>
 
 #include <filesystem>
@@ -49,18 +51,25 @@ struct LevelDef {
     // level can re-angle the sun with no other change. Normalised on use.
     DirectX::XMFLOAT3 sun_direction{0.35f, 0.78f, -0.5f};
 
+    // The level's sky and lighting: sun colour, sky gradient, clouds, ambient, fog
+    // and shafts. Defaults to the look the shaders once baked in, so a level that
+    // names no `[environment]` table (or omits a field) is drawn exactly as before.
+    Environment environment = kDefaultEnvironment;
+
     std::vector<Placement> placements;
 };
 
 namespace levels {
 
 // Reads a level from a `.level` TOML file (see assets/levels/backyard.level, which
-// documents the format). The top level carries name/spawn/facing/sun; a `box` array
-// and a `prop` array then hold the objects, each storing the authoring parameters it
-// is placed by (a box's centre/size/yaw/colour, a prop's pos/yaw/scale) which the
-// loader recomposes into the same transforms the code once built by hand. Boxes are
-// placed before props. Throws std::runtime_error -- naming the file, and the line for
-// a TOML syntax error -- on anything it cannot parse.
+// documents the format). The top level carries name/spawn/facing/sun; an optional
+// `time_of_day` (clock hours) generates a whole sky, which an optional `[environment]`
+// table (and the explicit `sun`) then override field by field -- every field falling
+// back to the default look; a `box` array and a `prop` array hold the objects, each
+// storing the authoring parameters it is placed by (a box's centre/size/yaw/colour, a
+// prop's pos/yaw/scale) which the loader recomposes into the same transforms the code
+// once built by hand. Boxes are placed before props. Throws std::runtime_error --
+// naming the file, and the line for a TOML syntax error -- on anything it cannot parse.
 //
 // Levels live in files rather than code so a new one is a text edit, not a rebuild;
 // the LevelDef struct above is the format's schema, parsed with toml++.

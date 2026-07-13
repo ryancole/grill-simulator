@@ -2,7 +2,29 @@
 #
 # A TOML file (parsed with toml++). A level has a name, a spawn (feet on the ground,
 # y the standing height), a facing (degrees; 0 looks north, +Z) and a sun (the
-# direction toward it). Then two arrays of objects, boxes placed before props:
+# direction toward it). An optional [environment] table then sets the sky and
+# lighting, and two arrays of objects follow, boxes placed before props:
+#   time_of_day -- an optional shortcut: a clock hour in 0..24 that generates a whole
+#           sky at once -- the sun's position on its arc (east at dawn, overhead at
+#           noon, west at dusk, a dim moon at night) and a matching [environment]
+#           (12.0 is exactly the default midday look). A `sun` or [environment] field
+#           spelled out below still overrides what it generates, so it is a starting
+#           point, not a lock. Omit it to keep the default sun and look.
+#   [environment] -- the sky and lighting, every field optional and defaulting to
+#           the values below (which are the built-in default look, so omitting the
+#           whole table changes nothing). Colours are sRGB [r,g,b]:
+#             sky_zenith / sky_horizon / ground_bounce -- the gradient overhead,
+#               at the horizon, and the dim bounce below.
+#             cloud_color, cloud_scale, cloud_wind = [x,y], cloud_coverage,
+#               cloud_softness, cloud_opacity -- the drifting cloud layer.
+#             sun_color, sun_intensity -- the direct sun's colour and radiance.
+#             sky_ambient, ambient_strength, fill_strength -- the ambient sky tone
+#               and how strong the ambient and the behind-the-sun fill are.
+#             fog_start, fog_end -- the distance band the yard fades into the sky.
+#             shaft_color, shaft_intensity, shaft_g -- the volumetric sun shafts.
+#             exposure, bloom_intensity, bloom_threshold, bloom_knee -- the resolve:
+#               the exposure the scene is tonemapped at, and the glow's strength and
+#               its soft-knee bright-pass.
 #   box  -- a coloured cube: center + size in metres, with optional yaw and checker
 #           (metres per checker tile; omit for a flat surface).
 #   prop -- a .glb from assets/models: pos, with optional yaw, uniform scale and

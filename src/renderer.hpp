@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dx_common.hpp"
+#include "environment.hpp"
 #include "font.hpp"
 #include "scene.hpp"
 #include "viewmodel.hpp"
@@ -43,6 +44,12 @@ public:
     // sets the direction the scene's direct term is lit from. The gradient sky
     // ignores it. Call before LoadScene so the reflection probe captures this sun.
     void SetSunDirection(DirectX::XMFLOAT3 direction);
+    // Sets the level's sky and lighting -- the sun colour, sky gradient, clouds,
+    // ambient, fog and shafts every pass shades with. Just records the value; the
+    // per-frame passes stamp it into their constant buffers each frame, so it takes
+    // effect on the next Render. Call before LoadScene so the reflection probe bakes
+    // the level's sky, exactly as SetSunDirection is called for its sun.
+    void SetEnvironment(const Environment& environment);
     void Resize(UINT width, UINT height);
     // `props` are the loose objects resting in the yard, drawn with the scene.
     // `highlight` is the one the player is aiming at, ringed with a glowing
@@ -325,6 +332,11 @@ private:
     // below and the scene's direct-light term.
     DirectX::XMFLOAT3 sun_direction_{};
     DirectX::XMFLOAT4X4 light_view_projection_{};
+    // The current level's sky and lighting, stamped into every pass's constant
+    // buffer each frame (see the ApplyEnvironment overloads). Defaults to the look
+    // the shaders once baked in, so the first frames before any level loads -- and
+    // the reflection probe's own default capture -- are drawn as they always were.
+    Environment environment_ = kDefaultEnvironment;
     // One aligned FrameConstants region per frame in flight, kept mapped and
     // rewritten each frame with the sun matrix and the current eye position. Per
     // frame because the camera moves, and buffered per frame so writing this

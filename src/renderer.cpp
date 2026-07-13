@@ -115,13 +115,19 @@ struct ShadowConstants {
 
 constexpr UINT kShadowConstantDwords = sizeof(ShadowConstants) / sizeof(UINT);
 
+// SkyEnvironment, Environment and kDefaultEnvironment now live in environment.hpp
+// (via renderer.hpp), shared with the level parser that fills them. What stays here
+// are the constant-buffer mirrors that embed a SkyEnvironment, and the
+// ApplyEnvironment overloads that stamp an Environment into each.
+
 // Mirrors the SkyConstants cbuffer in shaders/sky.hlsl: clip space back to world,
-// and the eye the view rays start from.
+// the eye the view rays start from, and the level's sky.
 struct SkyConstants {
     XMFLOAT4X4 inv_view_projection;
     XMFLOAT3 camera_position;
     // Seconds since start-up, drifting the cloud layer. Mirrors g_time in sky.hlsl.
     float time;
+    SkyEnvironment sky;
 };
 
 static_assert(sizeof(SkyConstants) % sizeof(UINT) == 0);
@@ -137,7 +143,20 @@ struct FrameConstants {
     // Seconds since start-up, drifting the cloud the fog fades into. Mirrors g_time
     // in scene.hlsl.
     float time;
+    // The level's atmosphere, matching the tail of FrameConstants in scene.hlsl:
+    // the sky SampleSky reads, then the sun, ambient, fill and fog the shade uses.
+    SkyEnvironment sky;
+    XMFLOAT3 sun_color;
+    float sun_intensity;
+    XMFLOAT3 sky_ambient;
+    float ambient_strength;
+    float fill_strength;
+    float fog_start;
+    float fog_end;
+    float pad;
 };
+
+static_assert(sizeof(FrameConstants) == 208, "FrameConstants must mirror the HLSL cbuffer rows");
 
 // Mirrors the LightShaftConstants cbuffer in shaders/lightshafts.hlsl: the inverse
 // view-projection that rebuilds a pixel's world point from depth, the sun's view-
@@ -149,13 +168,40 @@ struct LightShaftConstants {
     XMFLOAT3 camera_position;
     float pad0;
     XMFLOAT3 sun_direction;
-    float pad1;
+    // The old second pad DWORD now carries the shaft intensity; the colour and
+    // asymmetry follow in a fresh row. Matches LightShaftConstants in lightshafts.hlsl.
+    float shaft_intensity;
+    XMFLOAT3 shaft_color;
+    float shaft_g;
 };
 
 static_assert(sizeof(LightShaftConstants) % sizeof(UINT) == 0);
 constexpr UINT kLightShaftConstantDwords = sizeof(LightShaftConstants) / sizeof(UINT);
 static_assert(kLightShaftConstantDwords + 1 <= 64,
               "A root signature holds at most 64 DWORDs in total");
+
+// Stamp one Environment into each pass's constant buffer. Each pass reads only the
+// slice it needs -- the scene the whole lighting environment, the sky just the
+// gradient and clouds, the shafts just their own three fields -- so a single source
+// of truth reaches all three without any pass carrying fields it never samples.
+void ApplyEnvironment(FrameConstants& frame, const Environment& env) {
+    frame.sky = env.sky;
+    frame.sun_color = env.sun_color;
+    frame.sun_intensity = env.sun_intensity;
+    frame.sky_ambient = env.sky_ambient;
+    frame.ambient_strength = env.ambient_strength;
+    frame.fill_strength = env.fill_strength;
+    frame.fog_start = env.fog_start;
+    frame.fog_end = env.fog_end;
+}
+
+void ApplyEnvironment(SkyConstants& sky, const Environment& env) { sky.sky = env.sky; }
+
+void ApplyEnvironment(LightShaftConstants& shaft, const Environment& env) {
+    shaft.shaft_color = env.shaft_color;
+    shaft.shaft_intensity = env.shaft_intensity;
+    shaft.shaft_g = env.shaft_g;
+}
 
 // Mirrors the BloomConstants cbuffer in shaders/bloom.hlsl: one texel of the source
 // mip, and two parameters the two passes read differently -- see the shader.
@@ -168,13 +214,12 @@ struct BloomConstants {
 static_assert(sizeof(BloomConstants) % sizeof(UINT) == 0);
 constexpr UINT kBloomConstantDwords = sizeof(BloomConstants) / sizeof(UINT);
 
-// The soft-knee bright-pass on the first downsample: only what is brighter than the
-// threshold blooms, easing in over the knee. The upsample tent's radius, and how
-// strongly the finished bloom is added back in the resolve.
-constexpr float kBloomThreshold = 0.9f;
-constexpr float kBloomKnee = 0.4f;
+// The bright-pass threshold/knee, the resolve's exposure and how strongly the bloom
+// is added back are all per-level now -- see Environment (exposure, bloom_intensity,
+// bloom_threshold, bloom_knee), read from environment_ where the passes below set
+// their constants. The upsample tent's radius stays a constant: it is filter
+// geometry, not part of a level's look.
 constexpr float kBloomUpsampleRadius = 1.0f;
-constexpr float kBloomIntensity = 0.7f;
 
 // Mirrors the OutlineConstants cbuffer in shaders/outline.hlsl. The view-
 // projection stands alone because the mesh is grown in world space before it is
@@ -940,6 +985,7 @@ void Renderer::DrawSky(const XMMATRIX& view_projection, XMFLOAT3 camera_position
     XMStoreFloat4x4(&constants.inv_view_projection, XMMatrixInverse(nullptr, view_projection));
     constants.camera_position = camera_position;
     constants.time = time;
+    ApplyEnvironment(constants, environment_);
     command_list_->SetGraphicsRoot32BitConstants(0, kSkyConstantDwords, &constants, 0);
 
     // Three vertices, no buffer: the vertex shader builds the triangle from the id.
@@ -1325,8 +1371,8 @@ void Renderer::RenderBloom() {
         if (i == 0) {
             constants.src_texel = {1.0f / static_cast<float>(width_),
                                    1.0f / static_cast<float>(height_)};
-            constants.param0 = kBloomThreshold;
-            constants.param1 = kBloomKnee;
+            constants.param0 = environment_.bloom_threshold;
+            constants.param1 = environment_.bloom_knee;
         } else {
             constants.src_texel = {1.0f / static_cast<float>(bloom_targets_[i - 1].width),
                                    1.0f / static_cast<float>(bloom_targets_[i - 1].height)};
@@ -1392,6 +1438,15 @@ void Renderer::SetSunDirection(XMFLOAT3 direction) {
     // with no need to restamp the mapped buffer here.
 }
 
+void Renderer::SetEnvironment(const Environment& environment) {
+    // Just record it. Every pass that draws the sky or shades under it stamps
+    // environment_ into its constant buffer as it renders -- Render for the scene
+    // and shafts, DrawSky for the background -- so the change lands next frame with
+    // nothing to re-upload here. Called before LoadScene, it also decides the sky
+    // the reflection-probe capture bakes, since that capture reads the same paths.
+    environment_ = environment;
+}
+
 void Renderer::CreateShadowPipeline() {
     // The sun starts where the backyard wants it; a loaded level re-aims it through
     // SetSunDirection. Build the light's view-projection from that default now, so
@@ -1420,6 +1475,7 @@ void Renderer::CreateShadowPipeline() {
     for (UINT i = 0; i < kFrameCount; ++i) {
         FrameConstants frame{};
         frame.light_view_projection = light_view_projection_;
+        ApplyEnvironment(frame, environment_);
         std::memcpy(frame_constants_mapped_ + static_cast<size_t>(i) * frame_constants_stride_,
                     &frame, sizeof(frame));
     }
@@ -1845,6 +1901,7 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
     FrameConstants frame{};
     frame.light_view_projection = light_view_projection_;
     frame.camera_position = kProbePosition;
+    ApplyEnvironment(frame, environment_);
     std::memcpy(frame_constants_mapped_, &frame, sizeof(frame));
     frame_constants_address_ = frame_constants_->GetGPUVirtualAddress();
 
@@ -2343,6 +2400,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     frame.light_view_projection = light_view_projection_;
     frame.camera_position = camera_position;
     frame.time = seconds;
+    ApplyEnvironment(frame, environment_);
     std::memcpy(frame_region, &frame, sizeof(frame));
     frame_constants_address_ =
         frame_constants_->GetGPUVirtualAddress() +
@@ -2457,6 +2515,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     shaft.light_view_projection = light_view_projection_;
     shaft.camera_position = camera_position;
     shaft.sun_direction = sun_direction_;
+    ApplyEnvironment(shaft, environment_);
     command_list_->SetGraphicsRoot32BitConstants(0, kLightShaftConstantDwords, &shaft, 0);
     const CD3DX12_GPU_DESCRIPTOR_HANDLE shaft_srv(
         engine_heap_->GetGPUDescriptorHandleForHeapStart(), static_cast<INT>(kDepthSrvIndex),
@@ -2498,7 +2557,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // triangle comes from SV_VertexID, so no vertex buffer.
     command_list_->SetGraphicsRootSignature(tonemap_root_signature_.Get());
     command_list_->SetPipelineState(tonemap_pipeline_state_.Get());
-    const float tonemap_constants[] = {1.0f, kBloomIntensity}; // exposure, bloom intensity
+    const float tonemap_constants[] = {environment_.exposure, environment_.bloom_intensity};
     command_list_->SetGraphicsRoot32BitConstants(0, _countof(tonemap_constants), tonemap_constants,
                                                  0);
     const D3D12_GPU_DESCRIPTOR_HANDLE engine_base =

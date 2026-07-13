@@ -20,7 +20,14 @@ cbuffer LightShaftConstants : register(b0) {
     float g_pad0;
     // Unit vector toward the sun, for the phase function.
     float3 g_sun_direction;
-    float g_pad1;
+    // How strong the effect is -- part of the level's atmosphere now, alongside the
+    // colour and asymmetry below, filled from the C++ Environment.
+    float g_shaft_intensity;
+    // The sunlight the shafts scatter, in linear light, and the Henyey-Greenstein
+    // asymmetry: >0 scatters forward, so shafts blaze when the eye looks toward the
+    // sun and fade looking away.
+    float3 g_shaft_color;
+    float g_shaft_g;
 };
 
 // The scene depth (R32 view of the typeless depth buffer) and a plain view of the
@@ -36,12 +43,6 @@ static const int kSteps = 48;
 // The march is capped at this many metres: past the yard the shadow map does not
 // reach anyway, and a sky pixel's ray would otherwise run to the far plane.
 static const float kMaxDistance = 60.0f;
-// The sunlight the shafts scatter, in linear light, and how strong the effect is.
-static const float3 kShaftColor = float3(1.0f, 0.96f, 0.88f);
-static const float kShaftIntensity = 0.9f;
-// Henyey-Greenstein asymmetry: >0 scatters forward, so shafts blaze when the eye
-// looks toward the sun and fade looking away.
-static const float kShaftG = 0.76f;
 // A hair of slack in the shadow compare, so a lit sample does not shadow itself.
 static const float kShaftBias = 0.0015f;
 
@@ -110,7 +111,7 @@ float4 PSMain(VSOutput input) : SV_TARGET {
     }
 
     const float scattered = lit_sum / kSteps;
-    const float phase = HenyeyGreenstein(dot(ray_dir, g_sun_direction), kShaftG);
+    const float phase = HenyeyGreenstein(dot(ray_dir, g_sun_direction), g_shaft_g);
     // Additive: the pass is blended onto the HDR scene, so it only ever adds light.
-    return float4(kShaftColor * scattered * phase * kShaftIntensity, 1.0f);
+    return float4(g_shaft_color * scattered * phase * g_shaft_intensity, 1.0f);
 }

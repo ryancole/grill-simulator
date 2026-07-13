@@ -7,6 +7,24 @@ spawn = [-7.5, 0.0, 0.0]
 facing = 90.0
 sun = [-0.55, 0.45, 0.15]
 
+# The low western sun makes this a golden hour, against the backyard's midday blue:
+# warm light off a peach horizon under a deepening zenith, with stronger amber
+# shafts. The spawn looks east, away from the sun, so the deck is backlit -- the
+# ambient is kept up and warm so it still reads. See backyard.level for what each
+# [environment] field does.
+[environment]
+sky_zenith = [0.30, 0.34, 0.48]
+sky_horizon = [0.72, 0.52, 0.40]
+ground_bounce = [0.26, 0.20, 0.15]
+sun_color = [1.0, 0.85, 0.62]
+sun_intensity = 3.1
+sky_ambient = [0.76, 0.68, 0.62]
+ambient_strength = 0.80
+cloud_color = [1.0, 0.94, 0.86]
+cloud_coverage = 0.48
+shaft_color = [1.0, 0.82, 0.56]
+shaft_intensity = 1.0
+
 box = [
   # The deck, darker than the backyard's patio, then a knee-high parapet around the
   # edge (overlapping at the corners).

@@ -81,6 +81,21 @@ XMFLOAT3 Vec3Or(const toml::node_view<const toml::node>& view, XMFLOAT3 fallback
     return view ? Vec3(view, path, what) : fallback;
 }
 
+// An optional [x, y] (the cloud wind is the only two-vector the format has),
+// falling back when the key is absent.
+XMFLOAT2 Vec2Or(const toml::node_view<const toml::node>& view, XMFLOAT2 fallback,
+                const std::filesystem::path& path, const char* what) {
+    if (!view) {
+        return fallback;
+    }
+    const toml::array* array = view.as_array();
+    if (array == nullptr || array->size() != 2) {
+        Fail(path, std::string(what) + " must be an array of two numbers");
+    }
+    return {static_cast<float>(AsDouble((*array)[0], path, what)),
+            static_cast<float>(AsDouble((*array)[1], path, what))};
+}
+
 // An optional scalar number, falling back when the key is absent.
 float NumberOr(const toml::node_view<const toml::node>& view, float fallback,
                const std::filesystem::path& path, const char* what) {
@@ -109,7 +124,55 @@ LevelDef LoadFromFile(const std::filesystem::path& path) {
     level.name = root["name"].value_or(std::string{});
     level.player_spawn = Vec3Or(root["spawn"], level.player_spawn, path, "spawn");
     level.player_facing = NumberOr(root["facing"], level.player_facing, path, "facing");
+
+    // An optional `time_of_day` (clock hours, 0-24) generates a whole sky at once --
+    // the sun's arc position and a matching environment -- as a starting point the
+    // explicit `sun` and [environment] below still override. Absent, the level keeps
+    // its default sun and default look.
+    if (const toml::node_view<const toml::node> tod = root["time_of_day"]) {
+        const float hours = static_cast<float>(AsDouble(*tod.node(), path, "time_of_day"));
+        level.environment = EnvironmentAtHour(hours, level.sun_direction);
+    }
+
     level.sun_direction = Vec3Or(root["sun"], level.sun_direction, path, "sun");
+
+    // The optional [environment] table: the level's sky and lighting. Every field
+    // reads over the default already sitting in level.environment, so anything the
+    // table omits (or a level with no table at all) keeps today's look. See
+    // Environment in environment.hpp for what each field drives.
+    if (const toml::table* e = root["environment"].as_table()) {
+        Environment& env = level.environment;
+        env.sky.zenith = Vec3Or((*e)["sky_zenith"], env.sky.zenith, path, "sky_zenith");
+        env.sky.horizon = Vec3Or((*e)["sky_horizon"], env.sky.horizon, path, "sky_horizon");
+        env.sky.ground = Vec3Or((*e)["ground_bounce"], env.sky.ground, path, "ground_bounce");
+        env.sky.cloud_color = Vec3Or((*e)["cloud_color"], env.sky.cloud_color, path, "cloud_color");
+        env.sky.cloud_scale = NumberOr((*e)["cloud_scale"], env.sky.cloud_scale, path, "cloud_scale");
+        env.sky.cloud_wind = Vec2Or((*e)["cloud_wind"], env.sky.cloud_wind, path, "cloud_wind");
+        env.sky.cloud_coverage =
+            NumberOr((*e)["cloud_coverage"], env.sky.cloud_coverage, path, "cloud_coverage");
+        env.sky.cloud_softness =
+            NumberOr((*e)["cloud_softness"], env.sky.cloud_softness, path, "cloud_softness");
+        env.sky.cloud_opacity =
+            NumberOr((*e)["cloud_opacity"], env.sky.cloud_opacity, path, "cloud_opacity");
+        env.sun_color = Vec3Or((*e)["sun_color"], env.sun_color, path, "sun_color");
+        env.sun_intensity = NumberOr((*e)["sun_intensity"], env.sun_intensity, path, "sun_intensity");
+        env.sky_ambient = Vec3Or((*e)["sky_ambient"], env.sky_ambient, path, "sky_ambient");
+        env.ambient_strength =
+            NumberOr((*e)["ambient_strength"], env.ambient_strength, path, "ambient_strength");
+        env.fill_strength = NumberOr((*e)["fill_strength"], env.fill_strength, path, "fill_strength");
+        env.fog_start = NumberOr((*e)["fog_start"], env.fog_start, path, "fog_start");
+        env.fog_end = NumberOr((*e)["fog_end"], env.fog_end, path, "fog_end");
+        env.shaft_color = Vec3Or((*e)["shaft_color"], env.shaft_color, path, "shaft_color");
+        env.shaft_intensity =
+            NumberOr((*e)["shaft_intensity"], env.shaft_intensity, path, "shaft_intensity");
+        env.shaft_g = NumberOr((*e)["shaft_g"], env.shaft_g, path, "shaft_g");
+        env.exposure = NumberOr((*e)["exposure"], env.exposure, path, "exposure");
+        env.bloom_intensity =
+            NumberOr((*e)["bloom_intensity"], env.bloom_intensity, path, "bloom_intensity");
+        env.bloom_threshold =
+            NumberOr((*e)["bloom_threshold"], env.bloom_threshold, path, "bloom_threshold");
+        env.bloom_knee = NumberOr((*e)["bloom_knee"], env.bloom_knee, path, "bloom_knee");
+    }
 
     if (const toml::array* boxes = root["box"].as_array()) {
         for (const toml::node& node : *boxes) {
