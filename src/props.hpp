@@ -95,7 +95,7 @@ private:
 
     void Add(std::uint32_t model_id, const Model& model, std::string name,
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
-             float knock_rating);
+             float knock_rating, ImpactSound impact_sound);
     // Fills an item's box shape (half_extents, com_offset) from the union of its
     // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);
