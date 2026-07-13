@@ -124,6 +124,16 @@ LevelDef LoadFromFile(const std::filesystem::path& path) {
     level.name = root["name"].value_or(std::string{});
     level.player_spawn = Vec3Or(root["spawn"], level.player_spawn, path, "spawn");
     level.player_facing = NumberOr(root["facing"], level.player_facing, path, "facing");
+
+    // An optional `time_of_day` (clock hours, 0-24) generates a whole sky at once --
+    // the sun's arc position and a matching environment -- as a starting point the
+    // explicit `sun` and [environment] below still override. Absent, the level keeps
+    // its default sun and default look.
+    if (const toml::node_view<const toml::node> tod = root["time_of_day"]) {
+        const float hours = static_cast<float>(AsDouble(*tod.node(), path, "time_of_day"));
+        level.environment = EnvironmentAtHour(hours, level.sun_direction);
+    }
+
     level.sun_direction = Vec3Or(root["sun"], level.sun_direction, path, "sun");
 
     // The optional [environment] table: the level's sky and lighting. Every field

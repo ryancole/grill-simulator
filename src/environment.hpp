@@ -78,3 +78,17 @@ constexpr Environment kDefaultEnvironment{
     /*shaft_intensity*/ 0.9f,
     /*shaft_g*/ 0.76f,
 };
+
+// Expands a time of day into a whole sky. `hours` is a clock time in [0,24) (values
+// outside wrap, so 25 is 1am); the result is the sun's direction on its daily arc --
+// rising in the east, overhead at noon, setting in the west, a dim moon at night --
+// written into `sun_direction`, plus the matching Environment returned: warm and dim
+// near the horizon, bright blue at noon (exactly kDefaultEnvironment at 12:00), dark
+// and cool at midnight. Interpolated between a handful of keyframe moods.
+//
+// It is a convenience for authoring, not a runtime concept: the level parser calls
+// it when a level names `time_of_day`, bakes the result into the level's fixed
+// sun_direction and environment, and the renderer never knows a clock was involved.
+// A level may still spell out `sun` or individual [environment] fields to override
+// what this generates. Implemented in environment.cpp.
+Environment EnvironmentAtHour(float hours, DirectX::XMFLOAT3& sun_direction);

@@ -63,13 +63,13 @@ namespace levels {
 
 // Reads a level from a `.level` TOML file (see assets/levels/backyard.level, which
 // documents the format). The top level carries name/spawn/facing/sun; an optional
-// `[environment]` table then carries the sky and lighting (every field optional,
-// falling back to the default look); a `box` array and a `prop` array hold the
-// objects, each storing the authoring parameters it is placed by (a box's
-// centre/size/yaw/colour, a prop's pos/yaw/scale) which the loader recomposes into
-// the same transforms the code once built by hand. Boxes are placed before props.
-// Throws std::runtime_error -- naming the file, and the line for a TOML syntax
-// error -- on anything it cannot parse.
+// `time_of_day` (clock hours) generates a whole sky, which an optional `[environment]`
+// table (and the explicit `sun`) then override field by field -- every field falling
+// back to the default look; a `box` array and a `prop` array hold the objects, each
+// storing the authoring parameters it is placed by (a box's centre/size/yaw/colour, a
+// prop's pos/yaw/scale) which the loader recomposes into the same transforms the code
+// once built by hand. Boxes are placed before props. Throws std::runtime_error --
+// naming the file, and the line for a TOML syntax error -- on anything it cannot parse.
 //
 // Levels live in files rather than code so a new one is a text edit, not a rebuild;
 // the LevelDef struct above is the format's schema, parsed with toml++.

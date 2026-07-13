@@ -4,6 +4,12 @@
 # y the standing height), a facing (degrees; 0 looks north, +Z) and a sun (the
 # direction toward it). An optional [environment] table then sets the sky and
 # lighting, and two arrays of objects follow, boxes placed before props:
+#   time_of_day -- an optional shortcut: a clock hour in 0..24 that generates a whole
+#           sky at once -- the sun's position on its arc (east at dawn, overhead at
+#           noon, west at dusk, a dim moon at night) and a matching [environment]
+#           (12.0 is exactly the default midday look). A `sun` or [environment] field
+#           spelled out below still overrides what it generates, so it is a starting
+#           point, not a lock. Omit it to keep the default sun and look.
 #   [environment] -- the sky and lighting, every field optional and defaulting to
 #           the values below (which are the built-in default look, so omitting the
 #           whole table changes nothing). Colours are sRGB [r,g,b]:
