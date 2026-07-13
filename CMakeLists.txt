@@ -31,6 +31,9 @@ include(PhysX)
 include(Fonts)
 include(Assets)
 
+# Header-only TOML parser for the level files (see src/level.cpp), from vcpkg.
+find_package(tomlplusplus CONFIG REQUIRED)
+
 add_executable(grill WIN32
   src/main.cpp
   src/audio.cpp
@@ -38,6 +41,7 @@ add_executable(grill WIN32
   src/collision.cpp
   src/image.cpp
   src/input.cpp
+  src/level.cpp
   src/model.cpp
   src/scene.cpp
   src/physics.cpp
@@ -46,13 +50,14 @@ add_executable(grill WIN32
   src/rigid_body.cpp
   src/viewmodel.cpp
   src/font.cpp
+  src/world.cpp
   src/renderer.cpp
   src/agility_exports.cpp)
 
 target_include_directories(grill PRIVATE src)
 # windowscodecs is WIC, which decodes the PNG and JPEG images glTF embeds. It
 # ships with Windows, so it costs the project no third-party dependency.
-target_link_libraries(grill PRIVATE Agility::SDK fastgltf::fastgltf fmod::core PhysX::PhysX windowscodecs)
+target_link_libraries(grill PRIVATE Agility::SDK fastgltf::fastgltf fmod::core PhysX::PhysX tomlplusplus::tomlplusplus windowscodecs)
 
 target_compile_definitions(grill PRIVATE
   UNICODE _UNICODE
@@ -90,6 +95,11 @@ stage_assets(grill DIRECTORY assets/models
 
 stage_assets(grill DIRECTORY assets/audio
   FILES sizzle.wav 232135__yottasounds__splat-005.wav 446128__justinvoke__metal-clank-4.wav)
+
+# The levels are text, parsed at runtime (see src/level.cpp), so editing one and
+# re-staging needs no recompile -- only the copy next to the executable.
+stage_assets(grill DIRECTORY assets/levels
+  FILES backyard.level rooftop.level)
 
 # The HUD font atlas is baked from the committed .ttf at build time; only the
 # .png/.csv it produces are read at runtime, and those live in the build tree.

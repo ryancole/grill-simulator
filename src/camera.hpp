@@ -31,6 +31,13 @@ public:
     // slides it along the world's surfaces, then rides the eye on top.
     void Update(const Input& input, float dt);
 
+    // Drops the player at a level's entrance and clears their motion, for when a
+    // level is (re)loaded. `foot` is where the feet stand on the ground and `facing`
+    // is the heading in degrees (0 looks north, +Z); the eye rides an eye-height
+    // above the feet. The controller persists across the swap (it belongs to the
+    // session, not the level), so this just repositions and re-aims it.
+    void Respawn(DirectX::XMFLOAT3 foot, float facing_degrees);
+
     DirectX::XMMATRIX ViewMatrix() const;
     DirectX::XMMATRIX ProjectionMatrix(float aspect) const;
     // The inverse of the view matrix: it carries a point expressed relative to

@@ -21,7 +21,25 @@ class Renderer {
 public:
     static constexpr UINT kFrameCount = 2;
 
-    void Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene);
+    // Brings up the device, swapchain and every pipeline -- everything that lives
+    // for the whole session, independent of which level is loaded. No scene geometry
+    // is uploaded here; call LoadScene once the first level's Scene exists.
+    void Initialize(HWND hwnd, UINT width, UINT height);
+    // Uploads one level's models, textures and reflection probe into the GPU
+    // resources the frame draws from. Call after Initialize, and again after
+    // ReleaseScene to swap in a different level. Assumes no scene is currently
+    // loaded (ReleaseScene, or a fresh Initialize, left the slots empty).
+    void LoadScene(const Scene& scene);
+    // Frees the current level's models, textures and probe, so a different Scene
+    // can be uploaded. Flushes the GPU first -- the frame in flight may still be
+    // reading these -- so it is only for a between-levels swap, never mid-frame.
+    // The device, swapchain, pipelines and shadow map outlive it; the font atlas
+    // rides the scene upload and is simply re-loaded by the next LoadScene.
+    void ReleaseScene();
+    // Points the sun a level's way: re-aims the shadow map's orthographic light and
+    // sets the direction the scene's direct term is lit from. The gradient sky
+    // ignores it. Call before LoadScene so the reflection probe captures this sun.
+    void SetSunDirection(DirectX::XMFLOAT3 direction);
     void Resize(UINT width, UINT height);
     // `props` are the loose objects resting in the yard, drawn with the scene.
     // `highlight` is the one the player is aiming at, ringed with a glowing
@@ -80,6 +98,10 @@ private:
     // sun's orthographic light view-projection, and the per-frame constant buffer
     // that hands that matrix to the scene pass.
     void CreateShadowPipeline();
+    // Rebuilds light_view_projection_ from sun_direction_: an orthographic box
+    // aimed down the sun and centred on the yard. Called at startup and whenever
+    // SetSunDirection re-aims the sun for a new level.
+    void UpdateShadowProjection();
     void CreatePipeline();
     // The gradient-sky background: a fullscreen pass whose pixel shader turns each
     // pixel into a world-space view ray and samples the same analytic sky the
@@ -212,6 +234,10 @@ private:
     ComPtr<ID3D12PipelineState> shadow_pipeline_state_;
     ComPtr<ID3D12Resource> shadow_map_;
     UINT shadow_descriptor_ = 0;
+    // The unit vector toward the sun, normalized. Set from the loaded level (default
+    // to the backyard's in CreateShadowPipeline); drives both the shadow projection
+    // below and the scene's direct-light term.
+    DirectX::XMFLOAT3 sun_direction_{};
     DirectX::XMFLOAT4X4 light_view_projection_{};
     // One aligned FrameConstants region per frame in flight, kept mapped and
     // rewritten each frame with the sun matrix and the current eye position. Per

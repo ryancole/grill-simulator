@@ -1,0 +1,43 @@
+# The backyard: a grass yard behind a wood fence, with the grill and cooler.
+#
+# A TOML file (parsed with toml++). A level has a name, a spawn (feet on the ground,
+# y the standing height), a facing (degrees; 0 looks north, +Z) and a sun (the
+# direction toward it). Then two arrays of objects, boxes placed before props:
+#   box  -- a coloured cube: center + size in metres, with optional yaw and checker
+#           (metres per checker tile; omit for a flat surface).
+#   prop -- a .glb from assets/models: pos, with optional yaw, uniform scale and
+#           tint (defaults white); `dynamic = true` with mass and knock makes it a
+#           knock-over-able body.
+
+name = "Backyard"
+spawn = [0.0, 0.0, -7.0]
+facing = 0.0
+sun = [0.35, 0.78, -0.5]
+
+box = [
+  # Ground, then the patio slab; the checker gives the flat ground a texture to move against.
+  {center = [0.0, -0.15, 0.0], size = [60.0, 0.3, 60.0], color = [0.24, 0.36, 0.18], checker = 2.0},
+  {center = [0.0, 0.03, 2.5],  size = [16.0, 0.06, 11.0], color = [0.55, 0.54, 0.51], checker = 1.0},
+
+  # Fence, long enough to overlap at the corners.
+  {center = [0.0, 1.0, 12.0],  size = [24.5, 2.0, 0.25], color = [0.45, 0.32, 0.21]},
+  {center = [0.0, 1.0, -12.0], size = [24.5, 2.0, 0.25], color = [0.45, 0.32, 0.21]},
+  {center = [12.0, 1.0, 0.0],  size = [0.25, 2.0, 24.5], color = [0.45, 0.32, 0.21]},
+  {center = [-12.0, 1.0, 0.0], size = [0.25, 2.0, 24.5], color = [0.45, 0.32, 0.21]},
+]
+
+prop = [
+  # The grill and cooler are dynamic: run into one and it topples (the grill is light
+  # and top-heavy) or slides (the cooler is heavier and low).
+  {model = "grill-basic.glb",  pos = [0.0, 0.0, 5.0],   dynamic = true, mass = 12.0, knock = 8.0},
+  {model = "bench-basic.glb",  pos = [-4.5, 0.0, 1.5]},
+  {model = "cooler-basic.glb", pos = [3.6, 0.0, 6.5],   dynamic = true, mass = 14.0, knock = 7.0},
+
+  # Two crates, the upper one knocked askew and standing on the lower.
+  {model = "crate.glb", pos = [5.8, 0.0, -2.0]},
+  {model = "crate.glb", pos = [5.8, 0.8, -2.0], yaw = 22.0, scale = 0.875},
+
+  # Two of the same tree, told apart by a scale and a turn.
+  {model = "tree.glb", pos = [-8.0, 0.0, 7.5], yaw = 25.0},
+  {model = "tree.glb", pos = [8.5, 0.0, -6.0], yaw = -15.0, scale = 0.87},
+]

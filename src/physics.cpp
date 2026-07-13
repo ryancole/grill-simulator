@@ -209,6 +209,41 @@ void Physics::AddStaticWorld(std::span<const OrientedBox> colliders) {
     }
 }
 
+void Physics::ClearLevel() {
+    // The one thing in the scene that is the session's, not the level's: the
+    // player's capsule. Its actor is owned by the controller manager, so it must be
+    // spared here and released only when that manager tears down. Gather the
+    // controllers' actors so the sweep below can skip them.
+    std::vector<PxActor*> keep;
+    for (PxU32 i = 0; i < controllers_->getNbControllers(); ++i) {
+        keep.push_back(controllers_->getController(i)->getActor());
+    }
+
+    // Every rigid actor in the scene: the static world boxes, the furniture and the
+    // prop bodies alike. RigidBody is a non-owning handle -- the scene is what
+    // releases these -- so nothing else frees them, and doing it here is not a
+    // double free. removeActor first so the solver drops its references before the
+    // actor dies.
+    const PxU32 count = scene_->getNbActors(PxActorTypeFlag::eRIGID_STATIC |
+                                            PxActorTypeFlag::eRIGID_DYNAMIC);
+    std::vector<PxActor*> actors(count);
+    if (count > 0) {
+        scene_->getActors(PxActorTypeFlag::eRIGID_STATIC | PxActorTypeFlag::eRIGID_DYNAMIC,
+                          actors.data(), count);
+    }
+    for (PxActor* actor : actors) {
+        if (std::find(keep.begin(), keep.end(), actor) != keep.end()) {
+            continue;
+        }
+        scene_->removeActor(*actor);
+        actor->release();
+    }
+
+    // Drop any real time banked toward a substep: the next level starts its clock
+    // clean rather than taking a catch-up burst on its first frame.
+    accumulator_ = 0.0f;
+}
+
 PxRigidDynamic* Physics::AddDynamicBody(std::span<const OrientedBox> shapes,
                                         const DirectX::XMFLOAT4X4& initial_pose, float mass) {
     using namespace DirectX;

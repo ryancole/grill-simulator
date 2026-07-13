@@ -242,7 +242,7 @@ ComPtr<IDXGIAdapter1> SelectAdapter(IDXGIFactory6& factory) {
 
 } // namespace
 
-void Renderer::Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene) {
+void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     width_ = width;
     height_ = height;
 
@@ -256,11 +256,40 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene
     CreateSkyPipeline();
     CreateOutlinePipeline();
     CreateShadowPipeline();
-    CreateSceneGeometry(scene);
-    CaptureReflectionProbe(scene);
     CreateTextPipeline();
 
+    // Everything above is the session's, not the level's. The scene geometry, the
+    // font atlas and the reflection probe come up in LoadScene, so a level can be
+    // swapped out from under all this without rebuilding the device or pipelines.
     initialized_ = true;
+}
+
+void Renderer::LoadScene(const Scene& scene) {
+    // The shared descriptor heap, every model's buffers and images, the font atlas
+    // and the probe cube. Split out of Initialize so a level swap re-runs only this
+    // (after ReleaseScene) rather than the whole device bring-up.
+    CreateSceneGeometry(scene);
+    CaptureReflectionProbe(scene);
+}
+
+void Renderer::ReleaseScene() {
+    // The GPU may still be reading this level's buffers, textures, heap or probe in
+    // the frame in flight, so drain it before any of these ComPtrs let go.
+    FlushGpu();
+
+    // Everything CreateSceneGeometry and CaptureReflectionProbe built. The shared
+    // heap is torn down whole -- the font atlas and shadow-map SRVs live in it too,
+    // so the next LoadScene re-places them (the shadow map resource itself, created
+    // once in CreateShadowMap, is left standing). Descriptor slot bookkeeping is
+    // recomputed from scratch each load, so nothing here needs resetting but the
+    // resources.
+    models_.clear();
+    textures_.clear();
+    texture_heap_.Reset();
+    atlas_texture_.Reset();
+    probe_cube_.Reset();
+    probe_rtv_heap_.Reset();
+    probe_depth_.Reset();
 }
 
 float Renderer::AspectRatio() const {
@@ -742,19 +771,18 @@ void Renderer::CreateOutlinePipeline() {
         "CreateGraphicsPipelineState(outline)");
 }
 
-void Renderer::CreateShadowPipeline() {
-    // The sun does not move, so its view-projection is built once. It is an
-    // orthographic box aimed down the sun's direction and centred on the yard:
-    // the fenced area is about 24 m across, and this half-extent leaves the
-    // corners and the trees comfortably inside the frame. Ground past it simply
-    // falls outside the map and reads as lit, which is right -- nothing out there
-    // casts anything the player can see through the fog.
-    constexpr float kShadowExtent = 40.0f; // Full width/height of the ortho box.
+void Renderer::UpdateShadowProjection() {
+    // An orthographic box aimed down the sun's direction and centred on the yard:
+    // the fenced area is about 24 m across, and this half-extent leaves the corners
+    // and the trees comfortably inside the frame. Ground past it simply falls
+    // outside the map and reads as lit, which is right -- nothing out there casts
+    // anything the player can see through the fog.
+    constexpr float kShadowExtent = 40.0f;   // Full width/height of the ortho box.
     constexpr float kShadowDistance = 50.0f; // How far back along the sun the eye sits.
     constexpr float kShadowNear = 20.0f;
     constexpr float kShadowFar = 80.0f;
 
-    const XMVECTOR sun = XMVector3Normalize(XMLoadFloat3(&kSunDirection));
+    const XMVECTOR sun = XMLoadFloat3(&sun_direction_); // already normalized
     const XMVECTOR target = XMVectorZero();
     const XMVECTOR eye = XMVectorScale(sun, kShadowDistance);
     const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
@@ -762,6 +790,22 @@ void Renderer::CreateShadowPipeline() {
     const XMMATRIX proj =
         XMMatrixOrthographicLH(kShadowExtent, kShadowExtent, kShadowNear, kShadowFar);
     XMStoreFloat4x4(&light_view_projection_, view * proj);
+}
+
+void Renderer::SetSunDirection(XMFLOAT3 direction) {
+    XMStoreFloat3(&sun_direction_, XMVector3Normalize(XMLoadFloat3(&direction)));
+    UpdateShadowProjection();
+    // The frame constant regions carry the light matrix; Render rewrites the current
+    // one each frame from light_view_projection_, so the new sun lands next frame
+    // with no need to restamp the mapped buffer here.
+}
+
+void Renderer::CreateShadowPipeline() {
+    // The sun starts where the backyard wants it; a loaded level re-aims it through
+    // SetSunDirection. Build the light's view-projection from that default now, so
+    // the shadow pass has a valid matrix even before the first level loads.
+    XMStoreFloat3(&sun_direction_, XMVector3Normalize(XMLoadFloat3(&kSunDirection)));
+    UpdateShadowProjection();
 
     // The per-frame constant buffer that hands that matrix, and the eye position,
     // to the scene pass. One 256-byte-aligned region per frame in flight, kept
@@ -1220,8 +1264,9 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
     const XMVECTOR eye = XMLoadFloat3(&kProbePosition);
     const XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV2, 1.0f, 0.05f, 100.0f);
 
-    XMFLOAT3 sun{};
-    XMStoreFloat3(&sun, XMVector3Normalize(XMLoadFloat3(&kSunDirection)));
+    // The level's sun (set by SetSunDirection before this capture runs), so the
+    // probe bakes reflections lit the same way as the frame that samples it.
+    const XMFLOAT3 sun = sun_direction_;
 
     // Record the capture on the one-shot command list CreateSceneGeometry left
     // closed.
@@ -1726,8 +1771,9 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
 
-    XMFLOAT3 sun{};
-    XMStoreFloat3(&sun, XMVector3Normalize(XMLoadFloat3(&kSunDirection)));
+    // The loaded level's sun, already normalized. Matches the direction baked into
+    // light_view_projection_, so the shadows the world casts line up with its shade.
+    const XMFLOAT3 sun = sun_direction_;
     // The world and the resting props receive the sun's shadow.
     DrawInstances(scene.Instances(), view_projection, sun, 1.0f, true);
     // The resting props take the yard's sun too: they are part of the world, and
