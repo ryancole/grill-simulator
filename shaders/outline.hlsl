@@ -11,6 +11,8 @@
 // on top, so only the ring outside its silhouette survives.
 //
 // Like scene.hlsl this is row-major, vectors as rows, multiplied `v * M`.
+#include "common.hlsli"
+
 cbuffer OutlineConstants : register(b0) {
     // View-projection on its own: the copy is grown in world space first, then
     // projected, so the rim keeps an even thickness around the object rather
@@ -52,5 +54,8 @@ PSInput VSMain(VSInput input) {
 }
 
 float4 PSMain(PSInput input) : SV_TARGET {
-    return g_color;
+    // The halo now accumulates into the linear HDR scene buffer, not the old
+    // display-space back buffer, so the authored rim colour is linearised to keep
+    // its hue. .a stays as the layer's additive strength.
+    return float4(SrgbToLinear(g_color.rgb), g_color.a);
 }

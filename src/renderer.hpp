@@ -20,6 +20,9 @@
 class Renderer {
 public:
     static constexpr UINT kFrameCount = 2;
+    // Bloom pyramid depth: this many successively-halved mips. Public so the render
+    // target and descriptor heaps, sized in the .cpp, can account for them.
+    static constexpr UINT kBloomLevels = 6;
 
     // Brings up the device, swapchain and every pipeline -- everything that lives
     // for the whole session, independent of which level is loaded. No scene geometry
@@ -75,6 +78,16 @@ private:
         D3D12_GPU_DESCRIPTOR_HANDLE occlusion_texture;
     };
 
+    // One level of the bloom pyramid: an HDR texture at some fraction of the window,
+    // with its render-target view in rtv_heap_ and its shader-resource view in
+    // engine_heap_. The chain is recreated on resize, since the sizes track the
+    // window.
+    struct BloomTarget {
+        ComPtr<ID3D12Resource> texture;
+        UINT width = 0;
+        UINT height = 0;
+    };
+
     // A Model, uploaded. The CPU-side Model that produced it is not needed again.
     struct GpuModel {
         ComPtr<ID3D12Resource> vertex_buffer;
@@ -89,6 +102,16 @@ private:
     void CreateSwapChain(HWND hwnd, UINT width, UINT height);
     void CreateRenderTargetViews();
     void CreateDepthBuffer();
+    // The shader-visible heap for session-level SRVs -- the ones that outlive a
+    // level swap, kept apart from the per-level material heap (texture_heap_) that
+    // ReleaseScene tears down. Created once at startup; slot 0 is the HDR scene
+    // buffer, with room reserved for the post-process buffers to come.
+    void CreateEngineDescriptorHeap();
+    // The HDR scene buffer the whole world renders into, in linear light: an
+    // R16G16B16A16_FLOAT target the size of the window, with a render-target view in
+    // rtv_heap_ and a shader-resource view in engine_heap_. Recreated on resize like
+    // the depth buffer; the tonemap pass reads it and writes the swapchain.
+    void CreateHdrTarget();
     // The sun's depth buffer and everything the shadow pass draws it with: a
     // square R32_TYPELESS texture with a D32 depth view to render into and an
     // R32_FLOAT resource view to sample back, plus its own viewport. Fixed size,
@@ -112,6 +135,28 @@ private:
     // mesh along its normals, cull the near faces and paint the far shell a flat
     // glowing colour. Depth-tests against the world but writes no depth.
     void CreateOutlinePipeline();
+    // The resolve pass: a fullscreen pixel shader that tonemaps the linear HDR
+    // scene buffer and encodes it to sRGB for the swapchain. Its own tiny root
+    // signature (an exposure constant and the HDR buffer's SRV) and a PSO with depth
+    // off, targeting the back buffer.
+    void CreateTonemapPipeline();
+    // The volumetric sun-shaft pass: a fullscreen pixel shader that marches the sun's
+    // shadow map along each view ray and adds the scattered light into the HDR buffer
+    // before the resolve. Its own root signature (the camera and light matrices, the
+    // sun, and the depth + shadow SRVs) and an additively blended PSO.
+    void CreateLightShaftPipeline();
+    // The bloom pyramid's textures: kBloomLevels HDR targets, each half the size of
+    // the one above, with their RTVs and SRVs. Recreated on resize like the HDR
+    // buffer, since the sizes follow the window.
+    void CreateBloomTargets();
+    // The bloom pass pipelines: one root signature and two PSOs (the downsample,
+    // which overwrites, and the upsample, which blends additively) over bloom.hlsl.
+    void CreateBloomPipeline();
+    // Runs the bloom chain on the finished HDR scene: downsample down the pyramid
+    // thresholding the first level, then upsample and sum back up, leaving the glow
+    // in bloom level 0 for the resolve to add in. Assumes the HDR buffer is a shader
+    // resource and the engine heap is bound.
+    void RenderBloom();
     // Uploads every model the scene holds, plus the 1x1 white texture that
     // stands in for a material with no texture of its own.
     void CreateSceneGeometry(const Scene& scene);
@@ -137,9 +182,10 @@ private:
 
     // Fills a default-heap buffer through a staging copy. The staging resource is
     // appended to `staging`, which the caller must keep alive until the GPU has
-    // retired the copy.
+    // retired the copy. `access_after` is the buffer access the copy is followed by
+    // -- vertex or index -- for the barrier that hands the buffer to the draw.
     ComPtr<ID3D12Resource> UploadBuffer(const void* data, UINT64 bytes,
-                                        D3D12_RESOURCE_STATES final_state,
+                                        D3D12_BARRIER_ACCESS access_after,
                                         std::vector<ComPtr<ID3D12Resource>>& staging);
     // Uploads a mip chain and writes its shader resource view into slot
     // `descriptor` of the texture heap. `format` is sRGB for base-colour images
@@ -162,7 +208,11 @@ private:
     // `camera_position` through `view_projection`. Draws no depth, so geometry
     // rendered afterward paints over it. Switches to the sky pipeline and root
     // signature; the caller restores whatever it needs next.
-    void DrawSky(const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position);
+    // `capture` picks the pixel shader: the on-screen pass leaves its radiance
+    // linear for the HDR buffer, the probe capture encodes to sRGB for the 8-bit
+    // cube. `time` drifts the cloud layer; the capture passes 0 for a still probe.
+    void DrawSky(const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
+                 float time, bool capture);
 
     // The shadow pass: draws every caster depth-only into the shadow map from the
     // sun's point of view, wrapped in the barriers that flip the map between
@@ -187,7 +237,11 @@ private:
     void MoveToNextFrame();
 
     ComPtr<IDXGIFactory6> factory_;
-    ComPtr<ID3D12Device> device_;
+    // Device10 and CommandList7 are the enhanced-barrier era: the device for
+    // CreateCommittedResource3 (resources born with an explicit barrier layout), the
+    // command list for Barrier(). Both inherit the older interfaces, so nothing else
+    // that uses them has to change.
+    ComPtr<ID3D12Device10> device_;
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<IDXGISwapChain3> swap_chain_;
 
@@ -199,17 +253,49 @@ private:
     UINT dsv_size_ = 0;
     ComPtr<ID3D12Resource> depth_stencil_;
 
+    // The linear HDR scene buffer: the whole world draws into this, and the tonemap
+    // pass resolves it to the swapchain. Its RTV is the last slot of rtv_heap_
+    // (after the swapchain buffers); its SRV is slot 0 of engine_heap_.
+    ComPtr<ID3D12Resource> hdr_target_;
+
+    // The persistent, shader-visible heap for session-level SRVs (the HDR buffer,
+    // and the post-process buffers to come). Kept separate from texture_heap_ so a
+    // level swap, which rebuilds that per-level heap, never disturbs these.
+    ComPtr<ID3D12DescriptorHeap> engine_heap_;
+    UINT engine_heap_size_ = 0;
+
     ComPtr<ID3D12CommandAllocator> allocators_[kFrameCount];
-    ComPtr<ID3D12GraphicsCommandList> command_list_;
+    ComPtr<ID3D12GraphicsCommandList7> command_list_;
 
     ComPtr<ID3D12RootSignature> root_signature_;
     ComPtr<ID3D12PipelineState> pipeline_state_;
 
     // The gradient-sky background pass. No vertex buffer, no textures: the pixel
     // shader reconstructs the view ray from the inverse view-projection handed in
-    // as root constants.
+    // as root constants. `sky_capture_pipeline_state_` is the same pass encoding to
+    // sRGB into the 8-bit probe cube, where the on-screen one leaves its radiance
+    // linear for the HDR buffer.
     ComPtr<ID3D12RootSignature> sky_root_signature_;
     ComPtr<ID3D12PipelineState> sky_pipeline_state_;
+    ComPtr<ID3D12PipelineState> sky_capture_pipeline_state_;
+
+    // The resolve pass: tonemaps the HDR scene buffer and encodes it to the
+    // swapchain. Reads engine_heap_ slot 0; no vertex buffer (a fullscreen triangle
+    // from SV_VertexID).
+    ComPtr<ID3D12RootSignature> tonemap_root_signature_;
+    ComPtr<ID3D12PipelineState> tonemap_pipeline_state_;
+
+    // The volumetric sun-shaft pass, additively blended into the HDR buffer. Reads
+    // the scene depth and shadow map from engine_heap_ slots 1 and 2.
+    ComPtr<ID3D12RootSignature> light_shaft_root_signature_;
+    ComPtr<ID3D12PipelineState> light_shaft_pipeline_state_;
+
+    // The bloom pyramid: its mip textures, one root signature and the downsample /
+    // upsample PSOs. Level 0's SRV is what the resolve reads to add the glow.
+    BloomTarget bloom_targets_[kBloomLevels];
+    ComPtr<ID3D12RootSignature> bloom_root_signature_;
+    ComPtr<ID3D12PipelineState> bloom_downsample_pipeline_state_;
+    ComPtr<ID3D12PipelineState> bloom_upsample_pipeline_state_;
 
     // The reflection probe. `scene_capture_pipeline_state_` is the scene PSO with
     // the capture pixel shader (analytic sky, no cube read); it fills probe_cube_

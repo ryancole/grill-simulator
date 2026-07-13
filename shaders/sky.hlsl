@@ -8,7 +8,9 @@ cbuffer SkyConstants : register(b0) {
     // Clip space back to world: the inverse of the camera's view-projection.
     row_major float4x4 g_inv_view_projection;
     float3 g_camera_position;
-    float g_pad0;
+    // Seconds since the renderer came up, so the cloud layer drifts. The probe
+    // capture passes 0, baking a still cloudscape into the static reflection.
+    float g_time;
 };
 
 struct VSOutput {
@@ -30,11 +32,25 @@ VSOutput VSMain(uint id : SV_VertexID) {
     return output;
 }
 
-float4 PSMain(VSOutput input) : SV_TARGET {
-    // A far-plane point in clip space, carried back to world, gives the direction
-    // from the eye through this pixel.
+// The linear radiance of the sky along this pixel's view ray. A far-plane point in
+// clip space, carried back to world, gives the direction from the eye through the
+// pixel.
+float3 SkyRadiance(VSOutput input) {
     float4 world = mul(float4(input.clip, 1.0f, 1.0f), g_inv_view_projection);
     world /= world.w;
     const float3 dir = normalize(world.xyz - g_camera_position);
-    return float4(LinearToSrgb(SampleSky(dir)), 1.0f);
+    return SampleSky(dir, g_time);
+}
+
+// The on-screen background: into the linear HDR scene buffer, so no encode here --
+// the tonemap pass does it, once, for the whole frame.
+float4 PSMain(VSOutput input) : SV_TARGET {
+    return float4(SkyRadiance(input), 1.0f);
+}
+
+// The background behind the reflection-probe capture: into the _UNORM cube sampled
+// through an sRGB view, so the linear radiance is encoded here, exactly as the
+// scene capture pass does.
+float4 PSMainCapture(VSOutput input) : SV_TARGET {
+    return float4(LinearToSrgb(SkyRadiance(input)), 1.0f);
 }
