@@ -17,8 +17,26 @@ namespace {
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
 
+// The HDR scene buffer the whole world renders into, in linear light: a 16-bit
+// float per channel, enough range to hold values above 1 for the tonemapper to
+// pull back and enough precision to keep the darks from banding.
+constexpr DXGI_FORMAT kHdrFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+// The HDR target's render-target view sits just past the swapchain's own RTVs in
+// rtv_heap_, so that heap holds one more descriptor than there are frames.
+constexpr UINT kHdrRtvIndex = Renderer::kFrameCount;
+
+// The persistent engine SRV heap and the HDR buffer's slot in it. Sized past the
+// one slot in use so the post-process buffers to come need no reallocation.
+constexpr UINT kEngineHeapSize = 8;
+constexpr UINT kHdrSrvIndex = 0;
+
 // The sky the fog fades into, so the horizon has no seam.
 constexpr float kSkyColor[] = {0.52f, 0.62f, 0.76f, 1.0f};
+
+// The HDR buffer's clear colour: the sky tone in linear light. The sky pass fills
+// every pixel with depth off, so this is only a formality, but a render target
+// must declare a clear value and every clear must match it for the fast path.
+constexpr float kHdrClearColor[] = {0.235f, 0.342f, 0.537f, 1.0f};
 
 // The sun is south of the yard, over the player's shoulder at the spawn point,
 // so the faces they are looking at are the lit ones.
@@ -251,12 +269,15 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     CreateSwapChain(hwnd, width, height);
     CreateRenderTargetViews();
     CreateDepthBuffer();
+    CreateEngineDescriptorHeap();
+    CreateHdrTarget();
     CreateShadowMap();
     CreatePipeline();
     CreateSkyPipeline();
     CreateOutlinePipeline();
     CreateShadowPipeline();
     CreateTextPipeline();
+    CreateTonemapPipeline();
 
     // Everything above is the session's, not the level's. The scene geometry, the
     // font atlas and the reflection probe come up in LoadScene, so a level can be
@@ -386,8 +407,10 @@ void Renderer::CreateSwapChain(HWND hwnd, UINT width, UINT height) {
     ThrowIfFailed(swap_chain.As(&swap_chain_), "IDXGISwapChain3 QueryInterface");
     frame_index_ = swap_chain_->GetCurrentBackBufferIndex();
 
+    // One RTV per swapchain buffer, plus one for the HDR scene buffer (kHdrRtvIndex)
+    // the whole world renders into before the tonemap pass resolves it.
     D3D12_DESCRIPTOR_HEAP_DESC rtv_desc{};
-    rtv_desc.NumDescriptors = kFrameCount;
+    rtv_desc.NumDescriptors = kFrameCount + 1;
     rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     ThrowIfFailed(device_->CreateDescriptorHeap(&rtv_desc, IID_PPV_ARGS(&rtv_heap_)),
                   "CreateDescriptorHeap(RTV)");
@@ -439,6 +462,55 @@ void Renderer::CreateDepthBuffer() {
     // CreateShadowMap and untouched by a resize.
     device_->CreateDepthStencilView(depth_stencil_.Get(), &dsv,
                                     dsv_heap_->GetCPUDescriptorHandleForHeapStart());
+}
+
+void Renderer::CreateEngineDescriptorHeap() {
+    // Shader-visible, and -- unlike texture_heap_ -- built once and kept for the
+    // whole session, so a level swap never disturbs the SRVs of resources that
+    // outlive it. Slot 0 is the HDR scene buffer; the rest are reserved for the
+    // post-process buffers to come.
+    D3D12_DESCRIPTOR_HEAP_DESC desc{};
+    desc.NumDescriptors = kEngineHeapSize;
+    desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ThrowIfFailed(device_->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&engine_heap_)),
+                  "CreateDescriptorHeap(engine)");
+    engine_heap_size_ =
+        device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+
+void Renderer::CreateHdrTarget() {
+    // The clear value must be declared up front and matched by every
+    // ClearRenderTargetView, or the driver drops its fast-clear path.
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = kHdrFormat;
+    std::memcpy(clear.Color, kHdrClearColor, sizeof(clear.Color));
+
+    const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+    const CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex2D(
+        kHdrFormat, width_, height_, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    // Created in the shader-resource state it rests in between frames: Render's
+    // first act is to flip it to a render target, and its last to flip it back, so
+    // the resting state is the one the tonemap pass reads it in.
+    ThrowIfFailed(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear,
+                                                   IID_PPV_ARGS(&hdr_target_)),
+                  "CreateCommittedResource(HDR target)");
+
+    // Its render-target view, in rtv_heap_ just past the swapchain buffers.
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                            static_cast<INT>(kHdrRtvIndex), rtv_size_);
+    device_->CreateRenderTargetView(hdr_target_.Get(), nullptr, rtv);
+
+    // Its shader-resource view, in the persistent engine heap the tonemap pass binds.
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = kHdrFormat;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE srv_handle(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                   static_cast<INT>(kHdrSrvIndex), engine_heap_size_);
+    device_->CreateShaderResourceView(hdr_target_.Get(), &srv, srv_handle);
 }
 
 void Renderer::CreateShadowMap() {
@@ -582,7 +654,9 @@ void Renderer::CreatePipeline() {
     pso.SampleMask = UINT_MAX;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.NumRenderTargets = 1;
-    pso.RTVFormats[0] = kBackBufferFormat;
+    // The on-screen scene renders into the linear HDR buffer; the tonemap pass
+    // resolves it to the swapchain later.
+    pso.RTVFormats[0] = kHdrFormat;
     pso.SampleDesc.Count = 1;
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pipeline_state_)),
@@ -590,7 +664,8 @@ void Renderer::CreatePipeline() {
 
     // The probe-capture variant: the same pipeline, same root signature and vertex
     // shader, with the capture pixel shader (analytic sky, no cube read) and the
-    // probe's render-target format. It renders the yard into the cubemap faces.
+    // probe's render-target format. It renders the yard into the cubemap faces,
+    // which are 8-bit, so it encodes to sRGB where the on-screen variant stays HDR.
     const std::vector<std::byte> capture_ps =
         ReadBinaryFile(shader_dir / "scene_capture.ps.cso");
     pso.PS = {capture_ps.data(), capture_ps.size()};
@@ -652,15 +727,28 @@ void Renderer::CreateSkyPipeline() {
     pso.SampleMask = UINT_MAX;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.NumRenderTargets = 1;
-    pso.RTVFormats[0] = kBackBufferFormat;
+    // On-screen, the sky is the background of the linear HDR buffer.
+    pso.RTVFormats[0] = kHdrFormat;
     pso.SampleDesc.Count = 1;
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sky_pipeline_state_)),
                   "CreateGraphicsPipelineState(sky)");
+
+    // The capture variant: the same pass behind the reflection probe, encoding to
+    // sRGB for the 8-bit cube instead of leaving its radiance linear.
+    const std::vector<std::byte> capture_ps = ReadBinaryFile(shader_dir / "sky_capture.ps.cso");
+    pso.PS = {capture_ps.data(), capture_ps.size()};
+    pso.RTVFormats[0] = kProbeRtvFormat;
+    ThrowIfFailed(
+        device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sky_capture_pipeline_state_)),
+        "CreateGraphicsPipelineState(sky capture)");
 }
 
-void Renderer::DrawSky(const XMMATRIX& view_projection, XMFLOAT3 camera_position) {
-    command_list_->SetPipelineState(sky_pipeline_state_.Get());
+void Renderer::DrawSky(const XMMATRIX& view_projection, XMFLOAT3 camera_position, bool capture) {
+    // The capture variant encodes to sRGB for the 8-bit probe cube; the on-screen
+    // one leaves its radiance linear for the HDR buffer.
+    command_list_->SetPipelineState(
+        capture ? sky_capture_pipeline_state_.Get() : sky_pipeline_state_.Get());
     command_list_->SetGraphicsRootSignature(sky_root_signature_.Get());
     command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     command_list_->IASetVertexBuffers(0, 0, nullptr);
@@ -763,12 +851,75 @@ void Renderer::CreateOutlinePipeline() {
     pso.SampleMask = UINT_MAX;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.NumRenderTargets = 1;
-    pso.RTVFormats[0] = kBackBufferFormat;
+    // The halo is drawn into the linear HDR scene buffer, alongside the world.
+    pso.RTVFormats[0] = kHdrFormat;
     pso.SampleDesc.Count = 1;
 
     ThrowIfFailed(
         device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&outline_pipeline_state_)),
         "CreateGraphicsPipelineState(outline)");
+}
+
+void Renderer::CreateTonemapPipeline() {
+    // b0: the exposure scalar, as a single root constant. t0: the HDR scene buffer,
+    // in the persistent engine heap. No sampler -- the pixel shader reads the buffer
+    // by integer Load, since the resolve is 1:1.
+    const CD3DX12_DESCRIPTOR_RANGE hdr_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+    CD3DX12_ROOT_PARAMETER parameters[2];
+    parameters[0].InitAsConstants(1, 0);
+    parameters[1].InitAsDescriptorTable(1, &hdr_range, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    root_desc.Init(_countof(parameters), parameters, 0, nullptr,
+                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr =
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr)) {
+        std::string message = error
+                                  ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                                error->GetBufferSize())
+                                  : "unknown error";
+        throw std::runtime_error("D3D12SerializeRootSignature(tonemap) failed: " + message);
+    }
+    ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                               signature->GetBufferSize(),
+                                               IID_PPV_ARGS(&tonemap_root_signature_)),
+                  "CreateRootSignature(tonemap)");
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "tonemap.vs.cso");
+    const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "tonemap.ps.cso");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    // No input layout: the fullscreen triangle comes from SV_VertexID.
+    pso.InputLayout = {nullptr, 0};
+    pso.pRootSignature = tonemap_root_signature_.Get();
+    pso.VS = {vs.data(), vs.size()};
+    pso.PS = {ps.data(), ps.size()};
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    // The resolve overwrites every pixel of the frame, so no depth at all.
+    pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    // The one pass that actually writes the swapchain.
+    pso.RTVFormats[0] = kBackBufferFormat;
+    pso.SampleDesc.Count = 1;
+
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&tonemap_pipeline_state_)),
+                  "CreateGraphicsPipelineState(tonemap)");
 }
 
 void Renderer::UpdateShadowProjection() {
@@ -1300,7 +1451,7 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
         command_list_->ClearDepthStencilView(probe_dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
         // The gradient sky behind, then the static yard lit by the analytic sky.
-        DrawSky(view_projection, kProbePosition);
+        DrawSky(view_projection, kProbePosition, true);
         command_list_->SetGraphicsRootSignature(root_signature_.Get());
         command_list_->SetPipelineState(scene_capture_pipeline_state_.Get());
         command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1750,24 +1901,27 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     command_list_->RSSetViewports(1, &viewport_);
     command_list_->RSSetScissorRects(1, &scissor_);
 
-    const CD3DX12_RESOURCE_BARRIER to_render_target = CD3DX12_RESOURCE_BARRIER::Transition(
-        render_targets_[frame_index_].Get(), D3D12_RESOURCE_STATE_PRESENT,
+    // The whole world renders into the linear HDR scene buffer; the tonemap pass
+    // resolves it to the swapchain afterward. Flip the buffer from the shader
+    // resource the previous frame's resolve left it as into a render target.
+    const CD3DX12_RESOURCE_BARRIER hdr_to_rt = CD3DX12_RESOURCE_BARRIER::Transition(
+        hdr_target_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
         D3D12_RESOURCE_STATE_RENDER_TARGET);
-    command_list_->ResourceBarrier(1, &to_render_target);
+    command_list_->ResourceBarrier(1, &hdr_to_rt);
 
-    const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
-                                            static_cast<INT>(frame_index_), rtv_size_);
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE hdr_rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                static_cast<INT>(kHdrRtvIndex), rtv_size_);
     // Slot 0 of the DSV heap: the scene's depth buffer, not the shadow map's.
     const CD3DX12_CPU_DESCRIPTOR_HANDLE dsv(dsv_heap_->GetCPUDescriptorHandleForHeapStart());
-    command_list_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, &dsv);
 
-    command_list_->ClearRenderTargetView(rtv, kSkyColor, 0, nullptr);
+    command_list_->ClearRenderTargetView(hdr_rtv, kHdrClearColor, 0, nullptr);
     command_list_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
     // The gradient sky, filling the frame behind the yard. Depth is off, so the
     // geometry that follows paints over it. DrawSky binds its own pipeline and root
     // signature, so the scene's are restored before the first instance is drawn.
-    DrawSky(view_projection, camera_position);
+    DrawSky(view_projection, camera_position, false);
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
 
@@ -1810,7 +1964,44 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // clipped by the wall the player is facing.
     DrawInstances(held_props, view_projection, viewmodel.sun_direction, 0.0f, true);
 
-    // The HUD goes on last, blended over the finished frame with depth off.
+    // The world is finished. Flip the HDR buffer to a shader resource for the
+    // tonemap pass, and bring the swapchain buffer up as the target the resolve and
+    // the HUD write.
+    const CD3DX12_RESOURCE_BARRIER hdr_to_srv = CD3DX12_RESOURCE_BARRIER::Transition(
+        hdr_target_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    command_list_->ResourceBarrier(1, &hdr_to_srv);
+
+    const CD3DX12_RESOURCE_BARRIER to_render_target = CD3DX12_RESOURCE_BARRIER::Transition(
+        render_targets_[frame_index_].Get(), D3D12_RESOURCE_STATE_PRESENT,
+        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    command_list_->ResourceBarrier(1, &to_render_target);
+
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                            static_cast<INT>(frame_index_), rtv_size_);
+    // No depth: the resolve and the HUD both write flat over the frame.
+    command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+
+    // The resolve pass: tonemap the HDR scene buffer onto the swapchain. It reads
+    // the buffer's SRV from the persistent engine heap, so bind that heap for the
+    // draw; the fullscreen triangle comes from SV_VertexID, so no vertex buffer.
+    ID3D12DescriptorHeap* engine_heaps[] = {engine_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(engine_heaps), engine_heaps);
+    command_list_->SetGraphicsRootSignature(tonemap_root_signature_.Get());
+    command_list_->SetPipelineState(tonemap_pipeline_state_.Get());
+    const float exposure = 1.0f;
+    command_list_->SetGraphicsRoot32BitConstants(0, 1, &exposure, 0);
+    const CD3DX12_GPU_DESCRIPTOR_HANDLE hdr_srv(engine_heap_->GetGPUDescriptorHandleForHeapStart(),
+                                                static_cast<INT>(kHdrSrvIndex), engine_heap_size_);
+    command_list_->SetGraphicsRootDescriptorTable(1, hdr_srv);
+    command_list_->IASetVertexBuffers(0, 0, nullptr);
+    command_list_->DrawInstanced(3, 1, 0, 0);
+
+    // The HUD goes on last, blended over the resolved frame in display space -- so
+    // it is deliberately not tonemapped. It samples the font atlas from the
+    // per-level texture heap, so bind that back before drawing.
+    ID3D12DescriptorHeap* text_heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(text_heaps), text_heaps);
     DrawText(hud_prompt);
 
     const CD3DX12_RESOURCE_BARRIER to_present = CD3DX12_RESOURCE_BARRIER::Transition(
@@ -1876,6 +2067,10 @@ void Renderer::Resize(UINT width, UINT height) {
         fence_values_[i] = fence_values_[frame_index_];
     }
     depth_stencil_.Reset();
+    // The HDR scene buffer is window-sized too, so it is rebuilt with the rest. The
+    // engine heap it is viewed through persists; CreateHdrTarget just rewrites the
+    // descriptor.
+    hdr_target_.Reset();
 
     DXGI_SWAP_CHAIN_DESC desc{};
     ThrowIfFailed(swap_chain_->GetDesc(&desc), "SwapChain::GetDesc");
@@ -1889,6 +2084,7 @@ void Renderer::Resize(UINT width, UINT height) {
 
     CreateRenderTargetViews();
     CreateDepthBuffer();
+    CreateHdrTarget();
 }
 
 void Renderer::Shutdown() {

@@ -30,11 +30,25 @@ VSOutput VSMain(uint id : SV_VertexID) {
     return output;
 }
 
-float4 PSMain(VSOutput input) : SV_TARGET {
-    // A far-plane point in clip space, carried back to world, gives the direction
-    // from the eye through this pixel.
+// The linear radiance of the sky along this pixel's view ray. A far-plane point in
+// clip space, carried back to world, gives the direction from the eye through the
+// pixel.
+float3 SkyRadiance(VSOutput input) {
     float4 world = mul(float4(input.clip, 1.0f, 1.0f), g_inv_view_projection);
     world /= world.w;
     const float3 dir = normalize(world.xyz - g_camera_position);
-    return float4(LinearToSrgb(SampleSky(dir)), 1.0f);
+    return SampleSky(dir);
+}
+
+// The on-screen background: into the linear HDR scene buffer, so no encode here --
+// the tonemap pass does it, once, for the whole frame.
+float4 PSMain(VSOutput input) : SV_TARGET {
+    return float4(SkyRadiance(input), 1.0f);
+}
+
+// The background behind the reflection-probe capture: into the _UNORM cube sampled
+// through an sRGB view, so the linear radiance is encoded here, exactly as the
+// scene capture pass does.
+float4 PSMainCapture(VSOutput input) : SV_TARGET {
+    return float4(LinearToSrgb(SkyRadiance(input)), 1.0f);
 }

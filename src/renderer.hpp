@@ -89,6 +89,16 @@ private:
     void CreateSwapChain(HWND hwnd, UINT width, UINT height);
     void CreateRenderTargetViews();
     void CreateDepthBuffer();
+    // The shader-visible heap for session-level SRVs -- the ones that outlive a
+    // level swap, kept apart from the per-level material heap (texture_heap_) that
+    // ReleaseScene tears down. Created once at startup; slot 0 is the HDR scene
+    // buffer, with room reserved for the post-process buffers to come.
+    void CreateEngineDescriptorHeap();
+    // The HDR scene buffer the whole world renders into, in linear light: an
+    // R16G16B16A16_FLOAT target the size of the window, with a render-target view in
+    // rtv_heap_ and a shader-resource view in engine_heap_. Recreated on resize like
+    // the depth buffer; the tonemap pass reads it and writes the swapchain.
+    void CreateHdrTarget();
     // The sun's depth buffer and everything the shadow pass draws it with: a
     // square R32_TYPELESS texture with a D32 depth view to render into and an
     // R32_FLOAT resource view to sample back, plus its own viewport. Fixed size,
@@ -112,6 +122,11 @@ private:
     // mesh along its normals, cull the near faces and paint the far shell a flat
     // glowing colour. Depth-tests against the world but writes no depth.
     void CreateOutlinePipeline();
+    // The resolve pass: a fullscreen pixel shader that tonemaps the linear HDR
+    // scene buffer and encodes it to sRGB for the swapchain. Its own tiny root
+    // signature (an exposure constant and the HDR buffer's SRV) and a PSO with depth
+    // off, targeting the back buffer.
+    void CreateTonemapPipeline();
     // Uploads every model the scene holds, plus the 1x1 white texture that
     // stands in for a material with no texture of its own.
     void CreateSceneGeometry(const Scene& scene);
@@ -162,7 +177,10 @@ private:
     // `camera_position` through `view_projection`. Draws no depth, so geometry
     // rendered afterward paints over it. Switches to the sky pipeline and root
     // signature; the caller restores whatever it needs next.
-    void DrawSky(const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position);
+    // `capture` picks the pixel shader: the on-screen pass leaves its radiance
+    // linear for the HDR buffer, the probe capture encodes to sRGB for the 8-bit cube.
+    void DrawSky(const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
+                 bool capture);
 
     // The shadow pass: draws every caster depth-only into the shadow map from the
     // sun's point of view, wrapped in the barriers that flip the map between
@@ -199,6 +217,17 @@ private:
     UINT dsv_size_ = 0;
     ComPtr<ID3D12Resource> depth_stencil_;
 
+    // The linear HDR scene buffer: the whole world draws into this, and the tonemap
+    // pass resolves it to the swapchain. Its RTV is the last slot of rtv_heap_
+    // (after the swapchain buffers); its SRV is slot 0 of engine_heap_.
+    ComPtr<ID3D12Resource> hdr_target_;
+
+    // The persistent, shader-visible heap for session-level SRVs (the HDR buffer,
+    // and the post-process buffers to come). Kept separate from texture_heap_ so a
+    // level swap, which rebuilds that per-level heap, never disturbs these.
+    ComPtr<ID3D12DescriptorHeap> engine_heap_;
+    UINT engine_heap_size_ = 0;
+
     ComPtr<ID3D12CommandAllocator> allocators_[kFrameCount];
     ComPtr<ID3D12GraphicsCommandList> command_list_;
 
@@ -207,9 +236,18 @@ private:
 
     // The gradient-sky background pass. No vertex buffer, no textures: the pixel
     // shader reconstructs the view ray from the inverse view-projection handed in
-    // as root constants.
+    // as root constants. `sky_capture_pipeline_state_` is the same pass encoding to
+    // sRGB into the 8-bit probe cube, where the on-screen one leaves its radiance
+    // linear for the HDR buffer.
     ComPtr<ID3D12RootSignature> sky_root_signature_;
     ComPtr<ID3D12PipelineState> sky_pipeline_state_;
+    ComPtr<ID3D12PipelineState> sky_capture_pipeline_state_;
+
+    // The resolve pass: tonemaps the HDR scene buffer and encodes it to the
+    // swapchain. Reads engine_heap_ slot 0; no vertex buffer (a fullscreen triangle
+    // from SV_VertexID).
+    ComPtr<ID3D12RootSignature> tonemap_root_signature_;
+    ComPtr<ID3D12PipelineState> tonemap_pipeline_state_;
 
     // The reflection probe. `scene_capture_pipeline_state_` is the scene PSO with
     // the capture pixel shader (analytic sky, no cube read); it fills probe_cube_

@@ -348,18 +348,23 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     const float3 view_ray = normalize(input.world - g_camera_position);
     const float fog = saturate((input.view_depth - kFogStart) / (kFogEnd - kFogStart));
     const float3 color = lerp(lit, SampleSky(view_ray), fog * 0.9f);
-    // Back to sRGB for the plain _UNORM back buffer the outline and text passes
-    // also write to in display space.
-    return float4(LinearToSrgb(color), 1.0f);
+    // Left in linear light: the whole world renders into the HDR scene buffer,
+    // and the tonemap pass (tonemap.hlsl) is the one place the linear->sRGB encode
+    // happens. The capture path below, which writes an 8-bit cube instead, encodes
+    // for itself.
+    return float4(color, 1.0f);
 }
 
-// The on-screen pass: reflect the captured probe.
+// The on-screen pass: reflect the captured probe. Its target is the linear HDR
+// scene buffer, so the shade is written as-is and the tonemap pass encodes it.
 float4 PSMain(PSInput input) : SV_TARGET {
     return ShadeScene(input, true);
 }
 
 // The capture pass that fills the probe: reflect the analytic sky instead, so it
-// never reads the cube it is writing.
+// never reads the cube it is writing. Its target is the _UNORM probe cube, sampled
+// back through an sRGB view, so the linear shade is encoded here.
 float4 PSMainCapture(PSInput input) : SV_TARGET {
-    return ShadeScene(input, false);
+    const float4 shade = ShadeScene(input, false);
+    return float4(LinearToSrgb(shade.rgb), shade.a);
 }
