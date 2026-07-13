@@ -214,13 +214,12 @@ struct BloomConstants {
 static_assert(sizeof(BloomConstants) % sizeof(UINT) == 0);
 constexpr UINT kBloomConstantDwords = sizeof(BloomConstants) / sizeof(UINT);
 
-// The soft-knee bright-pass on the first downsample: only what is brighter than the
-// threshold blooms, easing in over the knee. The upsample tent's radius, and how
-// strongly the finished bloom is added back in the resolve.
-constexpr float kBloomThreshold = 0.9f;
-constexpr float kBloomKnee = 0.4f;
+// The bright-pass threshold/knee, the resolve's exposure and how strongly the bloom
+// is added back are all per-level now -- see Environment (exposure, bloom_intensity,
+// bloom_threshold, bloom_knee), read from environment_ where the passes below set
+// their constants. The upsample tent's radius stays a constant: it is filter
+// geometry, not part of a level's look.
 constexpr float kBloomUpsampleRadius = 1.0f;
-constexpr float kBloomIntensity = 0.7f;
 
 // Mirrors the OutlineConstants cbuffer in shaders/outline.hlsl. The view-
 // projection stands alone because the mesh is grown in world space before it is
@@ -1372,8 +1371,8 @@ void Renderer::RenderBloom() {
         if (i == 0) {
             constants.src_texel = {1.0f / static_cast<float>(width_),
                                    1.0f / static_cast<float>(height_)};
-            constants.param0 = kBloomThreshold;
-            constants.param1 = kBloomKnee;
+            constants.param0 = environment_.bloom_threshold;
+            constants.param1 = environment_.bloom_knee;
         } else {
             constants.src_texel = {1.0f / static_cast<float>(bloom_targets_[i - 1].width),
                                    1.0f / static_cast<float>(bloom_targets_[i - 1].height)};
@@ -2558,7 +2557,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // triangle comes from SV_VertexID, so no vertex buffer.
     command_list_->SetGraphicsRootSignature(tonemap_root_signature_.Get());
     command_list_->SetPipelineState(tonemap_pipeline_state_.Get());
-    const float tonemap_constants[] = {1.0f, kBloomIntensity}; // exposure, bloom intensity
+    const float tonemap_constants[] = {environment_.exposure, environment_.bloom_intensity};
     command_list_->SetGraphicsRoot32BitConstants(0, _countof(tonemap_constants), tonemap_constants,
                                                  0);
     const D3D12_GPU_DESCRIPTOR_HANDLE engine_base =

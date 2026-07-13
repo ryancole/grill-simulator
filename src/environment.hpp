@@ -51,6 +51,16 @@ struct Environment {
     DirectX::XMFLOAT3 shaft_color;
     float shaft_intensity;
     float shaft_g;
+    // The post-process resolve. `exposure` scales the linear scene before tonemapping
+    // (1.0 leaves it be); `bloom_intensity` is how strongly the glow is added back.
+    // `bloom_threshold`/`bloom_knee` are the soft-knee bright-pass: only what is
+    // brighter than the threshold blooms, easing in over the knee. Unlike the fields
+    // above these ride to the tonemap and bloom passes, not the per-draw scene
+    // constants, so they are not part of any cbuffer mirror -- plain Environment data.
+    float exposure;
+    float bloom_intensity;
+    float bloom_threshold;
+    float bloom_knee;
 };
 
 // The default sky: the values that were `static const` in common.hlsli, scene.hlsl
@@ -77,6 +87,10 @@ constexpr Environment kDefaultEnvironment{
     /*shaft_color*/ {1.0f, 0.96f, 0.88f},
     /*shaft_intensity*/ 0.9f,
     /*shaft_g*/ 0.76f,
+    /*exposure*/ 1.0f,
+    /*bloom_intensity*/ 0.7f,
+    /*bloom_threshold*/ 0.9f,
+    /*bloom_knee*/ 0.4f,
 };
 
 // Expands a time of day into a whole sky. `hours` is a clock time in [0,24) (values

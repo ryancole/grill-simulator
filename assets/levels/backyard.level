@@ -22,6 +22,9 @@
 #               and how strong the ambient and the behind-the-sun fill are.
 #             fog_start, fog_end -- the distance band the yard fades into the sky.
 #             shaft_color, shaft_intensity, shaft_g -- the volumetric sun shafts.
+#             exposure, bloom_intensity, bloom_threshold, bloom_knee -- the resolve:
+#               the exposure the scene is tonemapped at, and the glow's strength and
+#               its soft-knee bright-pass.
 #   box  -- a coloured cube: center + size in metres, with optional yaw and checker
 #           (metres per checker tile; omit for a flat surface).
 #   prop -- a .glb from assets/models: pos, with optional yaw, uniform scale and

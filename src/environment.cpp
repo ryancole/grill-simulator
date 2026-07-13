@@ -43,6 +43,10 @@ Environment LerpEnvironment(const Environment& a, const Environment& b, float t)
     e.shaft_color = Lerp3(a.shaft_color, b.shaft_color, t);
     e.shaft_intensity = Lerp(a.shaft_intensity, b.shaft_intensity, t);
     e.shaft_g = Lerp(a.shaft_g, b.shaft_g, t);
+    e.exposure = Lerp(a.exposure, b.exposure, t);
+    e.bloom_intensity = Lerp(a.bloom_intensity, b.bloom_intensity, t);
+    e.bloom_threshold = Lerp(a.bloom_threshold, b.bloom_threshold, t);
+    e.bloom_knee = Lerp(a.bloom_knee, b.bloom_knee, t);
     return e;
 }
 
