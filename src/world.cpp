@@ -13,11 +13,13 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
       furniture_(scene_, physics),
       renderer_(&renderer),
       physics_(&physics) {
-    // Hand the freshly built Scene to the persistent systems. Aim the sun first, so
-    // the reflection probe LoadScene captures is lit the level's way; then upload
-    // the geometry, and drop the immovable colliders into the physics scene the
-    // props and furniture already registered their bodies with.
+    // Hand the freshly built Scene to the persistent systems. Aim the sun and set
+    // the sky first, so the reflection probe LoadScene captures is lit and coloured
+    // the level's way; then upload the geometry, and drop the immovable colliders
+    // into the physics scene the props and furniture already registered their bodies
+    // with.
     renderer.SetSunDirection(level.sun_direction);
+    renderer.SetEnvironment(level.environment);
     renderer.LoadScene(scene_);
     physics.AddStaticWorld(scene_.Colliders());
 }

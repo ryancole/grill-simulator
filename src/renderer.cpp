@@ -115,75 +115,10 @@ struct ShadowConstants {
 
 constexpr UINT kShadowConstantDwords = sizeof(ShadowConstants) / sizeof(UINT);
 
-// Mirrors the SkyEnvironment struct in shaders/common.hlsli: the sky gradient and
-// the drifting cloud layer SampleSky draws from. Every pass that draws or reflects
-// the sky embeds one of these in its constant buffer, so a level can carry its own
-// sky rather than one baked into the shaders. Laid out to pack into cbuffer float4
-// rows with no straddle -- each XMFLOAT3 is followed by a scalar, and the whole is
-// a 16-byte multiple -- matching the HLSL side exactly. Do not reorder one alone.
-struct SkyEnvironment {
-    XMFLOAT3 zenith;
-    float cloud_scale;
-    XMFLOAT3 horizon;
-    float cloud_coverage;
-    XMFLOAT3 ground;
-    float cloud_softness;
-    XMFLOAT3 cloud_color;
-    float cloud_opacity;
-    XMFLOAT2 cloud_wind;
-    float pad0;
-    float pad1;
-};
-static_assert(sizeof(SkyEnvironment) == 80, "SkyEnvironment must mirror the HLSL cbuffer rows");
-
-// The whole atmosphere of a level: the sky/clouds above, plus the sun, ambient,
-// fill, fog and light-shaft terms the shaders once held as `static const`. One
-// source of truth the renderer distributes into each pass's constant buffer (see
-// the ApplyEnvironment overloads). This is where per-level skies will be set from
-// once the level format grows to carry them; for now every field is seeded with
-// the value its shader constant held, so the frame is pixel-for-pixel unchanged.
-struct Environment {
-    SkyEnvironment sky;
-    // The sun's colour and its radiance (a pi folded in; see g_sun_intensity).
-    XMFLOAT3 sun_color;
-    float sun_intensity;
-    // The flat sky tone the diffuse ambient and fill use, and how strong each is.
-    XMFLOAT3 sky_ambient;
-    float ambient_strength;
-    float fill_strength;
-    // The distance band the yard fades into the sky over.
-    float fog_start;
-    float fog_end;
-    // The volumetric sun shafts: the sunlight they scatter, how strong, and the
-    // Henyey-Greenstein forward-scatter asymmetry.
-    XMFLOAT3 shaft_color;
-    float shaft_intensity;
-    float shaft_g;
-};
-
-// Today's look, field for field: the values that were `static const` in
-// common.hlsli, scene.hlsl and lightshafts.hlsl before they moved here. Changing
-// any of these changes the frame; leaving them is the zero-diff refactor.
-constexpr Environment kDefaultEnvironment{
-    /*sky*/ {
-        /*zenith*/ {0.40f, 0.54f, 0.76f}, /*cloud_scale*/ 0.55f,
-        /*horizon*/ {0.70f, 0.76f, 0.82f}, /*cloud_coverage*/ 0.52f,
-        /*ground*/ {0.20f, 0.18f, 0.16f}, /*cloud_softness*/ 0.30f,
-        /*cloud_color*/ {0.96f, 0.97f, 1.0f}, /*cloud_opacity*/ 0.9f,
-        /*cloud_wind*/ {0.010f, 0.006f}, /*pad*/ 0.0f, 0.0f,
-    },
-    /*sun_color*/ {1.0f, 0.96f, 0.88f},
-    // pi, the same value scene.hlsl's kSunIntensity = kPi carried.
-    /*sun_intensity*/ 3.14159265f,
-    /*sky_ambient*/ {0.52f, 0.62f, 0.76f},
-    /*ambient_strength*/ 0.65f,
-    /*fill_strength*/ 0.18f,
-    /*fog_start*/ 20.0f,
-    /*fog_end*/ 90.0f,
-    /*shaft_color*/ {1.0f, 0.96f, 0.88f},
-    /*shaft_intensity*/ 0.9f,
-    /*shaft_g*/ 0.76f,
-};
+// SkyEnvironment, Environment and kDefaultEnvironment now live in environment.hpp
+// (via renderer.hpp), shared with the level parser that fills them. What stays here
+// are the constant-buffer mirrors that embed a SkyEnvironment, and the
+// ApplyEnvironment overloads that stamp an Environment into each.
 
 // Mirrors the SkyConstants cbuffer in shaders/sky.hlsl: clip space back to world,
 // the eye the view rays start from, and the level's sky.
@@ -1051,7 +986,7 @@ void Renderer::DrawSky(const XMMATRIX& view_projection, XMFLOAT3 camera_position
     XMStoreFloat4x4(&constants.inv_view_projection, XMMatrixInverse(nullptr, view_projection));
     constants.camera_position = camera_position;
     constants.time = time;
-    ApplyEnvironment(constants, kDefaultEnvironment);
+    ApplyEnvironment(constants, environment_);
     command_list_->SetGraphicsRoot32BitConstants(0, kSkyConstantDwords, &constants, 0);
 
     // Three vertices, no buffer: the vertex shader builds the triangle from the id.
@@ -1504,6 +1439,15 @@ void Renderer::SetSunDirection(XMFLOAT3 direction) {
     // with no need to restamp the mapped buffer here.
 }
 
+void Renderer::SetEnvironment(const Environment& environment) {
+    // Just record it. Every pass that draws the sky or shades under it stamps
+    // environment_ into its constant buffer as it renders -- Render for the scene
+    // and shafts, DrawSky for the background -- so the change lands next frame with
+    // nothing to re-upload here. Called before LoadScene, it also decides the sky
+    // the reflection-probe capture bakes, since that capture reads the same paths.
+    environment_ = environment;
+}
+
 void Renderer::CreateShadowPipeline() {
     // The sun starts where the backyard wants it; a loaded level re-aims it through
     // SetSunDirection. Build the light's view-projection from that default now, so
@@ -1532,7 +1476,7 @@ void Renderer::CreateShadowPipeline() {
     for (UINT i = 0; i < kFrameCount; ++i) {
         FrameConstants frame{};
         frame.light_view_projection = light_view_projection_;
-        ApplyEnvironment(frame, kDefaultEnvironment);
+        ApplyEnvironment(frame, environment_);
         std::memcpy(frame_constants_mapped_ + static_cast<size_t>(i) * frame_constants_stride_,
                     &frame, sizeof(frame));
     }
@@ -1958,7 +1902,7 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
     FrameConstants frame{};
     frame.light_view_projection = light_view_projection_;
     frame.camera_position = kProbePosition;
-    ApplyEnvironment(frame, kDefaultEnvironment);
+    ApplyEnvironment(frame, environment_);
     std::memcpy(frame_constants_mapped_, &frame, sizeof(frame));
     frame_constants_address_ = frame_constants_->GetGPUVirtualAddress();
 
@@ -2457,7 +2401,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     frame.light_view_projection = light_view_projection_;
     frame.camera_position = camera_position;
     frame.time = seconds;
-    ApplyEnvironment(frame, kDefaultEnvironment);
+    ApplyEnvironment(frame, environment_);
     std::memcpy(frame_region, &frame, sizeof(frame));
     frame_constants_address_ =
         frame_constants_->GetGPUVirtualAddress() +
@@ -2572,7 +2516,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     shaft.light_view_projection = light_view_projection_;
     shaft.camera_position = camera_position;
     shaft.sun_direction = sun_direction_;
-    ApplyEnvironment(shaft, kDefaultEnvironment);
+    ApplyEnvironment(shaft, environment_);
     command_list_->SetGraphicsRoot32BitConstants(0, kLightShaftConstantDwords, &shaft, 0);
     const CD3DX12_GPU_DESCRIPTOR_HANDLE shaft_srv(
         engine_heap_->GetGPUDescriptorHandleForHeapStart(), static_cast<INT>(kDepthSrvIndex),
