@@ -11,6 +11,10 @@ cbuffer SkyConstants : register(b0) {
     // Seconds since the renderer came up, so the cloud layer drifts. The probe
     // capture passes 0, baking a still cloudscape into the static reflection.
     float g_time;
+    // The level's atmosphere SampleSky draws from -- the same struct the scene pass
+    // carries, so the background and the sky a metal reflects stay one sky. Filled
+    // from the C++ Environment; see SkyConstants in renderer.cpp.
+    SkyEnvironment g_sky;
 };
 
 struct VSOutput {
@@ -39,7 +43,7 @@ float3 SkyRadiance(VSOutput input) {
     float4 world = mul(float4(input.clip, 1.0f, 1.0f), g_inv_view_projection);
     world /= world.w;
     const float3 dir = normalize(world.xyz - g_camera_position);
-    return SampleSky(dir, g_time);
+    return SampleSky(dir, g_time, g_sky);
 }
 
 // The on-screen background: into the linear HDR scene buffer, so no encode here --

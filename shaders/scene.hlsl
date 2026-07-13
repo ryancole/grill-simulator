@@ -47,6 +47,33 @@ cbuffer FrameConstants : register(b1) {
     // Seconds since the renderer came up, so the cloud layer the fog fades into
     // drifts in step with the sky pass. The probe capture passes 0.
     float g_time;
+    // The level's atmosphere, carried per frame rather than baked in: the sky
+    // gradient and clouds SampleSky reads, then the sun, ambient, fill and fog the
+    // shade below was once seeded with `static const`. Filled from the C++
+    // Environment; see FrameConstants in renderer.cpp.
+    SkyEnvironment g_sky;
+    // The sun's colour and radiance. The diffuse BRDF carries a 1/pi that a real
+    // light's intensity would swallow; g_sun_intensity folds a pi back in so a lit
+    // matte surface stays about as bright as it was before the BRDF (it defaults to
+    // pi), and gives the speculars room to punch above it.
+    float3 g_sun_color;
+    float g_sun_intensity;
+    // The flat sky tone the diffuse ambient and the fill light use -- a stand-in for
+    // the sky's cosine-convolved irradiance, where the specular reflection uses the
+    // full gradient in g_sky.
+    float3 g_sky_ambient;
+    // How much of that ambient reaches the surface. Without a shadow term it is the
+    // only thing keeping unlit faces off pure black, so it carries more weight here
+    // than it would with real bounce.
+    float g_ambient_strength;
+    // A dim light from behind the sun, so a wall turned away from it reads brown
+    // rather than as a hole.
+    float g_fill_strength;
+    // The distance band the yard fades into the sky over, so it dissolves into the
+    // gradient rather than seaming against it at the horizon.
+    float g_fog_start;
+    float g_fog_end;
+    float g_frame_pad;
 };
 
 // A material with no texture of its own is pointed at a 1x1 white texel, so
@@ -77,22 +104,11 @@ SamplerState g_sampler : register(s0);
 // four texels; the 3x3 grid below widens that to a gentle penumbra.
 SamplerComparisonState g_shadow_sampler : register(s1);
 
-static const float3 kSunColor = float3(1.0f, 0.96f, 0.88f);
-// The sky tone the diffuse ambient uses. The specular reflection and the
-// background use the zenith/horizon gradient in common.hlsli; this one flat value
-// stands in for the sky's cosine-convolved irradiance.
-static const float3 kSkyColor = float3(0.52f, 0.62f, 0.76f);
-// Without a shadow term the only thing keeping unlit faces off pure black is
-// the ambient, so it carries more weight here than it would with real bounce.
-static const float kAmbientStrength = 0.65f;
-// A dim light from behind the sun. Nothing in the world casts it -- it exists so
-// that a wall turned away from the sun reads as brown rather than as a hole.
-static const float kFillStrength = 0.18f;
-
-// Matched to the fence, 12 m out: the yard stays crisp and the grass beyond it
-// fades, which is the only cue the player has that the world keeps going.
-static const float kFogStart = 20.0f;
-static const float kFogEnd = 90.0f;
+// The sun colour/intensity, the ambient sky tone, the fill and the fog distances
+// all now arrive per frame in FrameConstants above (g_sun_color, g_sun_intensity,
+// g_sky_ambient, g_ambient_strength, g_fill_strength, g_fog_start, g_fog_end), so a
+// level can set its own time of day. What stays `static const` below is the
+// technical, not the artistic: the shadow bias and PCF footprint.
 
 // The shadow map is square; these size one texel of it. Must match the resource
 // the renderer creates -- see kShadowMapSize in renderer.cpp.
@@ -179,12 +195,6 @@ static const float kPi = 3.14159265f;
 // not a metal. Metals have no such fixed value -- their F0 is their base colour.
 static const float3 kDielectricF0 = float3(0.04f, 0.04f, 0.04f);
 
-// The sun's radiance. The diffuse BRDF carries a 1/pi that a real light's
-// intensity would swallow; folding a pi back into the sun here keeps a lit matte
-// surface about as bright as it was before the BRDF, and gives the speculars room
-// to punch above it.
-static const float kSunIntensity = kPi;
-
 // The GGX/Trowbridge-Reitz normal distribution: how much of the surface's
 // microfacets face exactly the half vector. `a` is the roughness squared.
 float DistributionGGX(float n_dot_h, float a) {
@@ -210,9 +220,10 @@ float3 FresnelSchlick(float v_dot_h, float3 f0) {
 }
 
 // The sky's rough average -- what a fully blurred reflection tends toward, and the
-// floor the probe reflection fades into as roughness climbs.
+// floor the probe reflection fades into as roughness climbs. Reads the level's
+// gradient straight from the frame constants.
 float3 SkyAverage() {
-    return lerp(SrgbToLinear(kSkyHorizon), SrgbToLinear(kSkyZenith), 0.5f);
+    return lerp(SrgbToLinear(g_sky.horizon), SrgbToLinear(g_sky.zenith), 0.5f);
 }
 
 // The prefiltered analytic environment: a rough surface reflects a blurred sky,
@@ -220,7 +231,7 @@ float3 SkyAverage() {
 // an analytic sky there is nothing to prebake, so the blur is faked by fading the
 // sharp reflection toward the sky's rough average as roughness climbs.
 float3 PrefilteredSky(float3 r, float roughness, float time) {
-    return lerp(SampleSky(r, time), SkyAverage(), roughness);
+    return lerp(SampleSky(r, time, g_sky), SkyAverage(), roughness);
 }
 
 // The prefiltered *environment* along a reflection vector: the captured cubemap
@@ -310,14 +321,14 @@ float4 ShadeScene(PSInput input, bool use_probe) {
         shadow = SunVisibility(input.world, normal);
     }
     const float3 sun =
-        (diffuse + specular) * n_dot_l * SrgbToLinear(kSunColor) * kSunIntensity * shadow;
+        (diffuse + specular) * n_dot_l * SrgbToLinear(g_sun_color) * g_sun_intensity * shadow;
 
     // Image-based ambient, split into its two halves. The diffuse half is a
     // hemisphere term standing in for the sky's cosine-convolved irradiance: sky
     // above, dirt below, lighting the diffuse albedo.
     const float3 irradiance =
-        lerp(SrgbToLinear(kGroundBounce), SrgbToLinear(kSkyColor),
-             saturate(normal.y * 0.5f + 0.5f)) * kAmbientStrength;
+        lerp(SrgbToLinear(g_sky.ground), SrgbToLinear(g_sky_ambient),
+             saturate(normal.y * 0.5f + 0.5f)) * g_ambient_strength;
     const float3 ambient_diffuse = irradiance * diffuse_color;
 
     // The specular half reflects the sky itself: sampled along the reflection
@@ -339,8 +350,8 @@ float4 ShadeScene(PSInput input, bool use_probe) {
 
     // A dim fill from behind the sun, diffuse only, so faces turned away read brown
     // rather than as holes.
-    const float3 fill = SrgbToLinear(kSkyColor) * saturate(dot(normal, -g_sun_direction)) *
-                        kFillStrength * diffuse_color;
+    const float3 fill = SrgbToLinear(g_sky_ambient) * saturate(dot(normal, -g_sun_direction)) *
+                        g_fill_strength * diffuse_color;
 
     const float3 lit = ambient + sun + fill;
 
@@ -348,8 +359,8 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     // so distant geometry dissolves into the gradient rather than into a flat tone
     // that would seam against it at the horizon.
     const float3 view_ray = normalize(input.world - g_camera_position);
-    const float fog = saturate((input.view_depth - kFogStart) / (kFogEnd - kFogStart));
-    const float3 color = lerp(lit, SampleSky(view_ray, g_time), fog * 0.9f);
+    const float fog = saturate((input.view_depth - g_fog_start) / (g_fog_end - g_fog_start));
+    const float3 color = lerp(lit, SampleSky(view_ray, g_time, g_sky), fog * 0.9f);
     // Left in linear light: the whole world renders into the HDR scene buffer,
     // and the tonemap pass (tonemap.hlsl) is the one place the linear->sRGB encode
     // happens. The capture path below, which writes an 8-bit cube instead, encodes
