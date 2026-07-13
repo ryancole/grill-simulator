@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-class Input;
+class Actions;
 class Physics;
 
 // The loose objects in the yard the player can pick up, carry and set back down:
@@ -35,8 +35,8 @@ public:
     // loop before this runs, so the poses read here are already current.
     // `camera_to_world` carries the eye's position in its fourth row and its gaze
     // in the third, so both the reach test and a carried object's pose come from
-    // it.
-    void Update(const DirectX::XMMATRIX& camera_to_world, const Input& input);
+    // it. The Interact action, edge-triggered, is what grabs and drops.
+    void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -120,7 +120,6 @@ private:
     std::vector<Item> items_;
     int carried_ = -1; // index into items_, or -1
     int hovered_ = -1; // item in reach and looked at this frame, or -1
-    bool interact_was_down_ = false;
 
     // Rebuilt each Update: every resting item, the carried one, and the one the
     // outline glows around.

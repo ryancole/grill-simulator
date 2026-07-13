@@ -1,3 +1,4 @@
+#include "actions.hpp"
 #include "audio.hpp"
 #include "camera.hpp"
 #include "dx_common.hpp"
@@ -43,6 +44,9 @@ struct Game {
     Camera camera{physics};
     Viewmodel viewmodel{Scene::kCubeModel};
     Input input;
+    // Maps the raw keyboard the window feeds `input` into the game's logical
+    // actions, loaded from controls.toml in Run before the loop starts.
+    Actions actions;
     Audio audio;
 
     // The current level. Empty until the first is loaded, and reset() then re-emplaced
@@ -179,6 +183,11 @@ int Run(HINSTANCE instance, int show_command) {
     const std::filesystem::path levels_dir = ExecutableDirectory() / "assets" / "levels";
     int current_level = 0;
 
+    // The control bindings for the whole session. Read once, over the built-in
+    // defaults, so a missing or partial controls.toml still plays; a syntax error or
+    // an unknown key name throws out to the fatal-error box, naming the file.
+    game.actions.LoadFromFile(ExecutableDirectory() / "assets" / "controls.toml");
+
     // Loads a level by index: parses its file, unloads whatever is current (handing
     // its GPU geometry and physics actors back), builds the new one, and drops the
     // player at its spawn facing its way. Re-reading the file each time means an
@@ -201,19 +210,6 @@ int Run(HINSTANCE instance, int show_command) {
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&previous);
 
-    // Level controls, all edge-triggered so a held key fires once: 1 and 2 switch to
-    // the backyard and the rooftop, R reloads whatever is current (restoring a level
-    // knocked about in play). `edge` reads a key and reports the frame it goes down.
-    bool key1_was = false;
-    bool key2_was = false;
-    bool keyr_was = false;
-    auto edge = [&game](int vk, bool& was) {
-        const bool down = game.input.IsKeyDown(vk);
-        const bool went_down = down && !was;
-        was = down;
-        return went_down;
-    };
-
     MSG message{};
     while (message.message != WM_QUIT) {
         // Drain the queue first: raw mouse motion arrives one message per
@@ -232,12 +228,21 @@ int Run(HINSTANCE instance, int show_command) {
                      kMaxFrameSeconds);
         previous = now;
 
-        // Read all three every frame so each key's state stays current, then act on
-        // at most one. Swapping here, before anything reads the world this frame,
-        // means the step and draw below run entirely on the freshly loaded level.
-        const bool pick_backyard = edge('1', key1_was);
-        const bool pick_rooftop = edge('2', key2_was);
-        const bool reload = edge('R', keyr_was);
+        // Latch this frame's action states once, from the keyboard the message pump
+        // just drained, so every reader below -- the level controls here, the walk
+        // and the grab further down -- sees the same snapshot and the edge queries
+        // fire exactly once per press.
+        game.actions.Update(game.input);
+
+        // The level controls are all edge-triggered so a held key fires once: 1 and 2
+        // switch to the backyard and the rooftop, R reloads whatever is current
+        // (restoring a level knocked about in play). Read every frame so each stays
+        // current, then act on at most one. Swapping here, before anything reads the
+        // world this frame, means the step and draw below run entirely on the freshly
+        // loaded level.
+        const bool pick_backyard = game.actions.WasPressed(Action::SelectLevel1);
+        const bool pick_rooftop = game.actions.WasPressed(Action::SelectLevel2);
+        const bool reload = game.actions.WasPressed(Action::ReloadLevel);
         if (pick_backyard) {
             load_level(0);
         } else if (pick_rooftop) {
@@ -254,7 +259,7 @@ int Run(HINSTANCE instance, int show_command) {
         float mouse_dy = 0.0f;
         game.input.ConsumeMouseDelta(mouse_dx, mouse_dy);
         game.camera.Look(mouse_dx, mouse_dy);
-        game.camera.Update(game.input, dt);
+        game.camera.Update(game.actions, dt);
 
         // The camera-to-world matrix is the viewmodel's pose, the listener's ear
         // and facing, and the reach a grab is measured along, so it is built
@@ -266,7 +271,7 @@ int Run(HINSTANCE instance, int show_command) {
         for (const Impact& impact : game.physics.Impacts()) {
             game.audio.PlayImpact(impact.position, impact.strength, impact.sound);
         }
-        game.world->props().Update(camera_to_world, game.input);
+        game.world->props().Update(camera_to_world, game.actions);
         // Read the dynamic furniture's body poses back into their draw instances.
         game.world->furniture().Update();
 
