@@ -9,11 +9,13 @@
 #include "renderer.hpp"
 #include "scene.hpp"
 #include "viewmodel.hpp"
+#include "world.hpp"
 
 #include <DirectXMath.h>
 
 #include <algorithm>
 #include <fstream>
+#include <optional>
 
 using namespace DirectX;
 
@@ -27,23 +29,26 @@ constexpr UINT kDefaultHeight = 720;
 // frame. Clamping it means the player is never teleported through a wall.
 constexpr float kMaxFrameSeconds = 0.1f;
 
-// `scene` is built before `viewmodel` because members are initialised in
-// declaration order, and the arms are drawn as instances of the scene's cube.
+// The persistent systems: everything that lives for the whole session, no matter
+// which level is loaded. The level itself -- the Scene, Props and Furniture -- lives
+// in `world`, which is built after Initialize and swapped out to change levels.
+//
+// Physics comes up before Camera because the camera's controller registers with the
+// physics scene; the viewmodel names the shared unit cube, whose model index is
+// fixed (Scene::kCubeModel) so it needs no live Scene to build its arms.
 struct Game {
     Renderer renderer;
-    Scene scene{levels::Backyard()};
-    // Physics comes up before anything that will register bodies with it (the
-    // props and, later, the player controller), and tears down after them.
     Physics physics;
     Camera camera{physics};
-    Viewmodel viewmodel{scene.CubeModel()};
-    Props props{scene, physics};
-    // The grill and cooler are dynamic bodies: they register with Physics and read
-    // their poses back into the scene's instances each frame, so a run-in topples
-    // or shoves them.
-    Furniture furniture{scene, physics};
+    Viewmodel viewmodel{Scene::kCubeModel};
     Input input;
     Audio audio;
+
+    // The current level. Empty until the first is loaded, and reset() then re-emplaced
+    // to switch. Destroying it hands the level's renderer geometry and physics actors
+    // back before the next is built. Declared last so it tears down first, while the
+    // renderer and physics it borrows are still alive.
+    std::optional<World> world;
 };
 
 // WIC decodes the textures inside a glTF, and WIC is COM. Uninitialising is left
@@ -163,16 +168,32 @@ int Run(HINSTANCE instance, int show_command) {
     }
 
     RegisterRawMouse(hwnd);
-    game.renderer.Initialize(hwnd, kDefaultWidth, kDefaultHeight, game.scene);
-    // The yard's static colliders become immovable PhysX actors, once, before the
-    // first step. Dropped props fall onto these.
-    game.physics.AddStaticWorld(game.scene.Colliders());
+    // The device and pipelines first -- the session's, independent of any level.
+    game.renderer.Initialize(hwnd, kDefaultWidth, kDefaultHeight);
+
+    // Loads a level: unloads whatever is current (handing its GPU geometry and
+    // physics actors back), builds the new one, and drops the player at its spawn.
+    // The renderer uploads the scene and the static colliders become PhysX actors
+    // inside the World constructor, so a swap is just this.
+    auto load_level = [&game](const LevelDef& level) {
+        game.world.reset();
+        game.world.emplace(level, game.renderer, game.physics);
+        game.camera.Respawn();
+    };
+    load_level(levels::Backyard());
+
     ShowWindow(hwnd, show_command);
 
     LARGE_INTEGER frequency{};
     LARGE_INTEGER previous{};
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&previous);
+
+    // R reloads the current level: proves the whole load/unload path (renderer
+    // geometry, physics actors, props and furniture) tears down and rebuilds cleanly
+    // before there is a second level to switch to. Edge-triggered so a held key
+    // reloads once, not every frame.
+    bool reload_was_down = false;
 
     MSG message{};
     while (message.message != WM_QUIT) {
@@ -192,9 +213,16 @@ int Run(HINSTANCE instance, int show_command) {
                      kMaxFrameSeconds);
         previous = now;
 
-        // Advance the physics scene on its fixed clock. Nothing is registered
-        // with it yet -- the props and player move onto it next -- so this is a
-        // no-op for now, but it fixes the step order: simulate, then read poses.
+        // Swap the level before anything reads it this frame, so the step and draw
+        // below run entirely on the freshly loaded world.
+        const bool reload_down = game.input.IsKeyDown('R');
+        if (reload_down && !reload_was_down) {
+            load_level(levels::Backyard());
+        }
+        reload_was_down = reload_down;
+
+        // Advance the physics scene on its fixed clock: the props, furniture and the
+        // player's controller all move on it. Simulate first, then read poses.
         game.physics.Step(dt);
 
         float mouse_dx = 0.0f;
@@ -213,16 +241,17 @@ int Run(HINSTANCE instance, int show_command) {
         for (const Impact& impact : game.physics.Impacts()) {
             game.audio.PlayImpact(impact.position, impact.strength, impact.sound);
         }
-        game.props.Update(camera_to_world, game.input);
+        game.world->props().Update(camera_to_world, game.input);
         // Read the dynamic furniture's body poses back into their draw instances.
-        game.furniture.Update();
+        game.world->furniture().Update();
 
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
-        game.renderer.Render(game.scene, game.props.WorldInstances(),
-                             game.props.HighlightInstances(),
-                             game.viewmodel.Pose(camera_to_world), game.props.HeldInstances(),
-                             view_projection, game.camera.Position(), game.props.PromptText());
+        Props& props = game.world->props();
+        game.renderer.Render(game.world->scene(), props.WorldInstances(),
+                             props.HighlightInstances(),
+                             game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
+                             view_projection, game.camera.Position(), props.PromptText());
     }
 
     game.renderer.Shutdown();

@@ -242,7 +242,7 @@ ComPtr<IDXGIAdapter1> SelectAdapter(IDXGIFactory6& factory) {
 
 } // namespace
 
-void Renderer::Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene) {
+void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     width_ = width;
     height_ = height;
 
@@ -256,11 +256,40 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene
     CreateSkyPipeline();
     CreateOutlinePipeline();
     CreateShadowPipeline();
-    CreateSceneGeometry(scene);
-    CaptureReflectionProbe(scene);
     CreateTextPipeline();
 
+    // Everything above is the session's, not the level's. The scene geometry, the
+    // font atlas and the reflection probe come up in LoadScene, so a level can be
+    // swapped out from under all this without rebuilding the device or pipelines.
     initialized_ = true;
+}
+
+void Renderer::LoadScene(const Scene& scene) {
+    // The shared descriptor heap, every model's buffers and images, the font atlas
+    // and the probe cube. Split out of Initialize so a level swap re-runs only this
+    // (after ReleaseScene) rather than the whole device bring-up.
+    CreateSceneGeometry(scene);
+    CaptureReflectionProbe(scene);
+}
+
+void Renderer::ReleaseScene() {
+    // The GPU may still be reading this level's buffers, textures, heap or probe in
+    // the frame in flight, so drain it before any of these ComPtrs let go.
+    FlushGpu();
+
+    // Everything CreateSceneGeometry and CaptureReflectionProbe built. The shared
+    // heap is torn down whole -- the font atlas and shadow-map SRVs live in it too,
+    // so the next LoadScene re-places them (the shadow map resource itself, created
+    // once in CreateShadowMap, is left standing). Descriptor slot bookkeeping is
+    // recomputed from scratch each load, so nothing here needs resetting but the
+    // resources.
+    models_.clear();
+    textures_.clear();
+    texture_heap_.Reset();
+    atlas_texture_.Reset();
+    probe_cube_.Reset();
+    probe_rtv_heap_.Reset();
+    probe_depth_.Reset();
 }
 
 float Renderer::AspectRatio() const {

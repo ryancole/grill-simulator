@@ -77,8 +77,11 @@ public:
         DirectX::XMStoreFloat4x4(&instances_[index].transform, transform);
     }
 
-    // The shared unit cube. The viewmodel builds its arms out of it too, and
-    // needs to name it in the instances it hands the renderer.
+    // The shared unit cube is always the first model every level builds, so its
+    // index is fixed. The viewmodel builds its arms out of it and names this in
+    // the instances it hands the renderer -- and because the index never varies,
+    // the (persistent) viewmodel can reference it without holding a live Scene.
+    static constexpr std::uint32_t kCubeModel = 0;
     std::uint32_t CubeModel() const { return cube_; }
 
     // The models Props places and moves. Loaded here, drawn there.

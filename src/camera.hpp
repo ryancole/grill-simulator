@@ -31,6 +31,11 @@ public:
     // slides it along the world's surfaces, then rides the eye on top.
     void Update(const Input& input, float dt);
 
+    // Teleports the player back to the level's entrance and clears their motion and
+    // aim, for when a level is (re)loaded. The controller persists across the swap
+    // (it belongs to the session, not the level), so this just repositions it.
+    void Respawn();
+
     DirectX::XMMATRIX ViewMatrix() const;
     DirectX::XMMATRIX ProjectionMatrix(float aspect) const;
     // The inverse of the view matrix: it carries a point expressed relative to

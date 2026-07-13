@@ -21,7 +21,21 @@ class Renderer {
 public:
     static constexpr UINT kFrameCount = 2;
 
-    void Initialize(HWND hwnd, UINT width, UINT height, const Scene& scene);
+    // Brings up the device, swapchain and every pipeline -- everything that lives
+    // for the whole session, independent of which level is loaded. No scene geometry
+    // is uploaded here; call LoadScene once the first level's Scene exists.
+    void Initialize(HWND hwnd, UINT width, UINT height);
+    // Uploads one level's models, textures and reflection probe into the GPU
+    // resources the frame draws from. Call after Initialize, and again after
+    // ReleaseScene to swap in a different level. Assumes no scene is currently
+    // loaded (ReleaseScene, or a fresh Initialize, left the slots empty).
+    void LoadScene(const Scene& scene);
+    // Frees the current level's models, textures and probe, so a different Scene
+    // can be uploaded. Flushes the GPU first -- the frame in flight may still be
+    // reading these -- so it is only for a between-levels swap, never mid-frame.
+    // The device, swapchain, pipelines and shadow map outlive it; the font atlas
+    // rides the scene upload and is simply re-loaded by the next LoadScene.
+    void ReleaseScene();
     void Resize(UINT width, UINT height);
     // `props` are the loose objects resting in the yard, drawn with the scene.
     // `highlight` is the one the player is aiming at, ringed with a glowing

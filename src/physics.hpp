@@ -71,6 +71,14 @@ public:
     // prop falls onto and what the player's controller slides along.
     void AddStaticWorld(std::span<const OrientedBox> colliders);
 
+    // Strips a level out of the scene so the next can be added: removes and releases
+    // every rigid actor -- the static world, the toppled furniture, the dropped
+    // props -- but leaves the player's character controller, which belongs to the
+    // session, not the level. The scene, SDK, dispatcher and material all outlive
+    // this, so a fresh AddStaticWorld / AddDynamicBody pass repopulates the same
+    // scene. The step accumulator is reset so no banked time bleeds across the swap.
+    void ClearLevel();
+
     // Creates one dynamic rigid body from a set of box shapes, so a large object
     // (the grill) can be shoved and toppled as a single rigid piece. `shapes` are
     // in the body's own model space -- one per leg, body, lid and shelf -- and

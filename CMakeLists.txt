@@ -47,6 +47,7 @@ add_executable(grill WIN32
   src/rigid_body.cpp
   src/viewmodel.cpp
   src/font.cpp
+  src/world.cpp
   src/renderer.cpp
   src/agility_exports.cpp)
 
