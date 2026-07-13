@@ -1,6 +1,6 @@
 #include "props.hpp"
 
-#include "input.hpp"
+#include "actions.hpp"
 #include "physics.hpp"
 
 #include <PxPhysicsAPI.h>
@@ -22,10 +22,6 @@ constexpr XMFLOAT3 kWhite{1.0f, 1.0f, 1.0f};
 // alignment cone.
 constexpr float kReach = 2.4f;
 constexpr float kPickRadius = 0.2f;
-
-// The interact key. Left-click is already the mouse-look toggle, so grabbing
-// gets its own key, the shooter convention.
-constexpr int kInteractKey = 'E';
 
 // Rough density used to turn a box's volume into a mass. The absolute value
 // barely matters -- gravity is mass-independent, and a rest on the infinite-mass
@@ -191,16 +187,15 @@ void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XM
     items_.back().rigid.Bind();
 }
 
-void Props::Update(const XMMATRIX& camera_to_world, const Input& input) {
+void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
 
-    // Edge-triggered: one grab per press, so holding E does not pick up and drop
-    // on alternate frames. Key auto-repeat keeps the key "down", so this stays a
-    // single event.
-    const bool down = input.IsKeyDown(kInteractKey);
-    if (down && !interact_was_down_) {
+    // Edge-triggered: one grab per press, so holding Interact does not pick up and
+    // drop on alternate frames. Actions latches the press for us, so this is a
+    // single event even while the key is held down.
+    if (actions.WasPressed(Action::Interact)) {
         if (carried_ >= 0) {
             Drop(camera_to_world);
         } else {
@@ -213,7 +208,6 @@ void Props::Update(const XMMATRIX& camera_to_world, const Input& input) {
             }
         }
     }
-    interact_was_down_ = down;
 
     // What the prompt reports this frame: nothing to pick while carrying, else
     // whatever is in reach and looked at. Cheap enough to recompute outright for

@@ -6,7 +6,7 @@ namespace physx {
 class PxController;
 class PxUserControllerHitReport;
 }
-class Input;
+class Actions;
 class Physics;
 
 // A first person camera standing at eye height on a left-handed world: +X right,
@@ -28,8 +28,10 @@ public:
     // Turns the camera by a raw mouse delta, in mouse counts.
     void Look(float dx, float dy);
     // Walks, jumps and falls the player by moving the capsule controller, which
-    // slides it along the world's surfaces, then rides the eye on top.
-    void Update(const Input& input, float dt);
+    // slides it along the world's surfaces, then rides the eye on top. Reads the
+    // move/jump/sprint actions rather than raw keys, so the walk answers to
+    // whatever controls.toml binds them to.
+    void Update(const Actions& actions, float dt);
 
     // Drops the player at a level's entrance and clears their motion, for when a
     // level is (re)loaded. `foot` is where the feet stand on the ground and `facing`

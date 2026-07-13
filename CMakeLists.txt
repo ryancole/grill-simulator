@@ -36,6 +36,7 @@ find_package(tomlplusplus CONFIG REQUIRED)
 
 add_executable(grill WIN32
   src/main.cpp
+  src/actions.cpp
   src/audio.cpp
   src/camera.cpp
   src/collision.cpp
@@ -114,6 +115,11 @@ stage_assets(grill DIRECTORY assets/audio
 # re-staging needs no recompile -- only the copy next to the executable.
 stage_assets(grill DIRECTORY assets/levels
   FILES backyard.level rooftop.level)
+
+# The control bindings, likewise text parsed at runtime (see src/actions.cpp): a
+# rebind is a text edit and a re-stage, no recompile.
+stage_assets(grill DIRECTORY assets
+  FILES controls.toml)
 
 # The HUD font atlas is baked from the committed .ttf at build time; only the
 # .png/.csv it produces are read at runtime, and those live in the build tree.

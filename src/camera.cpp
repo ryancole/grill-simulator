@@ -1,7 +1,7 @@
 #include "camera.hpp"
 
+#include "actions.hpp"
 #include "collision.hpp" // kStepHeight
-#include "input.hpp"
 #include "physics.hpp"
 #include "rigid_body.hpp" // BodyTag
 
@@ -207,16 +207,16 @@ void Camera::Look(float dx, float dy) {
     yaw_ = std::remainder(yaw_, XM_2PI);
 }
 
-void Camera::Update(const Input& input, float dt) {
-    if (grounded_ && input.IsKeyDown(VK_SPACE)) {
+void Camera::Update(const Actions& actions, float dt) {
+    if (grounded_ && actions.IsActive(Action::Jump)) {
         vertical_speed_ = kJumpSpeed;
         grounded_ = false;
     }
 
-    const float ahead =
-        static_cast<float>(input.IsKeyDown('W')) - static_cast<float>(input.IsKeyDown('S'));
-    const float side =
-        static_cast<float>(input.IsKeyDown('D')) - static_cast<float>(input.IsKeyDown('A'));
+    const float ahead = static_cast<float>(actions.IsActive(Action::MoveForward)) -
+                        static_cast<float>(actions.IsActive(Action::MoveBack));
+    const float side = static_cast<float>(actions.IsActive(Action::MoveRight)) -
+                       static_cast<float>(actions.IsActive(Action::MoveLeft));
 
     // The velocity the keys are asking for. With no keys held that is a standstill,
     // which the player then decelerates towards rather than snapping to.
@@ -231,7 +231,7 @@ void Camera::Update(const Input& input, float dt) {
         // Normalising keeps a diagonal from being faster than a straight line.
         const XMVECTOR direction = XMVector3Normalize(
             XMVectorAdd(XMVectorScale(forward, ahead), XMVectorScale(right, side)));
-        const float speed = input.IsKeyDown(VK_SHIFT) ? kSprintSpeed : kWalkSpeed;
+        const float speed = actions.IsActive(Action::Sprint) ? kSprintSpeed : kWalkSpeed;
         wanted = XMVectorScale(direction, speed);
     }
 
