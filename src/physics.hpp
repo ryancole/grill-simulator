@@ -1,6 +1,7 @@
 #pragma once
 
 #include "collision.hpp"
+#include "rigid_body.hpp"
 
 #include <DirectXMath.h>
 
@@ -31,14 +32,15 @@ class PxRigidDynamic;
 class PxSimulationEventCallback;
 } // namespace physx
 
-// A meat-on-something collision the solver reported this step, for the audio to
-// turn into a splat. `position` is where the contact landed in world space, so
-// the sound pans and attenuates from the right spot; `strength` is the contact
-// impulse magnitude, which the mixer maps to volume -- a dropped patty thuds
-// softer than one hurled at a wall.
+// A sounding collision the solver reported this step, for the audio to play.
+// `position` is where the contact landed in world space, so the sound pans and
+// attenuates from the right spot; `strength` is the contact impulse magnitude,
+// which the mixer maps to volume -- a dropped patty thuds softer than one hurled
+// at a wall; `sound` is which clip to play, from the body that made the noise.
 struct Impact {
     DirectX::XMFLOAT3 position;
     float strength;
+    ImpactSound sound;
 };
 
 // Brings PhysX up in the constructor and tears it back down with the object's

@@ -6,6 +6,16 @@ namespace physx {
 class PxRigidDynamic;
 }
 
+// The sound a body makes when the physics contact report catches it landing on
+// something: the steak and patties splat, the tongs clank, and everything else
+// (the grill, the cooler, the static world) stays None and raises nothing. The
+// underlying type is fixed so audio.hpp can forward-declare it without the header.
+enum class ImpactSound : unsigned char {
+    None,
+    Meat,
+    Metal,
+};
+
 // Hung off every dynamic body the player can bump, via PxActor::userData, so the
 // one generic shove in the character controller can tell bodies apart without
 // knowing about Props or Furniture.
@@ -18,13 +28,13 @@ class PxRigidDynamic;
 // which is how the gaze-pick sweep tells a grabbable prop (meat, tongs) from the
 // heavy furniture (grill, cooler), which is dynamic and shovable but not carried.
 //
-// `meat` marks the steak and patties, so the physics contact report can single
-// them out and play a wet splat when one lands on something -- the tongs, grill
-// and cooler carry the same tag but leave this false, so they stay silent.
+// `impact_sound` is what the contact report plays when this body lands on
+// something -- a splat for meat, a clank for the tongs -- or None for the bodies
+// that stay silent (furniture, world).
 struct BodyTag {
     int prop_index = -1;
     float knock_rating = 1.0f;
-    bool meat = false;
+    ImpactSound impact_sound = ImpactSound::None;
 };
 
 // The shared core of everything the player can bump: a handle to a dynamic PhysX
@@ -44,7 +54,7 @@ public:
     // Take ownership of the tag values for an actor the caller just created in the
     // scene. Does not touch userData yet -- see Bind.
     void Adopt(physx::PxRigidDynamic* actor, float knock_rating, int prop_index = -1,
-               bool meat = false);
+               ImpactSound impact_sound = ImpactSound::None);
     // Point the actor's userData at our tag. Call once, after this RigidBody is in
     // the storage slot it will live in for the session.
     void Bind();

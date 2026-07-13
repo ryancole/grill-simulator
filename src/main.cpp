@@ -207,10 +207,10 @@ int Run(HINSTANCE instance, int show_command) {
         // once and shared.
         const XMMATRIX camera_to_world = game.camera.CameraToWorldMatrix();
         game.audio.Update(camera_to_world, dt);
-        // Sound the meat impacts this step's simulation reported, now that Update
-        // has posed the listener so each splat pans from where it landed.
+        // Sound the impacts this step's simulation reported, now that Update has
+        // posed the listener so each one pans from where it landed.
         for (const Impact& impact : game.physics.Impacts()) {
-            game.audio.PlayImpact(impact.position, impact.strength);
+            game.audio.PlayImpact(impact.position, impact.strength, impact.sound);
         }
         game.props.Update(camera_to_world, game.input);
         // Read the dynamic furniture's body poses back into their draw instances.

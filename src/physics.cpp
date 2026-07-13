@@ -14,10 +14,10 @@ constexpr float kGravity = 20.0f;         // m/s^2 down; punchier than 9.81.
 constexpr float kSubstep = 1.0f / 120.0f; // fixed physics tick.
 constexpr int kMaxSubsteps = 8;           // catch-up cap, so a stall never bursts.
 
-// Contacts below this impulse magnitude are the meat settling and jostling in
-// place -- a resting patty nudged by its neighbour -- not a real landing, so
-// they raise no sound. A drop from table height clears it comfortably. Tuned by
-// ear; the units are PhysX impulse (kg*m/s over the substep).
+// Contacts below this impulse magnitude are a body settling and jostling in place
+// -- a resting patty nudged by its neighbour -- not a real landing, so they raise
+// no sound. A drop from table height clears it comfortably. Tuned by ear; the
+// units are PhysX impulse (kg*m/s over the substep).
 constexpr float kMinImpactImpulse = 0.35f;
 
 // The most contact points pulled from one pair. A box-on-box landing has four at
@@ -44,7 +44,7 @@ PxFilterFlags ContactReportFilterShader(PxFilterObjectAttributes attributes0, Px
     return PxFilterFlag::eDEFAULT;
 }
 
-// Turns the solver's contact reports into meat Impacts. The scene owns the sim
+// Turns the solver's contact reports into sounding Impacts. The scene owns the sim
 // callback pointer; this holds a pointer to Physics::impacts_ (a stable member
 // address) and appends to it as pairs land. onContact runs inside fetchResults on
 // the same thread that calls Step, so appending to the vector needs no locking.
@@ -60,10 +60,19 @@ public:
             (PxContactPairHeaderFlag::eREMOVED_ACTOR_0 | PxContactPairHeaderFlag::eREMOVED_ACTOR_1)) {
             return;
         }
+        // The sound belongs to whichever body makes noise -- meat or tongs. If both
+        // in the pair do (a steak dropped onto the tongs), the first wins; the
+        // static world and furniture leave userData null or None and stay quiet.
         const auto* tag0 = static_cast<const BodyTag*>(header.actors[0]->userData);
         const auto* tag1 = static_cast<const BodyTag*>(header.actors[1]->userData);
-        if ((tag0 == nullptr || !tag0->meat) && (tag1 == nullptr || !tag1->meat)) {
-            return; // Neither body is meat -- the tongs, furniture and world stay quiet.
+        ImpactSound sound = ImpactSound::None;
+        if (tag0 != nullptr && tag0->impact_sound != ImpactSound::None) {
+            sound = tag0->impact_sound;
+        } else if (tag1 != nullptr && tag1->impact_sound != ImpactSound::None) {
+            sound = tag1->impact_sound;
+        }
+        if (sound == ImpactSound::None) {
+            return;
         }
 
         for (PxU32 i = 0; i < count; ++i) {
@@ -93,7 +102,8 @@ public:
                 continue;
             }
             position /= static_cast<float>(n);
-            out_.push_back(Impact{DirectX::XMFLOAT3(position.x, position.y, position.z), impulse});
+            out_.push_back(
+                Impact{DirectX::XMFLOAT3(position.x, position.y, position.z), impulse, sound});
         }
     }
 
