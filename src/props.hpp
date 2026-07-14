@@ -5,6 +5,7 @@
 #include "heat_source.hpp"
 #include "rigid_body.hpp"
 #include "scene.hpp"
+#include "serve_zone.hpp"
 
 #include <DirectXMath.h>
 
@@ -15,6 +16,7 @@
 #include <vector>
 
 class Actions;
+class Objectives;
 class Physics;
 
 // The loose objects in the yard the player can pick up, carry and set back down:
@@ -42,9 +44,13 @@ public:
     // frame time in seconds, which the cookable meats advance their cook on.
     // `heat_sources` are the yard's hot objects this frame (the grill's grate): each
     // meat cooks against the hottest air any of them imposes at where it sits, or
-    // room air when none reaches it.
+    // room air when none reaches it. `serve_zones` are the level's delivery counters:
+    // pressing Interact while carrying a meat held over one delivers it -- `objectives`
+    // decides whether that cook fills an open order, and an accepted meat is set down on
+    // the counter as a static display while a rejected one stays in hand.
     void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt,
-                std::span<const HeatSource> heat_sources);
+                std::span<const HeatSource> heat_sources, std::span<const ServeZone> serve_zones,
+                Objectives& objectives);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -116,6 +122,12 @@ private:
         // for the browning tint and the pick-up prompt. The tongs leave it empty --
         // they are not food, so there is nothing to cook.
         std::optional<CookInformation> cook;
+
+        // Set once a meat has been delivered to a serving zone. A served item is done
+        // with play: it rests at the counter as a static display -- still drawn, but no
+        // longer cooked, picked up, or highlighted -- so its cook is frozen at the band
+        // it was served in and its body stays out of the simulation.
+        bool served = false;
     };
 
     // `stages` are the item's cook-stage models (at least one); `base_model` is the
@@ -152,11 +164,21 @@ private:
     // exact pose it was held, takes a gentle toss along the gaze, and falls from
     // there.
     void Drop(DirectX::FXMMATRIX camera_to_world);
+    // Attempts to deliver the carried meat `index` to `zone`, asking `objectives`
+    // whether its current doneness fills an open order. On acceptance the item is
+    // marked served, set down as a static display on the counter, and released from the
+    // hand; on rejection nothing changes and it stays carried. Returns whether it was
+    // served, so the caller can fall back to a plain drop when it was not.
+    bool Serve(int index, const ServeZone& zone, Objectives& objectives);
 
     Physics* physics_;
     std::vector<Item> items_;
     int carried_ = -1; // index into items_, or -1
     int hovered_ = -1; // item in reach and looked at this frame, or -1
+    // The serve zone the carried meat is held over this frame, or -1. Cached in Update
+    // so the (const) prompt can read it -- it drives the "[E] Serve" hint and is what
+    // the Interact press serves into.
+    int serve_zone_ = -1;
 
     // Rebuilt each Update: every resting item, the carried one, and the one the
     // outline glows around.

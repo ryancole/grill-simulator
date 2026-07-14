@@ -53,10 +53,21 @@ struct CarryableDef {
     HoldStyle hold = HoldStyle::Flat;
 };
 
+// The serving zone a prop provides, as pure data: how close (metres, measured in the
+// ground plane) a carried meat must be brought to deliver it, and where the zone's
+// centre sits in the model's own space (up on the serving surface). Scene turns this
+// into a ServeZone at the prop's placement. Present only on serving props (a table, a
+// pass); left off, the prop is ordinary furniture that accepts no food.
+struct ServeDef {
+    float radius = 0.8f;
+    DirectX::XMFLOAT3 offset{0.0f, 0.0f, 0.0f};
+};
+
 // A placeable prop type -- furniture or scenery -- as the catalog spells it. `dynamic`
 // makes it a knock-over-able body (reading mass/knock/sound and any heat); left off, it
 // is immovable world and those are ignored. `heat` is present only on the hot props
-// (the grill), and only takes effect on a dynamic one.
+// (the grill), and only takes effect on a dynamic one. `serve` is present only on the
+// serving props, and marks where cooked food is delivered.
 struct PropDef {
     std::string model;
     bool dynamic = false;
@@ -64,6 +75,7 @@ struct PropDef {
     float knock_rating = 1.0f;
     ImpactSound impact_sound = ImpactSound::None;
     std::optional<HeatDef> heat;
+    std::optional<ServeDef> serve;
 };
 
 // The whole catalog: the game's object archetypes, keyed by the name a level places

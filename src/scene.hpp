@@ -5,6 +5,7 @@
 #include "heat_source.hpp"
 #include "model.hpp"
 #include "rigid_body.hpp"
+#include "serve_zone.hpp"
 
 #include <DirectXMath.h>
 
@@ -122,6 +123,11 @@ public:
     // Props reads these to set out the starting objects (tongs, meats).
     const std::vector<CarryableSpawn>& Carryables() const { return carryables_; }
 
+    // The delivery zones the level placed -- one per serving prop, at wherever it
+    // stands. Props tests a carried meat against these to serve it, and never moves
+    // them, so they are handed back by const reference like the rest of the scene.
+    const std::vector<ServeZone>& ServeZones() const { return serve_zones_; }
+
 private:
     std::uint32_t AddModel(Model model);
     // `file` names a .glb under the executable's assets/models/.
@@ -152,4 +158,6 @@ private:
     std::uint32_t cube_ = 0;
     // The carryables the level placed, resolved against the catalog for Props to seed.
     std::vector<CarryableSpawn> carryables_;
+    // The delivery zones the level placed, one per serving prop (see ServeZones).
+    std::vector<ServeZone> serve_zones_;
 };

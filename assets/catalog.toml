@@ -39,6 +39,11 @@
 #                             that cooks the food set on it. With optional `heat_reach`
 #                             (metres it carries) and `heat_offset` ([x,y,z] up to the
 #                             grate). Omit and the prop is cold.
+#       serve              -- delivery radius in metres (ground plane): makes the prop a
+#                             serving counter. A carried meat brought within it can be
+#                             served, filling a level's matching order. With optional
+#                             `serve_offset` ([x,y,z] up onto the surface). Omit and the
+#                             prop takes no food.
 #
 # The two starting meats carry the original cook constants explicitly, so today they
 # still cook identically -- but each can now be tuned on its own (a chicken to a higher
@@ -127,6 +132,14 @@ knock = 7.0
 
 [prop.bench]
 model = "bench-basic.glb"
+
+# The serving counter: where cooked food is delivered to satisfy a level's orders. It
+# reuses the bench mesh as a flat surface; `serve` is the ground-plane radius the player
+# must stand within, and `serve_offset` lifts the delivered food onto the bench top.
+[prop.serving_table]
+model = "bench-basic.glb"
+serve = 1.1
+serve_offset = [0.0, 0.75, 0.0]
 
 [prop.crate]
 model = "crate.glb"

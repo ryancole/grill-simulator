@@ -42,8 +42,11 @@ CookInformation::Doneness CookInformation::DonenessBand() const {
     return Doneness::Raw;
 }
 
-std::string_view CookInformation::DonenessLabel() const {
-    switch (DonenessBand()) {
+std::string_view CookInformation::DonenessLabel() const { return DonenessName(DonenessBand()); }
+
+std::string_view DonenessName(CookInformation::Doneness band) {
+    using Doneness = CookInformation::Doneness;
+    switch (band) {
     case Doneness::Raw: return "raw";
     case Doneness::Rare: return "rare";
     case Doneness::MediumRare: return "medium rare";
@@ -53,6 +56,18 @@ std::string_view CookInformation::DonenessLabel() const {
     case Doneness::Burnt: return "burnt";
     }
     return "raw";
+}
+
+std::optional<CookInformation::Doneness> ParseDoneness(std::string_view token) {
+    using Doneness = CookInformation::Doneness;
+    if (token == "raw") return Doneness::Raw;
+    if (token == "rare") return Doneness::Rare;
+    if (token == "medium_rare" || token == "medium rare") return Doneness::MediumRare;
+    if (token == "medium") return Doneness::Medium;
+    if (token == "medium_well" || token == "medium well") return Doneness::MediumWell;
+    if (token == "well_done" || token == "well done") return Doneness::WellDone;
+    if (token == "burnt") return Doneness::Burnt;
+    return std::nullopt;
 }
 
 XMFLOAT3 CookInformation::SurfaceTint() const {

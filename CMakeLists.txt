@@ -49,7 +49,9 @@ add_executable(grill WIN32
   src/level.cpp
   src/menu.cpp
   src/model.cpp
+  src/objectives.cpp
   src/scene.cpp
+  src/serve_zone.cpp
   src/physics.cpp
   src/props.cpp
   src/furniture.cpp

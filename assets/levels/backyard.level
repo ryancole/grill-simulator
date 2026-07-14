@@ -33,6 +33,10 @@
 #   carryable -- a catalog food or tool by `type`: pos, with optional yaw. The starting
 #                objects the player can pick up and grill; the type (in catalog.toml)
 #                supplies the model, how it cooks and how it is held.
+#   goal      -- one required delivery: a food `type`, how many (`count`, default 1), and
+#                the doneness band range it must be served in (`min`/`max`, default rare..
+#                well_done). The level is won once every goal is filled by carrying a meat
+#                cooked into range onto a serving_table (see the prop). Omit for a sandbox.
 
 name = "Backyard"
 spawn = [0.0, 0.0, -7.0]
@@ -61,6 +65,10 @@ prop = [
   {type = "bench",  pos = [-4.5, 0.0, 1.5]},
   {type = "cooler", pos = [3.6, 0.0, 6.5]},
 
+  # The serving counter: carry a cooked meat here and press E to deliver it against the
+  # goals below. Sits on the patio between the spawn and the grill, in easy reach of both.
+  {type = "serving_table", pos = [3.2, 0.0, 2.0]},
+
   # Two crates, the upper one knocked askew and standing on the lower.
   {type = "crate", pos = [5.8, 0.0, -2.0]},
   {type = "crate", pos = [5.8, 0.8, -2.0], yaw = 22.0, scale = 0.875},
@@ -79,4 +87,15 @@ carryable = [
   {type = "chicken", pos = [-4.05, 0.80, 1.70], yaw = -8.0},
   {type = "patty", pos = [-4.25, 0.80, 1.35]},
   {type = "patty", pos = [-4.80, 0.80, 1.45], yaw = -24.0},
+]
+
+# The order ticket: cook and deliver each of these to the serving_table to win. The
+# counts match the meats placed above exactly -- one steak, one chicken, two patties --
+# so the level is winnable with what is in the yard and, since there is no respawning
+# yet, is lost (press R to replay) if a required meat is left on the grill until it
+# burns past its band.
+goal = [
+  {type = "steak",   min = "medium_rare", max = "medium"},
+  {type = "chicken", min = "medium",      max = "well_done"},
+  {type = "patty",   count = 2, min = "medium_well", max = "well_done"},
 ]

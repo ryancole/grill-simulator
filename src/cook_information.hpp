@@ -2,6 +2,7 @@
 
 #include <DirectXMath.h>
 
+#include <optional>
 #include <string_view>
 
 // The parameters that make one kind of food cook the way it does: how fast its core
@@ -112,3 +113,14 @@ private:
     float internal_temp_f_ = kRoomTempF;
     float doneness_ = 0.0f;
 };
+
+// A doneness band's readout label -- the spaced form "medium rare", the same text the
+// member DonenessLabel() returns (it is DonenessName(DonenessBand())). Free so callers
+// holding a bare band -- a win-condition goal, not a cooking meat -- can name it too.
+std::string_view DonenessName(CookInformation::Doneness band);
+
+// The reverse: a band from the token the level and catalog files spell it with. Accepts
+// the underscore form ("medium_rare") those files use and the spaced readout form, and
+// returns nullopt on anything unknown so a loader can name the bad value rather than
+// guess. The two-word bands are the only ones the two spellings differ on.
+std::optional<CookInformation::Doneness> ParseDoneness(std::string_view token);

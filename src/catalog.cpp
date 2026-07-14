@@ -248,6 +248,14 @@ Catalog Load(const std::filesystem::path& path) {
                 h.offset = Vec3Or((*entry)["heat_offset"], h.offset, path, "heat_offset");
                 def.heat = h;
             }
+            // `serve` is the ground-plane radius; `serve_offset` lifts the zone's
+            // centre onto the surface, mirroring how `heat`/`heat_offset` read.
+            if (const toml::node_view<const toml::node> serve = (*entry)["serve"]) {
+                ServeDef s;
+                s.radius = static_cast<float>(AsDouble(*serve.node(), path, "serve"));
+                s.offset = Vec3Or((*entry)["serve_offset"], s.offset, path, "serve_offset");
+                def.serve = s;
+            }
             out.props.emplace(name, std::move(def));
         }
     }

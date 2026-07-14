@@ -11,6 +11,7 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
     : scene_(level),
       props_(scene_, physics),
       furniture_(scene_, physics),
+      objectives_(level.goals),
       renderer_(&renderer),
       physics_(&physics) {
     // Hand the freshly built Scene to the persistent systems. Aim the sun and set

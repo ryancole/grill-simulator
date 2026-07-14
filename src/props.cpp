@@ -1,6 +1,7 @@
 #include "props.hpp"
 
 #include "actions.hpp"
+#include "objectives.hpp"
 #include "physics.hpp"
 
 #include <PxPhysicsAPI.h>
@@ -224,17 +225,42 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
 }
 
 void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt,
-                   std::span<const HeatSource> heat_sources) {
+                   std::span<const HeatSource> heat_sources, std::span<const ServeZone> serve_zones,
+                   Objectives& objectives) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
+
+    // Which serve zone the carried meat hangs over this frame, if any. Computed before
+    // the Interact press so the same read drives both the serve and the prompt, and
+    // recomputed each frame (so it clears once nothing is carried). Only a meat serves;
+    // the tongs carry no cook and are never over a zone as far as this is concerned.
+    serve_zone_ = -1;
+    if (carried_ >= 0 && items_[carried_].cook) {
+        const XMVECTOR held = (XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world).r[3];
+        for (int z = 0; z < static_cast<int>(serve_zones.size()); ++z) {
+            if (serve_zones[z].Contains(held)) {
+                serve_zone_ = z;
+                break;
+            }
+        }
+    }
 
     // Edge-triggered: one grab per press, so holding Interact does not pick up and
     // drop on alternate frames. Actions latches the press for us, so this is a
     // single event even while the key is held down.
     if (actions.WasPressed(Action::Interact)) {
         if (carried_ >= 0) {
-            Drop(camera_to_world);
+            if (serve_zone_ >= 0) {
+                // Over a serving zone, Interact delivers rather than drops. Serve()
+                // accepts the meat only if its cook fills an open order; a rejected
+                // cook stays in hand (a no-op, not a drop) -- "reject and keep" -- so a
+                // mis-timed press never fumbles the food onto the counter. To drop over
+                // a counter, the player steps off it first.
+                Serve(carried_, serve_zones[serve_zone_], objectives);
+            } else {
+                Drop(camera_to_world);
+            }
         } else {
             const int target = PickTarget(eye, forward);
             if (target >= 0) {
@@ -252,9 +278,11 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     hovered_ = carried_ >= 0 ? -1 : PickTarget(eye, forward);
 
     // Read each uncarried body's stepped pose back into its render transform.
-    // Physics has already advanced the scene this frame, so these are current.
+    // Physics has already advanced the scene this frame, so these are current. A
+    // served item is skipped: its body is out of the simulation and its resting pose
+    // was set to the counter when it was delivered, so there is nothing to read back.
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-        if (i != carried_) {
+        if (i != carried_ && !items_[i].served) {
             RebuildTransform(items_[i]);
         }
     }
@@ -267,7 +295,9 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     // underside -- exactly the face resting on the grate.
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
         Item& item = items_[i];
-        if (!item.cook) {
+        // Non-food never cooks; a served meat is frozen at the band it was delivered in,
+        // so it stops cooking the moment it leaves the hand for the counter.
+        if (!item.cook || item.served) {
             continue;
         }
         const XMMATRIX pose = i == carried_
@@ -310,6 +340,13 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
 
 std::string Props::PromptText() const {
     if (carried_ >= 0) {
+        // Over a serving counter, the carried meat can be delivered -- name the band it
+        // would be served in so the player commits with the cook in view. Off a counter,
+        // Interact is the plain drop.
+        if (serve_zone_ >= 0 && items_[carried_].cook) {
+            return "[E] Serve " + items_[carried_].name + " (" +
+                   std::string(items_[carried_].cook->DonenessLabel()) + ")";
+        }
         return "[E] Drop";
     }
     if (hovered_ >= 0) {
@@ -334,7 +371,8 @@ std::vector<std::string> Props::MeatDebugLines() const {
             continue;
         }
         lines.push_back(item.name + ": " + std::string(item.cook->DonenessLabel()) + " (" +
-                        std::to_string(static_cast<int>(item.cook->InternalTempF())) + "F)");
+                        std::to_string(static_cast<int>(item.cook->InternalTempF())) + "F)" +
+                        (item.served ? " [served]" : ""));
     }
     return lines;
 }
@@ -395,4 +433,37 @@ void Props::Drop(FXMMATRIX camera_to_world) {
     RebuildTransform(item);
 
     carried_ = -1;
+}
+
+bool Props::Serve(int index, const ServeZone& zone, Objectives& objectives) {
+    Item& item = items_[index];
+
+    // The order decides. A cook it will not take -- undercooked, overcooked, or a type
+    // it does not want -- leaves everything untouched and the meat in hand.
+    if (!objectives.Serve(item.name, item.cook->DonenessBand())) {
+        return false;
+    }
+
+    // Accepted. Set it down at the counter as a static display: mark it served (so it no
+    // longer cooks, is picked up, or is highlighted), and rest it flat on the surface.
+    // Several served meats stack a little so they do not share the exact same point.
+    item.served = true;
+    int stacked = 0;
+    for (const Item& other : items_) {
+        if (&other != &item && other.served) {
+            ++stacked;
+        }
+    }
+    const XMFLOAT3 center = zone.Origin();
+    const float y = center.y + 0.03f + 0.03f * static_cast<float>(stacked);
+    const XMMATRIX pose = XMMatrixTranslation(center.x, y, center.z);
+    XMStoreFloat4x4(&item.resting, pose);
+
+    // The body was taken out of the simulation on pick-up and stays out -- a delivered
+    // plate neither falls nor is knocked about. Move it to the display pose too, so
+    // anything that reads the actor (not just item.resting) sees where it rests.
+    item.rigid.actor()->setGlobalPose(ToPxTransform(pose));
+
+    carried_ = -1;
+    return true;
 }
