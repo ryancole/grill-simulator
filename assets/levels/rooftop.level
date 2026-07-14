@@ -56,6 +56,7 @@ carryable = [
   # The tongs by the grill, the meat set out on the deck near the bench.
   {type = "tongs", pos = [2.6, 0.05, 0.0], yaw = 25.0},
   {type = "steak", pos = [-1.0, 0.80, 5.8], yaw = 18.0},
+  {type = "chicken", pos = [-1.0, 0.80, 5.4], yaw = -8.0},
   {type = "patty", pos = [-1.4, 0.80, 6.1]},
   {type = "patty", pos = [-0.6, 0.80, 6.1], yaw = -24.0},
 ]

@@ -75,7 +75,11 @@ Scene::Scene(const LevelDef& level) {
         }
         const CarryableDef& def = it->second;
         CarryableSpawn spawn;
-        spawn.model = load(def.model);
+        // Load each cook stage's model (deduped by `load`), carrying the band it kicks
+        // in at through unchanged -- Props picks which one to draw as the food cooks.
+        for (const CookStageModel& stage : def.models) {
+            spawn.models.push_back({load(stage.model), stage.from});
+        }
         spawn.name = placement.type;
         spawn.pos = placement.pos;
         spawn.yaw = placement.yaw;

@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // How a carried object sits in the player's hand -- the two poses Props knows how to
 // hold. Flat things (food) are tipped up to show a face; the tongs point away down the
@@ -26,12 +27,26 @@ struct HeatDef {
     DirectX::XMFLOAT3 offset{0.0f, 0.0f, 0.0f};
 };
 
-// A carryable type -- a food or a tool -- as the catalog spells it, before its model
-// is loaded. Foods carry a cook profile (they grill); tools leave it empty (the tongs
-// are not food). Everything a carried item needs that does not depend on where it sits
-// in a level: its model, how it cooks, how it lands, and how it is held.
-struct CarryableDef {
+// One model in a carryable's cook progression: the .glb to draw once the food's
+// doneness has reached `from` (and until a later stage's band overtakes it). A tool
+// or a single-model food is one stage at Raw, so it never changes; chicken adds a
+// "cooked" model at Medium so it visibly turns over on the grill. The models are
+// resolved (loaded) by Scene; this is just the name and the band it kicks in at.
+struct CookStageModel {
     std::string model;
+    CookInformation::Doneness from = CookInformation::Doneness::Raw;
+};
+
+// A carryable type -- a food or a tool -- as the catalog spells it, before its models
+// are loaded. Foods carry a cook profile (they grill); tools leave it empty (the tongs
+// are not food). Everything a carried item needs that does not depend on where it sits
+// in a level: its model(s), how it cooks, how it lands, and how it is held.
+struct CarryableDef {
+    // The models this carryable draws as it cooks, always at least one (the base, at
+    // Raw). One entry for a tool or a single-model food; several for a food that
+    // swaps model with doneness. Ordering is not assumed -- the drawn model is picked
+    // by band each frame (see Props::CurrentModel).
+    std::vector<CookStageModel> models;
     std::optional<CookProfile> cook; // set for foods, empty for tools
     float knock_rating = 4.0f;
     ImpactSound impact_sound = ImpactSound::Meat;

@@ -6,8 +6,14 @@
 #
 # Three kinds of type, each in its own table namespace:
 #
-#   [food.<name>]  -- a carryable that grills. Fields (all but `model` optional):
-#       model              -- the .glb under assets/models that draws it (required).
+#   [food.<name>]  -- a carryable that grills. Fields (all but the model optional):
+#       model              -- the .glb under assets/models that draws it. A food with
+#                             one look gives this; browning is done by tint alone.
+#       models             -- instead of `model`, a list of {model, from} for a food
+#                             that swaps mesh as it cooks: `from` is the doneness band
+#                             the model kicks in at (raw, rare, medium_rare, medium,
+#                             medium_well, well_done, burnt; defaults raw). The tint
+#                             still browns whichever model shows. Give one or the other.
 #       cook_tau           -- thermal time constant, seconds: how slowly the core chases
 #                             the surrounding heat. Bigger = a thicker cut, slower.
 #       cook_threshold_f   -- degrees F the core must pass before doneness banks at all.
@@ -42,6 +48,24 @@
 
 [food.steak]
 model = "steak-cooked.glb"
+cook_tau = 90.0
+cook_threshold_f = 130.0
+doneness_gain = 0.0002
+bands = [0.12, 0.28, 0.45, 0.62, 0.80, 1.15]
+raw_tint = [1.0, 1.0, 1.0]
+seared_tint = [0.50, 0.34, 0.24]
+char_tint = [0.13, 0.11, 0.10]
+knock = 4.0
+sound = "meat"
+
+[food.chicken]
+# Chicken changes model as it cooks, not just tint: it draws raw until it reaches
+# medium, then swaps to the cooked look (which the browning tint keeps darkening on
+# toward burnt). A `models` list replaces the single `model`; the first is the base.
+models = [
+  {model = "chicken-raw.glb"},
+  {model = "chicken-cooked.glb", from = "medium"},
+]
 cook_tau = 90.0
 cook_threshold_f = 130.0
 doneness_gain = 0.0002
