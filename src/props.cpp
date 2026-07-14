@@ -439,6 +439,22 @@ std::vector<std::string> Props::MeatDebugLines() const {
     return lines;
 }
 
+std::optional<Props::MeatReadout> Props::ActiveMeat() const {
+    // Prefer the carried item -- what the player is committing to -- and fall back to
+    // the one merely looked at while empty-handed. Either way it counts only if it is
+    // a meat: a cooking item carries a CookInformation the band is read from, while the
+    // tongs and the tray do not and so surface no readout.
+    const int index = carried_ >= 0 ? carried_ : hovered_;
+    if (index < 0) {
+        return std::nullopt;
+    }
+    const Item& item = items_[static_cast<std::size_t>(index)];
+    if (!item.cook) {
+        return std::nullopt;
+    }
+    return MeatReadout{item.name, static_cast<int>(item.cook->DonenessBand())};
+}
+
 int Props::PickTarget(FXMVECTOR eye, FXMVECTOR forward) const {
     XMFLOAT3 origin;
     XMFLOAT3 direction;

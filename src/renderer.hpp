@@ -40,6 +40,10 @@ public:
         int band_min = 0;
         int band_max = 0;
         int band_count = 1;
+        // The band the meat the player is acting on currently sits at, drawn as a live
+        // playhead over this card's gauge so the target can be lined up by eye. -1 draws
+        // no marker: nothing of this order's type is held or looked at.
+        int marker_band = -1;
     };
 
     // Brings up the device, swapchain and every pipeline -- everything that lives

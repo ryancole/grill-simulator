@@ -411,10 +411,16 @@ int Run(HINSTANCE instance, int show_command) {
         // a loud uppercased name and a quiet band caption -- and hand across the raw
         // counts and band indices. Built fresh each frame; it is a handful of goals.
         const int band_count = static_cast<int>(CookInformation::Doneness::Burnt) + 1;
+        // The meat the player is acting on, so its live doneness can be marked on the
+        // matching order's gauge -- matched on the raw type below, before the name is
+        // uppercased for display.
+        const std::optional<Props::MeatReadout> active_meat = props.ActiveMeat();
         std::vector<Renderer::OrderCard> order_cards;
         order_cards.reserve(goals.size());
         for (std::size_t i = 0; i < goals.size(); ++i) {
             const FoodGoal& goal = goals[i];
+            const int marker =
+                (active_meat && active_meat->type == goal.type) ? active_meat->band : -1;
             std::string name = goal.type;
             for (char& c : name) {
                 c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -426,7 +432,7 @@ int Run(HINSTANCE instance, int show_command) {
             }
             order_cards.push_back(Renderer::OrderCard{
                 std::move(name), std::move(band), objectives.Filled(i), goal.count,
-                static_cast<int>(goal.min), static_cast<int>(goal.max), band_count});
+                static_cast<int>(goal.min), static_cast<int>(goal.max), band_count, marker});
         }
 
         game.renderer.Render(game.world->scene(), props.WorldInstances(),

@@ -69,6 +69,18 @@ public:
     // or empty when E would do nothing. Recomputed each Update.
     std::string PromptText() const;
 
+    // The meat the player is acting on this frame and where its cook sits: its order
+    // type (the same string Objectives keys on) and current doneness band index. The
+    // carried meat when carrying, otherwise the one in reach and looked at -- so the
+    // rail can mark a live "you are here" on the matching order's gauge whether the
+    // player is carrying a steak to the tray or eyeing one on the grate. Empty when
+    // that item is not a meat (the tongs, the tray) or nothing is held or hovered.
+    struct MeatReadout {
+        std::string type;
+        int band = 0;
+    };
+    std::optional<MeatReadout> ActiveMeat() const;
+
     // One line per meat in the yard for the debug overlay: "steak: medium rare
     // (139F)" -- its name, current doneness band, and internal temperature. A meat
     // is any item carrying cooking state; the tongs and other non-food carryables

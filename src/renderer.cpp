@@ -2512,6 +2512,22 @@ void Renderer::DrawObjectivesRail(std::span<const OrderCard> orders, std::vector
                 runs.push_back({first, cursor - first, seg_color, true, face});
                 sx += seg_w + seg_gap;
             }
+
+            // The live playhead: a bright vertical tick centred on the band the player's
+            // meat currently sits at, overhanging the bar top and bottom so it reads as a
+            // pointer onto the scale. Drawn last, over the segments. Skipped when no meat
+            // of this type is in hand or in view, or the band falls off the gauge.
+            if (order.marker_band >= 0 && order.marker_band < bands) {
+                const float cx =
+                    x0 + pad + static_cast<float>(order.marker_band) * (seg_w + seg_gap) + seg_w * 0.5f;
+                const float half = std::max(card_w * 0.006f, 1.5f);
+                const float over = gauge_h * 0.6f;
+                const XMFLOAT4 marker_color{1.0f, 0.97f, 0.9f, 0.95f};
+                const UINT first = cursor;
+                cursor = LayoutSolidQuad(cx - half, gauge_top - over, cx + half,
+                                         gauge_top + gauge_h + over, cursor);
+                runs.push_back({first, cursor - first, marker_color, true, face});
+            }
         }
 
         // Row 3 -- the caption naming the window in words, quiet and small beneath the
