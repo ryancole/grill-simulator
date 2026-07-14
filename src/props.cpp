@@ -48,11 +48,11 @@ XMMATRIX TongsInHand() {
            XMMatrixTranslation(0.16f, -0.30f, 0.52f);
 }
 
-MeshInstance MakeInstance(std::uint32_t model, FXMMATRIX transform) {
+MeshInstance MakeInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint = kWhite) {
     MeshInstance instance{};
     instance.model = model;
     XMStoreFloat4x4(&instance.transform, transform);
-    instance.tint = kWhite;
+    instance.tint = tint;
     instance.checker = 0.0f;
     return instance;
 }
@@ -104,15 +104,16 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
     // the mesh bounds. Placed a hair above the ground so physics settles it flat.
     // The second-to-last argument is the 1..10 "hard to knock over" rating: the
     // meat sits at a middling 4, the light tongs skitter more easily at 2. The last
-    // is the sound each makes on landing: the tongs clank, the meat splats.
+    // two are the sound each makes on landing -- the tongs clank, the meat splats --
+    // and whether it cooks: the three meats do, the tongs do not.
     Add(models.tongs, pool[models.tongs], "tongs", {1.15f, 0.05f, 4.45f}, 25.0f, TongsInHand(),
-        2.0f, ImpactSound::Metal);
+        2.0f, ImpactSound::Metal, false);
     Add(models.steak, pool[models.steak], "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand(),
-        4.0f, ImpactSound::Meat);
+        4.0f, ImpactSound::Meat, true);
     Add(models.patty, pool[models.patty], "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand(),
-        4.0f, ImpactSound::Meat);
+        4.0f, ImpactSound::Meat, true);
     Add(models.patty, pool[models.patty], "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand(),
-        4.0f, ImpactSound::Meat);
+        4.0f, ImpactSound::Meat, true);
 }
 
 void Props::DeriveBodyShape(Item& item, const Model& model) {
@@ -162,13 +163,22 @@ void Props::RebuildTransform(Item& item) {
     XMStoreFloat4x4(&item.resting, item.rigid.Transform());
 }
 
+XMFLOAT3 Props::ItemTint(const Item& item) {
+    // Raw meat's tint is white, so this leaves uncooked food and the non-cooking
+    // props drawing exactly as their models do; only cooking browns the colour.
+    return item.cook ? item.cook->SurfaceTint() : kWhite;
+}
+
 void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XMFLOAT3 position,
                 float yaw_degrees, FXMMATRIX held_local, float knock_rating,
-                ImpactSound impact_sound) {
+                ImpactSound impact_sound, bool cookable) {
     Item item{};
     item.model = model_id;
     item.name = std::move(name);
     XMStoreFloat4x4(&item.held_local, held_local);
+    if (cookable) {
+        item.cook.emplace();
+    }
     DeriveBodyShape(item, model);
 
     // Seed the body so the model origin lands at `position`, yawed -- the same
@@ -187,7 +197,7 @@ void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XM
     items_.back().rigid.Bind();
 }
 
-void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions) {
+void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
@@ -222,6 +232,15 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions) {
         }
     }
 
+    // Advance the cook on every meat, carried or resting alike. There is no heat
+    // source yet, so each is surrounded by room air and simply holds at room
+    // temperature -- but the wiring is here for the grate that comes next.
+    for (Item& item : items_) {
+        if (item.cook) {
+            item.cook->Update(CookInformation::kRoomTempF, dt);
+        }
+    }
+
     // Rebuild the draw lists from the current state. There are a handful of
     // items, so this is cheaper than tracking which one moved.
     world_.clear();
@@ -231,18 +250,21 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions) {
         if (i == carried_) {
             continue;
         }
-        world_.push_back(MakeInstance(items_[i].model, XMLoadFloat4x4(&items_[i].resting)));
+        world_.push_back(MakeInstance(items_[i].model, XMLoadFloat4x4(&items_[i].resting),
+                                      ItemTint(items_[i])));
     }
     if (carried_ >= 0) {
         held_.push_back(MakeInstance(items_[carried_].model,
-                                     XMLoadFloat4x4(&items_[carried_].held_local) *
-                                         camera_to_world));
+                                     XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world,
+                                     ItemTint(items_[carried_])));
     }
     // The outline draws the hovered item a second time at its resting pose, so
-    // it lines up exactly with the world copy above.
+    // it lines up exactly with the world copy above. The outline shader ignores
+    // tint, so the browning does not matter here, but pass it for consistency.
     if (hovered_ >= 0) {
-        highlight_.push_back(
-            MakeInstance(items_[hovered_].model, XMLoadFloat4x4(&items_[hovered_].resting)));
+        highlight_.push_back(MakeInstance(items_[hovered_].model,
+                                          XMLoadFloat4x4(&items_[hovered_].resting),
+                                          ItemTint(items_[hovered_])));
     }
 }
 
@@ -251,7 +273,14 @@ std::string Props::PromptText() const {
         return "[E] Drop";
     }
     if (hovered_ >= 0) {
-        return "[E] Pick up " + items_[hovered_].name;
+        const Item& item = items_[hovered_];
+        // Name the meats' doneness in the prompt so the cook is legible at a glance:
+        // "[E] Pick up steak (raw)". The tongs, having no cook, read plainly.
+        if (item.cook) {
+            return "[E] Pick up " + item.name + " (" +
+                   std::string(item.cook->DonenessLabel()) + ")";
+        }
+        return "[E] Pick up " + item.name;
     }
     return {};
 }
