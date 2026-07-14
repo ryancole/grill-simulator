@@ -1,26 +1,44 @@
-# The catalog: the game's object archetypes -- what a "steak" is, independent of any
-# level. Levels (and the starting spawn set) place these by name; this file says how
-# each behaves. A TOML file, parsed at runtime (see src/catalog.cpp), so a new food is
-# a text edit and a re-stage, not a rebuild -- reload a level in-game (R) to pick it up.
+# The catalog: the game's object archetypes -- what a "steak" or a "charcoal_grill" is,
+# independent of any level. Levels place these by name (a prop's or carryable's `type`);
+# this file says how each behaves. A TOML file, parsed at runtime (see src/catalog.cpp),
+# so a new type is a text edit and a re-stage, not a rebuild -- reload a level in-game
+# (R) to pick it up.
 #
-# Foods live under [food.<name>]. Every field but `model` is optional and defaults to
-# the game's original single cook, so a terse food is just a model. Fields:
-#   model              -- the .glb under assets/models that draws it (required).
-#   cook_tau           -- thermal time constant, seconds: how slowly the core chases the
-#                         surrounding heat. Bigger = a thicker cut, slower to cook.
-#   cook_threshold_f   -- degrees F the core must pass before doneness banks at all.
-#   doneness_gain      -- how fast doneness banks per degree over the threshold, per
-#                         second. Bigger = cooks (and burns) faster.
-#   bands              -- the six doneness thresholds [rare, medium_rare, medium,
-#                         medium_well, well_done, burnt] the readout is cut from.
-#   raw_tint / seared_tint / char_tint -- [r,g,b] the surface browns through as it
-#                         cooks; multiplied onto the model's own colour (white = raw).
-#   knock              -- 1..10, how hard it is to shove around.
-#   sound              -- the clip it plays on a hard landing ("meat", "metal", ...).
+# Three kinds of type, each in its own table namespace:
 #
-# The two starting meats below carry the original constants explicitly, so today they
-# still cook identically -- but each can now be tuned on its own (a chicken that needs
-# a higher safe temp, a sausage that cooks faster) without touching any code.
+#   [food.<name>]  -- a carryable that grills. Fields (all but `model` optional):
+#       model              -- the .glb under assets/models that draws it (required).
+#       cook_tau           -- thermal time constant, seconds: how slowly the core chases
+#                             the surrounding heat. Bigger = a thicker cut, slower.
+#       cook_threshold_f   -- degrees F the core must pass before doneness banks at all.
+#       doneness_gain      -- how fast doneness banks per degree over the threshold, per
+#                             second. Bigger = cooks (and burns) faster.
+#       bands              -- the six doneness thresholds [rare, medium_rare, medium,
+#                             medium_well, well_done, burnt] the readout is cut from.
+#       raw_tint / seared_tint / char_tint -- [r,g,b] the surface browns through.
+#       knock              -- 1..10, how hard it is to shove around.
+#       sound              -- clip on a hard landing ("meat", "metal", ...).
+#       hold               -- how it sits in hand ("flat" default, or "tongs").
+#
+#   [tool.<name>]  -- a carryable that does not cook (the tongs). Same fields as a food
+#       minus the cook profile.
+#
+#   [prop.<name>]  -- placed furniture or scenery. Fields:
+#       model              -- the .glb (required).
+#       dynamic            -- true makes it a knock-over-able body reading mass/knock/
+#                             sound (and heat); omit for immovable world.
+#       mass / knock       -- kg, and the 1..10 how-hard-to-topple rating (dynamic only).
+#       sound              -- clip on a hard landing.
+#       heat               -- grate temperature in F: makes a dynamic prop radiate heat
+#                             that cooks the food set on it. With optional `heat_reach`
+#                             (metres it carries) and `heat_offset` ([x,y,z] up to the
+#                             grate). Omit and the prop is cold.
+#
+# The two starting meats carry the original cook constants explicitly, so today they
+# still cook identically -- but each can now be tuned on its own (a chicken to a higher
+# safe temp, a sausage to cook faster) without touching any code.
+
+# --- Carryables: foods -------------------------------------------------------------
 
 [food.steak]
 model = "steak-cooked.glb"
@@ -45,3 +63,49 @@ seared_tint = [0.50, 0.34, 0.24]
 char_tint = [0.13, 0.11, 0.10]
 knock = 4.0
 sound = "meat"
+
+# --- Carryables: tools -------------------------------------------------------------
+
+[tool.tongs]
+model = "tongs-metal.glb"
+knock = 2.0
+sound = "metal"
+hold = "tongs"
+
+# --- Props: furniture and scenery --------------------------------------------------
+
+# The charcoal grill is two separate dynamic bodies -- a base and a lid -- so the lid
+# can be knocked off on its own. The base radiates heat from its grate; `heat_offset`
+# lifts the hot centre up off the feet. These three are the cook's placement-independent
+# tuning knobs (the per-food ones are on the foods above).
+[prop.charcoal_grill]
+model = "charcoal-grill-base.glb"
+dynamic = true
+mass = 10.0
+knock = 8.0
+sound = "grill_base"
+heat = 425.0
+heat_reach = 1.0
+heat_offset = [0.0, 0.62, 0.0]
+
+[prop.charcoal_grill_lid]
+model = "charcoal-grill-lid.glb"
+dynamic = true
+mass = 3.0
+knock = 4.0
+sound = "grill_lid"
+
+[prop.cooler]
+model = "cooler-basic.glb"
+dynamic = true
+mass = 14.0
+knock = 7.0
+
+[prop.bench]
+model = "bench-basic.glb"
+
+[prop.crate]
+model = "crate.glb"
+
+[prop.tree]
+model = "tree.glb"

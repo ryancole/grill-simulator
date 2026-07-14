@@ -1,7 +1,6 @@
 #pragma once
 
 #include "environment.hpp"
-#include "rigid_body.hpp"
 
 #include <DirectXMath.h>
 
@@ -9,51 +8,36 @@
 #include <string>
 #include <vector>
 
-// A single placement in a level: one model under one transform. Pure data -- no
-// D3D, no PhysX. Scene turns each of these into a draw instance plus either a
-// static collider or a dynamic rigid body, exactly as its constructor once did
-// inline.
-struct Placement {
-    // The .glb under assets/models/ to place. An empty name means the shared unit
-    // cube built in code (MakeUnitCubeModel) -- the ground, patio and fence are
-    // all that cube under a transform, so they carry no file.
-    std::string model;
+// A coloured box: the shared unit cube (MakeUnitCubeModel) under a transform. The
+// ground, patio and fence are all this -- geometry authored inline in the level rather
+// than a model from disk, so it carries its own colour and an optional checker rather
+// than referencing a catalog type.
+struct BoxPlacement {
     DirectX::XMFLOAT4X4 transform;
-    // Multiplies the material's base colour. A textured .glb wants white here; the
-    // untextured cube takes its whole colour from this.
+    // The cube's whole colour (it has no material of its own).
     DirectX::XMFLOAT3 tint{1.0f, 1.0f, 1.0f};
     // Metres per checkerboard tile, projected down Y. Zero leaves the surface flat;
     // only the ground and patio use it.
     float checker = 0.0f;
-    // A knock-over-able body (grill, cooler) rather than immovable world. When set,
-    // Scene diverts this placement's collider boxes into a dynamic PhysX body and
-    // reads `mass`/`knock_rating`; otherwise those two are ignored.
-    bool dynamic = false;
-    float mass = 1.0f;
-    float knock_rating = 1.0f;
-    // The sound this body makes on a hard landing, for a dynamic placement (the
-    // grill clatters). None -- the default -- for the silent furniture (the cooler)
-    // and every static placement, which never reads it.
-    ImpactSound impact_sound = ImpactSound::None;
+};
 
-    // Whether this placement radiates heat -- the grill does, and nothing else in
-    // the yard yet. When set, Scene gives its dynamic body a HeatSource so the meats
-    // set on it cook; the three fields below are how hot and how far. Off by default,
-    // so a placement that says nothing about heat is stone cold and the fields are
-    // ignored. Heat currently rides only dynamic bodies (Furniture moves the hot zone
-    // with the body's pose), so a static placement that asks for heat has none.
-    bool emits_heat = false;
-    // The air temperature at the heat centre, in degrees Fahrenheit, and how far in
-    // metres that heat carries before it fades back to room air. A charcoal grate
-    // runs a few hundred degrees; the reach is a hand's-breadth around the grate, so
-    // food has to sit on it to cook.
-    float heat_temp_f = 400.0f;
-    float heat_reach = 1.0f;
-    // Where the heat centre sits relative to the model's origin, in the model's own
-    // space -- for the grill, up at the grate rather than down at the feet. Carried
-    // through the body's pose each frame, so the hot spot stays on the grate even
-    // after the grill is knocked over.
-    DirectX::XMFLOAT3 heat_offset{0.0f, 0.0f, 0.0f};
+// One placed prop -- furniture or scenery -- naming a catalog [prop.*] type and where
+// it stands. What the prop *is* (model, physics, heat) lives in the catalog; this says
+// only which type and its transform, so the same grill type places in every level from
+// one definition.
+struct PropPlacement {
+    std::string type;
+    DirectX::XMFLOAT4X4 transform;
+};
+
+// One placed carryable -- a food or a tool -- naming a catalog [food.*]/[tool.*] type
+// and where it starts. Props seeds it from its position and yaw; the type supplies the
+// model, cook and hold. Levels place these so the starting meats are level content, not
+// baked into Props.
+struct CarryablePlacement {
+    std::string type;
+    DirectX::XMFLOAT3 pos;
+    float yaw = 0.0f;
 };
 
 // Everything that makes one level its own place: a name, where the player starts,
@@ -80,7 +64,11 @@ struct LevelDef {
     // names no `[environment]` table (or omits a field) is drawn exactly as before.
     Environment environment = kDefaultEnvironment;
 
-    std::vector<Placement> placements;
+    // The things standing in the level: inline cube geometry, catalog props (furniture
+    // and scenery), and the carryables the player starts with. Placed in that order.
+    std::vector<BoxPlacement> boxes;
+    std::vector<PropPlacement> props;
+    std::vector<CarryablePlacement> carryables;
 };
 
 namespace levels {
@@ -89,14 +77,15 @@ namespace levels {
 // documents the format). The top level carries name/spawn/facing/sun; an optional
 // `time_of_day` (clock hours) generates a whole sky, which an optional `[environment]`
 // table (and the explicit `sun`) then override field by field -- every field falling
-// back to the default look; a `box` array and a `prop` array hold the objects, each
-// storing the authoring parameters it is placed by (a box's centre/size/yaw/colour, a
-// prop's pos/yaw/scale) which the loader recomposes into the same transforms the code
-// once built by hand. Boxes are placed before props. Throws std::runtime_error --
+// back to the default look. A `box` array holds inline cube geometry (centre/size/yaw/
+// colour/checker), a `prop` array places catalog props by `type` (pos/yaw/scale), and a
+// `carryable` array places catalog foods and tools by `type` (pos/yaw) -- the loader
+// recomposes the authoring parameters into transforms. Throws std::runtime_error --
 // naming the file, and the line for a TOML syntax error -- on anything it cannot parse.
 //
-// Levels live in files rather than code so a new one is a text edit, not a rebuild;
-// the LevelDef struct above is the format's schema, parsed with toml++.
+// Levels live in files rather than code so a new one is a text edit, not a rebuild; the
+// props and carryables they place are catalog types (see catalog.hpp), so a level names
+// a "charcoal_grill" or a "steak" and the catalog says what those are.
 LevelDef LoadFromFile(const std::filesystem::path& path);
 
 } // namespace levels

@@ -12,73 +12,83 @@
 
 using namespace DirectX;
 
+namespace {
+constexpr XMFLOAT3 kWhite{1.0f, 1.0f, 1.0f};
+} // namespace
+
 Scene::Scene(const LevelDef& level) {
     cube_ = AddModel(MakeUnitCubeModel());
 
-    // The carryable props load with every level -- the pick-up/carry system is
-    // game-wide, not level content -- so the renderer uploads them once here. The
-    // scene places no instances of them: Props sets out the starting handful and
-    // owns every one thereafter.
-    prop_models_.tongs = LoadModel("tongs-metal.glb");
+    // The catalog says what every placed type is -- a "charcoal_grill", a "steak" --
+    // independent of this level. The level names types and where they go; here they
+    // are joined. Models load on first reference and are reused, so two crates or two
+    // steaks upload one model each.
+    const Catalog catalog = catalog::Load(ExecutableDirectory() / "assets" / "catalog.toml");
+    std::unordered_map<std::string, std::uint32_t> loaded;
+    const auto load = [&](const std::string& file) {
+        const auto [it, inserted] = loaded.try_emplace(file, 0u);
+        if (inserted) {
+            it->second = LoadModel(file.c_str());
+        }
+        return it->second;
+    };
 
-    // The food catalog is game-wide too -- a steak is a steak in every level -- so
-    // load it here and turn each food's model name into an uploaded model id. Props
-    // spawns the meats from these by name. Loading every catalogued food's model each
-    // level is a touch wasteful once foods are only placed in some levels; a handful
-    // makes it not worth tracking which are used.
-    for (auto& [name, def] : catalog::LoadFoods(ExecutableDirectory() / "assets" / "catalog.toml")) {
-        FoodType type;
-        type.model = LoadModel(def.model.c_str());
-        type.cook = def.cook;
-        type.knock_rating = def.knock_rating;
-        type.impact_sound = def.impact_sound;
-        foods_.emplace(name, type);
+    // Inline cube geometry: the ground, patio and fence. Each is the unit cube under a
+    // transform, carrying its own colour and checker.
+    for (const BoxPlacement& box : level.boxes) {
+        AddInstance(cube_, XMLoadFloat4x4(&box.transform), box.tint, box.checker);
     }
 
-    // Build the level. Each placement becomes a draw instance plus either a static
-    // collider (AddInstance) or a knock-over-able dynamic body (AddDynamicInstance),
-    // exactly as the constructor used to spell out by hand. Models load on first
-    // reference and are reused, so the two crates and the two trees each upload one
-    // model; an empty name is the shared unit cube (ground, patio, fence).
-    std::unordered_map<std::string, std::uint32_t> loaded;
-    for (const Placement& placement : level.placements) {
-        std::uint32_t model = cube_;
-        if (!placement.model.empty()) {
-            const auto [it, inserted] = loaded.try_emplace(placement.model, cube_);
-            if (inserted) {
-                it->second = LoadModel(placement.model.c_str());
-            }
-            model = it->second;
+    // Props: furniture and scenery. A dynamic type becomes a knock-over-able body
+    // (with a HeatSource if the type radiates heat); a static one becomes immovable
+    // world. The prop draws in the glTF's own colours, so its instance is white.
+    for (const PropPlacement& placement : level.props) {
+        const auto it = catalog.props.find(placement.type);
+        if (it == catalog.props.end()) {
+            throw std::runtime_error("catalog.toml has no prop named '" + placement.type + "'");
         }
-
+        const PropDef& def = it->second;
+        const std::uint32_t model = load(def.model);
         const XMMATRIX transform = XMLoadFloat4x4(&placement.transform);
-        if (placement.dynamic) {
-            // A placement that radiates heat becomes a HeatSource on its body; a cold
-            // one passes nullopt and the body carries no heat. The origin is left
-            // unset -- Furniture places it each frame from the body's pose.
+        if (def.dynamic) {
             std::optional<HeatSource> heat;
-            if (placement.emits_heat) {
-                heat.emplace(placement.heat_temp_f, placement.heat_reach);
+            XMFLOAT3 offset{0.0f, 0.0f, 0.0f};
+            if (def.heat) {
+                heat.emplace(def.heat->temp_f, def.heat->reach);
+                offset = def.heat->offset;
             }
-            AddDynamicInstance(model, transform, placement.tint, placement.mass,
-                               placement.knock_rating, placement.impact_sound, heat,
-                               placement.heat_offset);
+            AddDynamicInstance(model, transform, kWhite, def.mass, def.knock_rating,
+                               def.impact_sound, heat, offset);
         } else {
-            AddInstance(model, transform, placement.tint, placement.checker);
+            AddInstance(model, transform, kWhite);
         }
+    }
+
+    // Carryables: the objects the player starts with. Resolve each placement's type
+    // against the catalog and stash a spawn for Props to seed -- Scene draws none of
+    // them itself.
+    for (const CarryablePlacement& placement : level.carryables) {
+        const auto it = catalog.carryables.find(placement.type);
+        if (it == catalog.carryables.end()) {
+            throw std::runtime_error("catalog.toml has no carryable named '" + placement.type +
+                                     "'");
+        }
+        const CarryableDef& def = it->second;
+        CarryableSpawn spawn;
+        spawn.model = load(def.model);
+        spawn.name = placement.type;
+        spawn.pos = placement.pos;
+        spawn.yaw = placement.yaw;
+        spawn.hold = def.hold;
+        spawn.knock_rating = def.knock_rating;
+        spawn.impact_sound = def.impact_sound;
+        spawn.cook = def.cook;
+        carryables_.push_back(std::move(spawn));
     }
 }
 
 std::uint32_t Scene::LoadModel(const char* file) {
     return AddModel(LoadGltfModel(ExecutableDirectory() / "assets" / "models" / file));
-}
-
-const FoodType& Scene::Food(const std::string& name) const {
-    const auto it = foods_.find(name);
-    if (it == foods_.end()) {
-        throw std::runtime_error("catalog.toml has no food named '" + name + "'");
-    }
-    return it->second;
 }
 
 std::uint32_t Scene::AddModel(Model model) {

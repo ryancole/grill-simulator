@@ -49,6 +49,18 @@ XMMATRIX TongsInHand() {
            XMMatrixTranslation(0.16f, -0.30f, 0.52f);
 }
 
+// The in-hand pose a carryable's catalog hold style asks for. Props owns the two
+// poses; the catalog just names which one.
+XMMATRIX HoldFor(HoldStyle hold) {
+    switch (hold) {
+    case HoldStyle::Tongs:
+        return TongsInHand();
+    case HoldStyle::Flat:
+        break;
+    }
+    return FlatInHand();
+}
+
 MeshInstance MakeInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint = kWhite) {
     MeshInstance instance{};
     instance.model = model;
@@ -92,34 +104,21 @@ struct PropQueryFilter : PxQueryFilterCallback {
 } // namespace
 
 Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
-    const std::uint32_t tongs = scene.PropModelIds().tongs;
     const std::vector<Model>& pool = scene.Models();
-
-    // The foods come from the catalog by name: each hands over its loaded model, its
-    // cook profile (how it grills), and how it lands. The tongs are not food, so they
-    // stay a plain carryable spawned from their own model.
-    const FoodType& steak = scene.Food("steak");
-    const FoodType& patty = scene.Food("patty");
+    const std::vector<CarryableSpawn>& spawns = scene.Carryables();
 
     // Reserve so no push_back reallocates: each body's userData points at the tag
     // stored inside its Item, and that address has to stay put for the session.
-    items_.reserve(4);
+    items_.reserve(spawns.size());
 
-    // The tongs lie flat on the patio just beside the grill; the meat waits on the
-    // picnic table. All four sit in the player's view from the spawn point. Each
-    // carries the Model it was loaded from so its box collider can be measured off
-    // the mesh bounds. Placed a hair above the ground so physics settles it flat.
-    // The knock rating (1..10, how hard to shove) and the landing sound ride from the
-    // catalog for the foods, and are spelled out for the tongs. The last argument is
-    // the cook: a food's profile makes it grillable, nullopt leaves the tongs inert.
-    Add(tongs, pool[tongs], "tongs", {1.15f, 0.05f, 4.45f}, 25.0f, TongsInHand(), 2.0f,
-        ImpactSound::Metal, std::nullopt);
-    Add(steak.model, pool[steak.model], "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand(),
-        steak.knock_rating, steak.impact_sound, steak.cook);
-    Add(patty.model, pool[patty.model], "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand(),
-        patty.knock_rating, patty.impact_sound, patty.cook);
-    Add(patty.model, pool[patty.model], "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand(),
-        patty.knock_rating, patty.impact_sound, patty.cook);
+    // The starting objects are the level's carryables, already joined to their catalog
+    // types by Scene: each hands over its loaded model, where it starts, how it is
+    // held, how it lands, and -- for a food -- how it cooks (nullopt leaves the tongs
+    // inert). Placed a hair above the ground in the files so physics settles them flat.
+    for (const CarryableSpawn& spawn : spawns) {
+        Add(spawn.model, pool[spawn.model], spawn.name, spawn.pos, spawn.yaw, HoldFor(spawn.hold),
+            spawn.knock_rating, spawn.impact_sound, spawn.cook);
+    }
 }
 
 void Props::DeriveBodyShape(Item& item, const Model& model) {
