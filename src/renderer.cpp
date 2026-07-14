@@ -2291,23 +2291,18 @@ void Renderer::DrawSolidRun(UINT first, UINT count, XMFLOAT4 color) {
     command_list_->DrawInstanced(count, 1, first, 0);
 }
 
-void Renderer::DrawHud(std::string_view prompt, std::span<const std::string> debug_lines) {
+void Renderer::DrawHud(std::string_view prompt, std::span<const std::string> debug_lines,
+                       std::span<const OrderCard> orders) {
     if (width_ == 0 || height_ == 0) {
         return;
     }
 
-    // Pack the panel, the prompt and every debug line into this frame's text region
-    // first, remembering each one's vertex range, colour and kind, then draw them all
-    // in order -- so the lines never overwrite one another in the shared buffer (as
-    // DrawMenu does), and the panel, packed and drawn before the lines, sits behind them.
-    struct Run {
-        UINT first;
-        UINT count;
-        XMFLOAT4 color;
-        bool solid;     // A flat panel fill rather than glyphs.
-        FontFace face;  // Which atlas the glyphs draw from (ignored when solid).
-    };
-    std::vector<Run> runs;
+    // Pack the panel, the prompt, every debug line and the objective rail into this
+    // frame's text region first, remembering each one's vertex range, colour and kind,
+    // then draw them all in order -- so the runs never overwrite one another in the
+    // shared buffer (as DrawMenu does), and each panel, packed before the glyphs that
+    // sit over it, is drawn behind them.
+    std::vector<HudRun> runs;
     runs.reserve(debug_lines.size() + 2);
     UINT cursor = 0;
 
@@ -2367,17 +2362,169 @@ void Renderer::DrawHud(std::string_view prompt, std::span<const std::string> deb
         baseline += line_pitch;
     }
 
+    // The polished, non-debug half: the order rail down the top-right corner, packed
+    // into the same buffer so it draws in the same batch as the prompt and overlay.
+    DrawObjectivesRail(orders, runs, cursor);
+
     if (cursor == 0) {
         return;
     }
 
     BindTextPipeline();
-    for (const Run& run : runs) {
+    for (const HudRun& run : runs) {
         if (run.solid) {
             DrawSolidRun(run.first, run.count, run.color);
         } else {
             DrawTextRun(run.face, run.first, run.count, run.color);
         }
+    }
+}
+
+float Renderer::TextWidth(const FontFace& face, std::string_view text, float pixel) const {
+    float w = 0.0f;
+    for (const char c : text) {
+        if (const Glyph* glyph = face.font->Find(static_cast<unsigned char>(c))) {
+            w += glyph->advance * pixel;
+        }
+    }
+    return w;
+}
+
+void Renderer::DrawObjectivesRail(std::span<const OrderCard> orders, std::vector<HudRun>& runs,
+                                  UINT& cursor) {
+    if (orders.empty()) {
+        return;
+    }
+
+    const float h = static_cast<float>(height_);
+    const float w = static_cast<float>(width_);
+
+    // Every metric is a fraction of the back-buffer height, so the rail keeps its
+    // proportions across resolutions, exactly as the menu and prompt do. The name is
+    // the loud line; the caption below it is quieter and smaller.
+    const FontFace face = HudFace();
+    const float name_pixel = h * 0.024f;
+    const float caption_pixel = h * 0.016f;
+    const float pad = name_pixel * 0.6f;         // Inner padding on all four sides.
+    const float card_w = h * 0.28f;              // Uniform ticket width.
+    const float gauge_h = name_pixel * 0.42f;    // The doneness bar's thickness.
+    const float pip = name_pixel * 0.5f;         // A progress pip's side.
+    const float row_gap = name_pixel * 0.55f;    // Vertical gap between a card's rows.
+    const float card_gap = name_pixel * 0.6f;    // Gap between stacked cards.
+
+    // A card is name row + gauge + caption, plus padding above and below; the whole
+    // stack is right-anchored, inset from the right edge by the same margin it sits
+    // below the top edge.
+    const float margin = h * 0.04f;
+    const float card_h = pad + name_pixel + row_gap + gauge_h + row_gap + caption_pixel + pad;
+    const float x1 = w - margin;
+    const float x0 = x1 - card_w;
+
+    // The warm palette the menu already established, so the rail reads as the same
+    // game's UI: amber for live orders, a calm green once an order is filled, and a
+    // dim wash for the parts of the doneness bar outside the accepted window.
+    const XMFLOAT4 panel_color{0.04f, 0.03f, 0.02f, 0.62f};
+    const XMFLOAT4 name_color{1.0f, 0.82f, 0.48f, 1.0f};
+    const XMFLOAT4 done_color{0.55f, 0.85f, 0.45f, 1.0f};
+    const XMFLOAT4 caption_color{0.72f, 0.72f, 0.75f, 0.9f};
+    const XMFLOAT4 gauge_on{1.0f, 0.70f, 0.30f, 0.95f};
+    const XMFLOAT4 gauge_on_done{0.55f, 0.85f, 0.45f, 0.95f};
+    const XMFLOAT4 gauge_off{1.0f, 1.0f, 1.0f, 0.12f};
+    const XMFLOAT4 pip_off{1.0f, 1.0f, 1.0f, 0.14f};
+
+    // A small header above the stack: "ORDERS" while any remain, a green "SERVICE
+    // COMPLETE!" once every card is filled -- the polished twin of the debug overlay's
+    // completion line, right-anchored over the first card.
+    bool all_done = true;
+    for (const OrderCard& order : orders) {
+        if (order.filled < order.count) {
+            all_done = false;
+            break;
+        }
+    }
+    const std::string_view header = all_done ? "SERVICE COMPLETE!" : "ORDERS";
+    const XMFLOAT4 header_color = all_done ? done_color : name_color;
+    {
+        const float header_pixel = h * 0.020f;
+        const float header_w = TextWidth(face, header, header_pixel);
+        const float header_baseline = margin - header_pixel * 0.4f;
+        const UINT first = cursor;
+        cursor = LayoutLine(face, header, header_baseline, header_pixel, cursor,
+                            x1 - header_w);
+        runs.push_back({first, cursor - first, header_color, false, face});
+    }
+
+    float top = margin;
+    for (const OrderCard& order : orders) {
+        const bool done = order.filled >= order.count;
+
+        // The card's translucent backing, packed and pushed first so its glyphs and
+        // bars all sit over it.
+        {
+            const UINT first = cursor;
+            cursor = LayoutSolidQuad(x0, top, x1, top + card_h, cursor);
+            runs.push_back({first, cursor - first, panel_color, true, face});
+        }
+
+        // Row 1 -- the order name on the left, uppercased by the caller, and the
+        // progress pips on the right. Pips are little squares, filled ones warm (or
+        // green when the order is met) and empty ones a dim outline-less wash, so the
+        // count reads at a glance without a "2/3" to parse.
+        const float name_baseline = top + pad + name_pixel;
+        {
+            const UINT first = cursor;
+            cursor = LayoutLine(face, order.name, name_baseline, name_pixel, cursor, x0 + pad);
+            runs.push_back({first, cursor - first, done ? done_color : name_color, false, face});
+        }
+        {
+            const float pip_gap = pip * 0.5f;
+            const int count = std::max(order.count, 1);
+            const float pips_w = static_cast<float>(count) * pip + static_cast<float>(count - 1) * pip_gap;
+            // Vertically centre the pip row on the name's x-height.
+            const float pip_top = name_baseline - name_pixel * 0.62f;
+            float px = x1 - pad - pips_w;
+            for (int i = 0; i < count; ++i) {
+                const bool filled = i < order.filled;
+                const UINT first = cursor;
+                cursor = LayoutSolidQuad(px, pip_top, px + pip, pip_top + pip, cursor);
+                runs.push_back({first, cursor - first,
+                                filled ? (done ? gauge_on_done : gauge_on) : pip_off, true, face});
+                px += pip + pip_gap;
+            }
+        }
+
+        // Row 2 -- the doneness gauge: one segment per band across the card's inner
+        // width, the accepted window [band_min, band_max] lit and the rest dimmed, so
+        // the target reads as a place on a scale rather than two words to decode.
+        const float gauge_top = name_baseline + row_gap;
+        {
+            const int bands = std::max(order.band_count, 1);
+            const float seg_gap = card_w * 0.008f;
+            const float inner = card_w - 2.0f * pad;
+            const float seg_w = (inner - static_cast<float>(bands - 1) * seg_gap) /
+                                static_cast<float>(bands);
+            float sx = x0 + pad;
+            for (int i = 0; i < bands; ++i) {
+                const bool lit = i >= order.band_min && i <= order.band_max;
+                const XMFLOAT4 seg_color = lit ? (done ? gauge_on_done : gauge_on) : gauge_off;
+                const UINT first = cursor;
+                cursor = LayoutSolidQuad(sx, gauge_top, sx + seg_w, gauge_top + gauge_h, cursor);
+                runs.push_back({first, cursor - first, seg_color, true, face});
+                sx += seg_w + seg_gap;
+            }
+        }
+
+        // Row 3 -- the caption naming the window in words, quiet and small beneath the
+        // bar, so the gauge is legible to a glance and precise on a read.
+        const float caption_baseline = gauge_top + gauge_h + row_gap + caption_pixel;
+        if (!order.band.empty()) {
+            const UINT first = cursor;
+            cursor = LayoutLine(face, order.band, caption_baseline, caption_pixel, cursor,
+                                x0 + pad);
+            runs.push_back({first, cursor - first, caption_color, false, face});
+        }
+
+        top += card_h + card_gap;
     }
 }
 
@@ -2619,7 +2766,8 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                       std::span<const MeshInstance> held_props, const XMMATRIX& view_projection,
                       XMFLOAT3 camera_position, std::string_view hud_prompt,
-                      std::span<const std::string> debug_lines) {
+                      std::span<const std::string> debug_lines,
+                      std::span<const OrderCard> orders) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
@@ -2815,7 +2963,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // per-level texture heap, so bind that back before drawing.
     ID3D12DescriptorHeap* text_heaps[] = {texture_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(text_heaps), text_heaps);
-    DrawHud(hud_prompt, debug_lines);
+    DrawHud(hud_prompt, debug_lines, orders);
 
     // The frame is complete; hand the swapchain buffer back for presentation.
     TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),

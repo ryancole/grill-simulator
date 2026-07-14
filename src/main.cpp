@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <fstream>
 #include <optional>
@@ -404,11 +405,35 @@ int Run(HINSTANCE instance, int show_command) {
             debug_lines.push_back("LEVEL COMPLETE! (R to replay)");
         }
 
+        // The same order ticket, presented for the player rather than the debugger:
+        // one card per goal on the top-right rail. The renderer draws pips and a
+        // doneness gauge from these fields, so here we only shape the two strings --
+        // a loud uppercased name and a quiet band caption -- and hand across the raw
+        // counts and band indices. Built fresh each frame; it is a handful of goals.
+        const int band_count = static_cast<int>(CookInformation::Doneness::Burnt) + 1;
+        std::vector<Renderer::OrderCard> order_cards;
+        order_cards.reserve(goals.size());
+        for (std::size_t i = 0; i < goals.size(); ++i) {
+            const FoodGoal& goal = goals[i];
+            std::string name = goal.type;
+            for (char& c : name) {
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            }
+            std::string band(DonenessName(goal.min));
+            if (goal.max != goal.min) {
+                band += " to ";
+                band += DonenessName(goal.max);
+            }
+            order_cards.push_back(Renderer::OrderCard{
+                std::move(name), std::move(band), objectives.Filled(i), goal.count,
+                static_cast<int>(goal.min), static_cast<int>(goal.max), band_count});
+        }
+
         game.renderer.Render(game.world->scene(), props.WorldInstances(),
                              props.HighlightInstances(),
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
                              view_projection, game.camera.Position(), props.PromptText(),
-                             debug_lines);
+                             debug_lines, order_cards);
     }
 
     game.renderer.Shutdown();

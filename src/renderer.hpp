@@ -26,6 +26,22 @@ public:
     // target and descriptor heaps, sized in the .cpp, can account for them.
     static constexpr UINT kBloomLevels = 6;
 
+    // One order on the top-right objective rail: the polished, non-debug readout of a
+    // level's win condition. `name` is the loud header ("STEAK"), `band` the quiet
+    // caption naming the accepted doneness window ("medium rare to medium"). `filled`
+    // of `count` are done, shown as pips. The gauge draws `band_count` segments and
+    // brightens the inclusive window [band_min, band_max]. Built by the caller from
+    // Objectives, so the renderer stays free of the cook/level types.
+    struct OrderCard {
+        std::string name;
+        std::string band;
+        int filled = 0;
+        int count = 1;
+        int band_min = 0;
+        int band_max = 0;
+        int band_count = 1;
+    };
+
     // Brings up the device, swapchain and every pipeline -- everything that lives
     // for the whole session, independent of which level is loaded. No scene geometry
     // is uploaded here; call LoadScene once the first level's Scene exists.
@@ -59,12 +75,14 @@ public:
     // are never sliced open by the wall they are standing against. `hud_prompt`
     // is the one centred line of HUD text laid over the finished frame; empty draws
     // nothing. `debug_lines` are the read-only debug overlay -- one line each,
-    // anchored down the top-left corner; empty draws no overlay.
+    // anchored down the top-left corner; empty draws no overlay. `orders` are the
+    // polished objective cards on the top-right rail; empty draws no rail.
     void Render(const Scene& scene, std::span<const MeshInstance> props,
                 std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                 std::span<const MeshInstance> held_props,
                 const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
-                std::string_view hud_prompt, std::span<const std::string> debug_lines);
+                std::string_view hud_prompt, std::span<const std::string> debug_lines,
+                std::span<const OrderCard> orders);
     // Draws the launch/pause menu as its own complete frame: a solid backdrop, a
     // `title`, and the vertical list of `entries` with the one at `selected` picked
     // out. Owns the swapchain buffer from clear to present, so the game loop calls
@@ -222,8 +240,32 @@ private:
     // bottom, and the `debug_lines` overlay anchored down the top-left corner. Both
     // are packed into this frame's text region back-to-back before either is drawn,
     // so they never alias in the shared buffer the way two DrawText calls would (see
-    // DrawMenu). A no-op when both are empty. Assumes the render target is bound.
-    void DrawHud(std::string_view prompt, std::span<const std::string> debug_lines);
+    // DrawMenu). A no-op when all are empty. Assumes the render target is bound. The
+    // `orders` rail, when non-empty, is packed into the same region and drawn as a
+    // stack of cards down the top-right corner (see DrawObjectivesRail).
+    void DrawHud(std::string_view prompt, std::span<const std::string> debug_lines,
+                 std::span<const OrderCard> orders);
+    // One packed run of the HUD buffer: a vertex range that is either a solid fill (a
+    // panel, a gauge segment, a pip) or a line of glyphs from `face`, tinted `color`.
+    // DrawHud and DrawObjectivesRail pack a list of these into the shared region and
+    // then draw them in order, so nothing aliases and panels sit behind their text.
+    struct HudRun {
+        UINT first;
+        UINT count;
+        DirectX::XMFLOAT4 color;
+        bool solid;     // A flat fill (panel/gauge/pip) rather than glyphs.
+        FontFace face;  // Which atlas the glyphs draw from (ignored when solid).
+    };
+    // Packs the top-right objective rail into the shared text region, appending its
+    // panel/gauge/pip/label runs to `runs` and advancing `cursor`. Split out of DrawHud
+    // for legibility only; it must pack into the same cursor so its quads never alias
+    // the prompt's or the debug overlay's in this frame's buffer.
+    void DrawObjectivesRail(std::span<const OrderCard> orders, std::vector<HudRun>& runs,
+                            UINT& cursor);
+    // The pixel advance of `text` set from `face` at glyph height `pixel` -- the same
+    // sum LayoutLine walks -- so a caller can right-anchor a line (left_px = right edge
+    // minus this) or size a box to its text. Unknown glyphs contribute nothing.
+    float TextWidth(const FontFace& face, std::string_view text, float pixel) const;
     // Draws the menu overlay -- the title and the highlighted list of entries --
     // into the current frame, over whatever backdrop the caller has cleared. All
     // lines are packed into this frame's text vertex region back-to-back and only
