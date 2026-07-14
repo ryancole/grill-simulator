@@ -1,12 +1,14 @@
 #pragma once
 
 #include "collision.hpp"
+#include "cook_information.hpp"
 #include "rigid_body.hpp"
 #include "scene.hpp"
 
 #include <DirectXMath.h>
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -35,8 +37,9 @@ public:
     // loop before this runs, so the poses read here are already current.
     // `camera_to_world` carries the eye's position in its fourth row and its gaze
     // in the third, so both the reach test and a carried object's pose come from
-    // it. The Interact action, edge-triggered, is what grabs and drops.
-    void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions);
+    // it. The Interact action, edge-triggered, is what grabs and drops. `dt` is the
+    // frame time in seconds, which the cookable meats advance their cook on.
+    void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -91,11 +94,16 @@ private:
         DirectX::XMFLOAT4X4 resting;
 
         DirectX::XMFLOAT4X4 held_local;
+
+        // Present only on the meats: their cooking state, ticked each frame and read
+        // for the browning tint and the pick-up prompt. The tongs leave it empty --
+        // they are not food, so there is nothing to cook.
+        std::optional<CookInformation> cook;
     };
 
     void Add(std::uint32_t model_id, const Model& model, std::string name,
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
-             float knock_rating, ImpactSound impact_sound);
+             float knock_rating, ImpactSound impact_sound, bool cookable);
     // Fills an item's box shape (half_extents, com_offset) from the union of its
     // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);
@@ -107,6 +115,9 @@ private:
     // Recomputes `resting` from the body's current global pose, so drawing and
     // picking see where the body actually is.
     static void RebuildTransform(Item& item);
+    // The colour to draw an item under: a cooking meat browns with its doneness,
+    // everything else stays white (its model's own colours, unchanged).
+    static DirectX::XMFLOAT3 ItemTint(const Item& item);
     // The item the player is looking at within reach, or -1. A sphere swept down
     // the gaze picks the nearest prop it meets; the query is filtered to prop
     // bodies, so the static world and the player's own capsule are ignored.

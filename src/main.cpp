@@ -364,7 +364,7 @@ int Run(HINSTANCE instance, int show_command) {
         for (const Impact& impact : game.physics.Impacts()) {
             game.audio.PlayImpact(impact.position, impact.strength, impact.sound);
         }
-        game.world->props().Update(camera_to_world, game.actions);
+        game.world->props().Update(camera_to_world, game.actions, dt);
         // Read the dynamic furniture's body poses back into their draw instances.
         game.world->furniture().Update();
 

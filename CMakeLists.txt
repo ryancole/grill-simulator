@@ -40,6 +40,7 @@ add_executable(grill WIN32
   src/audio.cpp
   src/camera.cpp
   src/collision.cpp
+  src/cook_information.cpp
   src/environment.cpp
   src/image.cpp
   src/input.cpp
