@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catalog.hpp"
 #include "collision.hpp"
 #include "heat_source.hpp"
 #include "model.hpp"
@@ -9,6 +10,8 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 struct LevelDef;
@@ -30,13 +33,23 @@ struct MeshInstance {
     float checker;
 };
 
-// The models of the loose objects the player carries. The scene loads them like
-// any other prop so the renderer uploads them once, but it places no instances
-// of its own -- Props owns their placements and their movement.
+// The models of the loose non-food objects the player carries. The scene loads them
+// like any other prop so the renderer uploads them once, but it places no instances
+// of its own -- Props owns their placements and their movement. The foods the player
+// grills come from the catalog instead (see FoodType below).
 struct PropModels {
     std::uint32_t tongs = 0;
-    std::uint32_t patty = 0;
-    std::uint32_t steak = 0;
+};
+
+// A food type resolved for placing: the catalog's FoodDef with its model turned into a
+// loaded model id. Props spawns meats from these -- a food's model, how it cooks (its
+// CookProfile) and how it lands (knock rating + sound) -- looked up by the name the
+// catalog gave it.
+struct FoodType {
+    std::uint32_t model = 0;
+    CookProfile cook;
+    float knock_rating = 4.0f;
+    ImpactSound impact_sound = ImpactSound::Meat;
 };
 
 // A world object the player can knock over -- the grill, the cooler -- given its
@@ -102,6 +115,11 @@ public:
     // The models Props places and moves. Loaded here, drawn there.
     const PropModels& PropModelIds() const { return prop_models_; }
 
+    // The food type the catalog named `name`, with its model already loaded. Props
+    // spawns meats through this. Throws std::runtime_error naming the missing food, so
+    // a level or spawn that references a food the catalog lacks fails loudly.
+    const FoodType& Food(const std::string& name) const;
+
 private:
     std::uint32_t AddModel(Model model);
     // `file` names a .glb under the executable's assets/models/.
@@ -131,4 +149,6 @@ private:
 
     std::uint32_t cube_ = 0;
     PropModels prop_models_{};
+    // The food catalog, resolved: name -> its loaded model, cook profile and landing.
+    std::unordered_map<std::string, FoodType> foods_;
 };

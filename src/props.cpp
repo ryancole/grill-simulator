@@ -92,8 +92,14 @@ struct PropQueryFilter : PxQueryFilterCallback {
 } // namespace
 
 Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
-    const PropModels& models = scene.PropModelIds();
+    const std::uint32_t tongs = scene.PropModelIds().tongs;
     const std::vector<Model>& pool = scene.Models();
+
+    // The foods come from the catalog by name: each hands over its loaded model, its
+    // cook profile (how it grills), and how it lands. The tongs are not food, so they
+    // stay a plain carryable spawned from their own model.
+    const FoodType& steak = scene.Food("steak");
+    const FoodType& patty = scene.Food("patty");
 
     // Reserve so no push_back reallocates: each body's userData points at the tag
     // stored inside its Item, and that address has to stay put for the session.
@@ -103,18 +109,17 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
     // picnic table. All four sit in the player's view from the spawn point. Each
     // carries the Model it was loaded from so its box collider can be measured off
     // the mesh bounds. Placed a hair above the ground so physics settles it flat.
-    // The second-to-last argument is the 1..10 "hard to knock over" rating: the
-    // meat sits at a middling 4, the light tongs skitter more easily at 2. The last
-    // two are the sound each makes on landing -- the tongs clank, the meat splats --
-    // and whether it cooks: the three meats do, the tongs do not.
-    Add(models.tongs, pool[models.tongs], "tongs", {1.15f, 0.05f, 4.45f}, 25.0f, TongsInHand(),
-        2.0f, ImpactSound::Metal, false);
-    Add(models.steak, pool[models.steak], "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand(),
-        4.0f, ImpactSound::Meat, true);
-    Add(models.patty, pool[models.patty], "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand(),
-        4.0f, ImpactSound::Meat, true);
-    Add(models.patty, pool[models.patty], "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand(),
-        4.0f, ImpactSound::Meat, true);
+    // The knock rating (1..10, how hard to shove) and the landing sound ride from the
+    // catalog for the foods, and are spelled out for the tongs. The last argument is
+    // the cook: a food's profile makes it grillable, nullopt leaves the tongs inert.
+    Add(tongs, pool[tongs], "tongs", {1.15f, 0.05f, 4.45f}, 25.0f, TongsInHand(), 2.0f,
+        ImpactSound::Metal, std::nullopt);
+    Add(steak.model, pool[steak.model], "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand(),
+        steak.knock_rating, steak.impact_sound, steak.cook);
+    Add(patty.model, pool[patty.model], "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand(),
+        patty.knock_rating, patty.impact_sound, patty.cook);
+    Add(patty.model, pool[patty.model], "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand(),
+        patty.knock_rating, patty.impact_sound, patty.cook);
 }
 
 void Props::DeriveBodyShape(Item& item, const Model& model) {
@@ -172,13 +177,13 @@ XMFLOAT3 Props::ItemTint(const Item& item) {
 
 void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XMFLOAT3 position,
                 float yaw_degrees, FXMMATRIX held_local, float knock_rating,
-                ImpactSound impact_sound, bool cookable) {
+                ImpactSound impact_sound, std::optional<CookProfile> cook) {
     Item item{};
     item.model = model_id;
     item.name = std::move(name);
     XMStoreFloat4x4(&item.held_local, held_local);
-    if (cookable) {
-        item.cook.emplace();
+    if (cook) {
+        item.cook.emplace(*cook);
     }
     DeriveBodyShape(item, model);
 

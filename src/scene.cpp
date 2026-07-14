@@ -5,8 +5,10 @@
 
 #include <cfloat>
 #include <cmath>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 using namespace DirectX;
 
@@ -18,8 +20,20 @@ Scene::Scene(const LevelDef& level) {
     // scene places no instances of them: Props sets out the starting handful and
     // owns every one thereafter.
     prop_models_.tongs = LoadModel("tongs-metal.glb");
-    prop_models_.patty = LoadModel("burger-raw.glb");
-    prop_models_.steak = LoadModel("steak-cooked.glb");
+
+    // The food catalog is game-wide too -- a steak is a steak in every level -- so
+    // load it here and turn each food's model name into an uploaded model id. Props
+    // spawns the meats from these by name. Loading every catalogued food's model each
+    // level is a touch wasteful once foods are only placed in some levels; a handful
+    // makes it not worth tracking which are used.
+    for (auto& [name, def] : catalog::LoadFoods(ExecutableDirectory() / "assets" / "catalog.toml")) {
+        FoodType type;
+        type.model = LoadModel(def.model.c_str());
+        type.cook = def.cook;
+        type.knock_rating = def.knock_rating;
+        type.impact_sound = def.impact_sound;
+        foods_.emplace(name, type);
+    }
 
     // Build the level. Each placement becomes a draw instance plus either a static
     // collider (AddInstance) or a knock-over-able dynamic body (AddDynamicInstance),
@@ -57,6 +71,14 @@ Scene::Scene(const LevelDef& level) {
 
 std::uint32_t Scene::LoadModel(const char* file) {
     return AddModel(LoadGltfModel(ExecutableDirectory() / "assets" / "models" / file));
+}
+
+const FoodType& Scene::Food(const std::string& name) const {
+    const auto it = foods_.find(name);
+    if (it == foods_.end()) {
+        throw std::runtime_error("catalog.toml has no food named '" + name + "'");
+    }
+    return it->second;
 }
 
 std::uint32_t Scene::AddModel(Model model) {

@@ -1,0 +1,47 @@
+# The catalog: the game's object archetypes -- what a "steak" is, independent of any
+# level. Levels (and the starting spawn set) place these by name; this file says how
+# each behaves. A TOML file, parsed at runtime (see src/catalog.cpp), so a new food is
+# a text edit and a re-stage, not a rebuild -- reload a level in-game (R) to pick it up.
+#
+# Foods live under [food.<name>]. Every field but `model` is optional and defaults to
+# the game's original single cook, so a terse food is just a model. Fields:
+#   model              -- the .glb under assets/models that draws it (required).
+#   cook_tau           -- thermal time constant, seconds: how slowly the core chases the
+#                         surrounding heat. Bigger = a thicker cut, slower to cook.
+#   cook_threshold_f   -- degrees F the core must pass before doneness banks at all.
+#   doneness_gain      -- how fast doneness banks per degree over the threshold, per
+#                         second. Bigger = cooks (and burns) faster.
+#   bands              -- the six doneness thresholds [rare, medium_rare, medium,
+#                         medium_well, well_done, burnt] the readout is cut from.
+#   raw_tint / seared_tint / char_tint -- [r,g,b] the surface browns through as it
+#                         cooks; multiplied onto the model's own colour (white = raw).
+#   knock              -- 1..10, how hard it is to shove around.
+#   sound              -- the clip it plays on a hard landing ("meat", "metal", ...).
+#
+# The two starting meats below carry the original constants explicitly, so today they
+# still cook identically -- but each can now be tuned on its own (a chicken that needs
+# a higher safe temp, a sausage that cooks faster) without touching any code.
+
+[food.steak]
+model = "steak-cooked.glb"
+cook_tau = 90.0
+cook_threshold_f = 130.0
+doneness_gain = 0.0002
+bands = [0.12, 0.28, 0.45, 0.62, 0.80, 1.15]
+raw_tint = [1.0, 1.0, 1.0]
+seared_tint = [0.50, 0.34, 0.24]
+char_tint = [0.13, 0.11, 0.10]
+knock = 4.0
+sound = "meat"
+
+[food.patty]
+model = "burger-raw.glb"
+cook_tau = 90.0
+cook_threshold_f = 130.0
+doneness_gain = 0.0002
+bands = [0.12, 0.28, 0.45, 0.62, 0.80, 1.15]
+raw_tint = [1.0, 1.0, 1.0]
+seared_tint = [0.50, 0.34, 0.24]
+char_tint = [0.13, 0.11, 0.10]
+knock = 4.0
+sound = "meat"

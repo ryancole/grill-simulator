@@ -106,9 +106,11 @@ private:
         std::optional<CookInformation> cook;
     };
 
+    // `cook` gives the item a cooking state built from that food's profile; the tongs
+    // and any other non-food carryable pass nullopt and simply never cook.
     void Add(std::uint32_t model_id, const Model& model, std::string name,
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
-             float knock_rating, ImpactSound impact_sound, bool cookable);
+             float knock_rating, ImpactSound impact_sound, std::optional<CookProfile> cook);
     // Fills an item's box shape (half_extents, com_offset) from the union of its
     // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);
