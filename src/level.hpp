@@ -1,6 +1,7 @@
 #pragma once
 
 #include "environment.hpp"
+#include "rigid_body.hpp"
 
 #include <DirectXMath.h>
 
@@ -30,6 +31,10 @@ struct Placement {
     bool dynamic = false;
     float mass = 1.0f;
     float knock_rating = 1.0f;
+    // The sound this body makes on a hard landing, for a dynamic placement (the
+    // grill clatters). None -- the default -- for the silent furniture (the cooler)
+    // and every static placement, which never reads it.
+    ImpactSound impact_sound = ImpactSound::None;
 };
 
 // Everything that makes one level its own place: a name, where the player starts,

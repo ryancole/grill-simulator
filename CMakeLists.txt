@@ -107,10 +107,12 @@ add_hlsl_shader(grill SOURCE shaders/outline.hlsl ENTRY PSMain PROFILE ps_6_6 OU
 add_hlsl_shader(grill SOURCE shaders/shadow.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT shadow.vs.cso)
 
 stage_assets(grill DIRECTORY assets/models
-  FILES grill-basic.glb tree.glb bench-basic.glb crate.glb cooler-basic.glb tongs-metal.glb burger-raw.glb steak-cooked.glb)
+  FILES charcoal-grill-base.glb charcoal-grill-lid.glb tree.glb bench-basic.glb crate.glb cooler-basic.glb tongs-metal.glb burger-raw.glb steak-cooked.glb)
 
 stage_assets(grill DIRECTORY assets/audio
-  FILES sizzle.wav 232135__yottasounds__splat-005.wav 446128__justinvoke__metal-clank-4.wav)
+  FILES sizzle.wav 232135__yottasounds__splat-005.wav 446128__justinvoke__metal-clank-4.wav
+        820059__lukemeney__round-baking-tray-new-1.wav 820060__lukemeney__round-baking-tray-new-2.wav
+        820057__lukemeney__big-pot-top-2.wav 820058__lukemeney__big-pot-top-3.wav)
 
 # The levels are text, parsed at runtime (see src/level.cpp), so editing one and
 # re-staging needs no recompile -- only the copy next to the executable.

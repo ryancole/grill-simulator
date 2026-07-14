@@ -2,6 +2,7 @@
 
 #include "collision.hpp"
 #include "model.hpp"
+#include "rigid_body.hpp"
 
 #include <DirectXMath.h>
 
@@ -52,6 +53,9 @@ struct DynamicBody {
     float mass = 1.0f;
     // 1..10, how hard the player finds it to knock over (see BodyTag::knock_rating).
     float knock_rating = 1.0f;
+    // The sound the body makes on a hard landing, carried to its BodyTag so the
+    // contact report can voice it (the grill clatters; the cooler stays None).
+    ImpactSound impact_sound = ImpactSound::None;
 };
 
 // The runtime side of a level: it takes a LevelDef (pure data -- see level.hpp)
@@ -105,7 +109,8 @@ private:
     // recorded in the model's own space; the instance transform rides separately as
     // where the body spawns, and `mass` sets how heavy it is to shove.
     void AddDynamicInstance(std::uint32_t model, DirectX::FXMMATRIX transform,
-                            DirectX::XMFLOAT3 tint, float mass, float knock_rating);
+                            DirectX::XMFLOAT3 tint, float mass, float knock_rating,
+                            ImpactSound impact_sound);
 
     std::vector<Model> models_;
     std::vector<MeshInstance> instances_;

@@ -7,13 +7,16 @@ class PxRigidDynamic;
 }
 
 // The sound a body makes when the physics contact report catches it landing on
-// something: the steak and patties splat, the tongs clank, and everything else
-// (the grill, the cooler, the static world) stays None and raises nothing. The
-// underlying type is fixed so audio.hpp can forward-declare it without the header.
+// something: the steak and patties splat, the tongs clank, the grill's base and lid
+// each knock with their own take (a baking tray and a pot top), and everything else
+// (the cooler, the static world) stays None and raises nothing. The underlying type
+// is fixed so audio.hpp can forward-declare it without the header.
 enum class ImpactSound : unsigned char {
     None,
     Meat,
     Metal,
+    GrillBase,
+    GrillLid,
 };
 
 // Hung off every dynamic body the player can bump, via PxActor::userData, so the

@@ -29,7 +29,8 @@
 #           (metres per checker tile; omit for a flat surface).
 #   prop -- a .glb from assets/models: pos, with optional yaw, uniform scale and
 #           tint (defaults white); `dynamic = true` with mass and knock makes it a
-#           knock-over-able body.
+#           knock-over-able body, and an optional sound ("meat", "metal",
+#           "grill_base" or "grill_lid") is the clip it plays on a hard landing.
 
 name = "Backyard"
 spawn = [0.0, 0.0, -7.0]
@@ -49,9 +50,12 @@ box = [
 ]
 
 prop = [
-  # The grill and cooler are dynamic: run into one and it topples (the grill is light
-  # and top-heavy) or slides (the cooler is heavier and low).
-  {model = "grill-basic.glb",  pos = [0.0, 0.0, 5.0],   dynamic = true, mass = 12.0, knock = 8.0},
+  # The charcoal grill is two separate dynamic bodies -- a base and a lid resting on
+  # it -- so the lid can be knocked off on its own. Both topple; the cooler is heavier
+  # and low, so it mostly slides. The lid's y rests it on the base's bowl rim; nudge it
+  # if it floats or sinks in-game.
+  {model = "charcoal-grill-base.glb", pos = [0.0, 0.0, 5.0],   dynamic = true, mass = 10.0, knock = 8.0, sound = "grill_base"},
+  {model = "charcoal-grill-lid.glb",  pos = [0.0, 0.72, 5.0],  dynamic = true, mass = 3.0,  knock = 4.0, sound = "grill_lid"},
   {model = "bench-basic.glb",  pos = [-4.5, 0.0, 1.5]},
   {model = "cooler-basic.glb", pos = [3.6, 0.0, 6.5],   dynamic = true, mass = 14.0, knock = 7.0},
 
