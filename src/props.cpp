@@ -235,13 +235,27 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     // the Interact press so the same read drives both the serve and the prompt, and
     // recomputed each frame (so it clears once nothing is carried). Only a meat serves;
     // the tongs carry no cook and are never over a zone as far as this is concerned.
+    // Alongside it, whether this cook would be taken here and, if not, what the order
+    // still wants -- so the prompt can explain a serve that is about to bounce.
     serve_zone_ = -1;
+    serve_ok_ = false;
+    serve_need_.clear();
     if (carried_ >= 0 && items_[carried_].cook) {
         const XMVECTOR held = (XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world).r[3];
         for (int z = 0; z < static_cast<int>(serve_zones.size()); ++z) {
             if (serve_zones[z].Contains(held)) {
                 serve_zone_ = z;
                 break;
+            }
+        }
+        if (serve_zone_ >= 0) {
+            const CookInformation::Doneness band = items_[carried_].cook->DonenessBand();
+            serve_ok_ = objectives.WouldAccept(items_[carried_].name, band);
+            if (!serve_ok_) {
+                if (const FoodGoal* order = objectives.NextOrderFor(items_[carried_].name)) {
+                    serve_need_ = std::string(DonenessName(order->min)) + " to " +
+                                  std::string(DonenessName(order->max));
+                }
             }
         }
     }
@@ -340,12 +354,20 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
 
 std::string Props::PromptText() const {
     if (carried_ >= 0) {
-        // Over a serving counter, the carried meat can be delivered -- name the band it
-        // would be served in so the player commits with the cook in view. Off a counter,
-        // Interact is the plain drop.
+        // Over a serving counter, the carried meat can be delivered. Only offer "[E]
+        // Serve" when this cook would actually be taken; otherwise say why nothing
+        // happens -- the band it needs, or that no order wants this food -- so a rejected
+        // press reads as "not yet", not as broken. Off a counter, Interact is the drop.
         if (serve_zone_ >= 0 && items_[carried_].cook) {
-            return "[E] Serve " + items_[carried_].name + " (" +
-                   std::string(items_[carried_].cook->DonenessLabel()) + ")";
+            const Item& meat = items_[carried_];
+            const std::string band(meat.cook->DonenessLabel());
+            if (serve_ok_) {
+                return "[E] Serve " + meat.name + " (" + band + ")";
+            }
+            if (!serve_need_.empty()) {
+                return meat.name + " (" + band + ") -- needs " + serve_need_;
+            }
+            return meat.name + " (" + band + ") -- no order needs this";
         }
         return "[E] Drop";
     }

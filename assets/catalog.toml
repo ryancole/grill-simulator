@@ -133,13 +133,16 @@ knock = 7.0
 [prop.bench]
 model = "bench-basic.glb"
 
-# The serving counter: where cooked food is delivered to satisfy a level's orders. It
-# reuses the bench mesh as a flat surface; `serve` is the ground-plane radius the player
-# must stand within, and `serve_offset` lifts the delivered food onto the bench top.
+# The serving counter: where cooked food is delivered to satisfy a level's orders. The
+# tray mesh is small (~0.28 m) and flat, so a level scales it up to a visible platter
+# and lifts it to rest on the ground (see backyard.level). `serve` is the ground-plane
+# radius the player must stand within; `serve_offset` is in the model's own space -- it
+# sits at the tray's top surface (0.010 m up) and scales with the prop, so a delivered
+# meat rests on the tray whatever size the level makes it.
 [prop.serving_table]
-model = "bench-basic.glb"
-serve = 1.1
-serve_offset = [0.0, 0.75, 0.0]
+model = "tray.glb"
+serve = 0.8
+serve_offset = [0.0, 0.010, 0.0]
 
 [prop.crate]
 model = "crate.glb"

@@ -179,6 +179,13 @@ private:
     // so the (const) prompt can read it -- it drives the "[E] Serve" hint and is what
     // the Interact press serves into.
     int serve_zone_ = -1;
+    // Whether the carried meat's current cook would be accepted at that zone this frame,
+    // and -- when it would not -- the doneness the outstanding order still wants, as
+    // ready-made text ("medium well to well done") or empty if no order needs this type.
+    // Both are computed in Update against the Objectives, so the const prompt can explain
+    // an about-to-be-rejected serve rather than silently doing nothing.
+    bool serve_ok_ = false;
+    std::string serve_need_;
 
     // Rebuilt each Update: every resting item, the carried one, and the one the
     // outline glows around.
