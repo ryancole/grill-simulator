@@ -12,38 +12,28 @@ using namespace DirectX;
 
 namespace {
 
-// One placement's transform is authored the way the level files spell it: a box by
-// its centre, full size and Y turn; a prop by its position, Y turn and uniform
-// scale. Both recompose to scale * rotateY * translate -- exactly what the old
-// hand-written helpers built, so the levels place bit-for-bit as the code did.
-Placement MakeBox(XMFLOAT3 center, XMFLOAT3 size, float yaw_degrees, XMFLOAT3 color,
-                  float checker) {
-    Placement placement;
-    // An empty model name is the shared unit cube.
-    XMStoreFloat4x4(&placement.transform,
-                    XMMatrixScaling(size.x, size.y, size.z) *
-                        XMMatrixRotationY(XMConvertToRadians(yaw_degrees)) *
-                        XMMatrixTranslation(center.x, center.y, center.z));
-    placement.tint = color;
-    placement.checker = checker;
-    return placement;
+// A box's transform is authored by its centre, full size and Y turn; a prop's by its
+// position, Y turn and uniform scale. Both recompose to scale * rotateY * translate --
+// exactly what the old hand-written helpers built, so the levels place bit-for-bit as
+// the code did.
+BoxPlacement MakeBox(XMFLOAT3 center, XMFLOAT3 size, float yaw_degrees, XMFLOAT3 color,
+                     float checker) {
+    BoxPlacement box;
+    XMStoreFloat4x4(&box.transform, XMMatrixScaling(size.x, size.y, size.z) *
+                                        XMMatrixRotationY(XMConvertToRadians(yaw_degrees)) *
+                                        XMMatrixTranslation(center.x, center.y, center.z));
+    box.tint = color;
+    box.checker = checker;
+    return box;
 }
 
-Placement MakeProp(std::string model, XMFLOAT3 position, float yaw_degrees, float scale,
-                   XMFLOAT3 tint, bool dynamic, float mass, float knock_rating,
-                   ImpactSound impact_sound) {
-    Placement placement;
-    placement.model = std::move(model);
-    XMStoreFloat4x4(&placement.transform,
-                    XMMatrixScaling(scale, scale, scale) *
-                        XMMatrixRotationY(XMConvertToRadians(yaw_degrees)) *
-                        XMMatrixTranslation(position.x, position.y, position.z));
-    placement.tint = tint;
-    placement.dynamic = dynamic;
-    placement.mass = mass;
-    placement.knock_rating = knock_rating;
-    placement.impact_sound = impact_sound;
-    return placement;
+PropPlacement MakeProp(std::string type, XMFLOAT3 position, float yaw_degrees, float scale) {
+    PropPlacement prop;
+    prop.type = std::move(type);
+    XMStoreFloat4x4(&prop.transform, XMMatrixScaling(scale, scale, scale) *
+                                         XMMatrixRotationY(XMConvertToRadians(yaw_degrees)) *
+                                         XMMatrixTranslation(position.x, position.y, position.z));
+    return prop;
 }
 
 // A malformed-file error naming the file. TOML syntax errors carry their own line
@@ -102,33 +92,6 @@ XMFLOAT2 Vec2Or(const toml::node_view<const toml::node>& view, XMFLOAT2 fallback
 float NumberOr(const toml::node_view<const toml::node>& view, float fallback,
                const std::filesystem::path& path, const char* what) {
     return view ? static_cast<float>(AsDouble(*view.node(), path, what)) : fallback;
-}
-
-// An optional impact sound named by string, falling back to None when the key is
-// absent. Only a dynamic prop voices it; a static one that names a sound is
-// harmless. An unrecognised name is a level error, not a silent default.
-ImpactSound SoundOr(const toml::node_view<const toml::node>& view,
-                    const std::filesystem::path& path) {
-    if (!view) {
-        return ImpactSound::None;
-    }
-    const auto name = view.value<std::string>();
-    if (!name) {
-        Fail(path, "prop sound must be a string");
-    }
-    if (*name == "meat") {
-        return ImpactSound::Meat;
-    }
-    if (*name == "metal") {
-        return ImpactSound::Metal;
-    }
-    if (*name == "grill_base") {
-        return ImpactSound::GrillBase;
-    }
-    if (*name == "grill_lid") {
-        return ImpactSound::GrillLid;
-    }
-    Fail(path, "unknown prop sound '" + *name + "' (want meat, metal, grill_base or grill_lid)");
 }
 
 } // namespace
@@ -214,30 +177,45 @@ LevelDef LoadFromFile(const std::filesystem::path& path) {
             const XMFLOAT3 color = Vec3((*box)["color"], path, "box color");
             const float yaw = NumberOr((*box)["yaw"], 0.0f, path, "box yaw");
             const float checker = NumberOr((*box)["checker"], 0.0f, path, "box checker");
-            level.placements.push_back(MakeBox(center, size, yaw, color, checker));
+            level.boxes.push_back(MakeBox(center, size, yaw, color, checker));
         }
     }
 
+    // Props and carryables both name a catalog `type` and where it goes; the catalog
+    // (loaded by Scene) says what that type is. A prop takes a uniform scale; a
+    // carryable does not (Props seeds it from position and yaw alone).
     if (const toml::array* props = root["prop"].as_array()) {
         for (const toml::node& node : *props) {
             const toml::table* prop = node.as_table();
             if (prop == nullptr) {
                 Fail(path, "each prop must be a table");
             }
-            std::string model = (*prop)["model"].value_or(std::string{});
-            if (model.empty()) {
-                Fail(path, "each prop needs a model");
+            std::string type = (*prop)["type"].value_or(std::string{});
+            if (type.empty()) {
+                Fail(path, "each prop needs a type");
             }
             const XMFLOAT3 pos = Vec3((*prop)["pos"], path, "prop pos");
             const float yaw = NumberOr((*prop)["yaw"], 0.0f, path, "prop yaw");
             const float scale = NumberOr((*prop)["scale"], 1.0f, path, "prop scale");
-            const XMFLOAT3 tint = Vec3Or((*prop)["tint"], XMFLOAT3{1.0f, 1.0f, 1.0f}, path, "prop tint");
-            const bool dynamic = (*prop)["dynamic"].value_or(false);
-            const float mass = NumberOr((*prop)["mass"], 1.0f, path, "prop mass");
-            const float knock = NumberOr((*prop)["knock"], 1.0f, path, "prop knock");
-            const ImpactSound sound = SoundOr((*prop)["sound"], path);
-            level.placements.push_back(
-                MakeProp(std::move(model), pos, yaw, scale, tint, dynamic, mass, knock, sound));
+            level.props.push_back(MakeProp(std::move(type), pos, yaw, scale));
+        }
+    }
+
+    if (const toml::array* carryables = root["carryable"].as_array()) {
+        for (const toml::node& node : *carryables) {
+            const toml::table* carryable = node.as_table();
+            if (carryable == nullptr) {
+                Fail(path, "each carryable must be a table");
+            }
+            std::string type = (*carryable)["type"].value_or(std::string{});
+            if (type.empty()) {
+                Fail(path, "each carryable needs a type");
+            }
+            CarryablePlacement placement;
+            placement.type = std::move(type);
+            placement.pos = Vec3((*carryable)["pos"], path, "carryable pos");
+            placement.yaw = NumberOr((*carryable)["yaw"], 0.0f, path, "carryable yaw");
+            level.carryables.push_back(std::move(placement));
         }
     }
 

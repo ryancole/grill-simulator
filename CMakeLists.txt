@@ -39,9 +39,11 @@ add_executable(grill WIN32
   src/actions.cpp
   src/audio.cpp
   src/camera.cpp
+  src/catalog.cpp
   src/collision.cpp
   src/cook_information.cpp
   src/environment.cpp
+  src/heat_source.cpp
   src/image.cpp
   src/input.cpp
   src/level.cpp
@@ -120,10 +122,11 @@ stage_assets(grill DIRECTORY assets/audio
 stage_assets(grill DIRECTORY assets/levels
   FILES backyard.level rooftop.level)
 
-# The control bindings, likewise text parsed at runtime (see src/actions.cpp): a
-# rebind is a text edit and a re-stage, no recompile.
+# The control bindings and the object catalog, likewise text parsed at runtime (see
+# src/actions.cpp, src/catalog.cpp): editing one is a text edit and a re-stage, no
+# recompile.
 stage_assets(grill DIRECTORY assets
-  FILES controls.toml)
+  FILES controls.toml catalog.toml)
 
 # The HUD font atlas is baked from the committed .ttf at build time; only the
 # .png/.csv it produces are read at runtime, and those live in the build tree.

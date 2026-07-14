@@ -364,9 +364,12 @@ int Run(HINSTANCE instance, int show_command) {
         for (const Impact& impact : game.physics.Impacts()) {
             game.audio.PlayImpact(impact.position, impact.strength, impact.sound);
         }
-        game.world->props().Update(camera_to_world, game.actions, dt);
-        // Read the dynamic furniture's body poses back into their draw instances.
+        // Read the dynamic furniture's body poses back into their draw instances, and
+        // place its heat sources at wherever those bodies now sit -- before the props
+        // update, so the meats cook against this frame's grate position.
         game.world->furniture().Update();
+        game.world->props().Update(camera_to_world, game.actions, dt,
+                                   game.world->furniture().HeatSources());
 
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());

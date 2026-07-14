@@ -1,8 +1,11 @@
 #pragma once
 
+#include "heat_source.hpp"
 #include "rigid_body.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 class Scene;
@@ -25,9 +28,16 @@ public:
     // instance's authored transform with its declared mass.
     Furniture(Scene& scene, Physics& physics);
 
-    // Reads every body's current pose into its scene instance. Called after
-    // Physics::Step advances the simulation and before the frame is drawn.
+    // Reads every body's current pose into its scene instance, and moves each heat
+    // source's hot centre to follow the body it rides. Called after Physics::Step
+    // advances the simulation and before the frame is drawn -- and before Props
+    // updates, so the meats cook against this frame's heat, not last frame's.
     void Update();
+
+    // The heat the furniture radiates this frame -- the grill's grate, its origin
+    // already placed at wherever the grill has ended up. Handed to Props so the meats
+    // set on the grill cook. Empty on a level with no hot furniture.
+    std::span<const HeatSource> HeatSources() const { return heat_sources_; }
 
 private:
     // One dynamic object: the shared bumpable body and the scene draw instance its
@@ -38,6 +48,18 @@ private:
         std::uint32_t instance;
     };
 
+    // One heat emitter and what drives it: the HeatSource itself lives in the
+    // contiguous heat_sources_ vector below (so HeatSources() can hand it out as a
+    // span), while the body index and the grate's body-space offset that move its
+    // origin each frame ride here in a parallel vector. Split so the exposed side
+    // stays a clean run of HeatSource and the bookkeeping stays private.
+    struct HeatDrive {
+        std::size_t body;             // index into bodies_ whose pose carries the heat
+        DirectX::XMFLOAT3 local_offset; // grate centre in that body's model space
+    };
+
     Scene* scene_;
     std::vector<Body> bodies_;
+    std::vector<HeatSource> heat_sources_;
+    std::vector<HeatDrive> heat_drives_;
 };

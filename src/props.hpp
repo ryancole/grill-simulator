@@ -2,6 +2,7 @@
 
 #include "collision.hpp"
 #include "cook_information.hpp"
+#include "heat_source.hpp"
 #include "rigid_body.hpp"
 #include "scene.hpp"
 
@@ -39,7 +40,11 @@ public:
     // in the third, so both the reach test and a carried object's pose come from
     // it. The Interact action, edge-triggered, is what grabs and drops. `dt` is the
     // frame time in seconds, which the cookable meats advance their cook on.
-    void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt);
+    // `heat_sources` are the yard's hot objects this frame (the grill's grate): each
+    // meat cooks against the hottest air any of them imposes at where it sits, or
+    // room air when none reaches it.
+    void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt,
+                std::span<const HeatSource> heat_sources);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -101,9 +106,11 @@ private:
         std::optional<CookInformation> cook;
     };
 
+    // `cook` gives the item a cooking state built from that food's profile; the tongs
+    // and any other non-food carryable pass nullopt and simply never cook.
     void Add(std::uint32_t model_id, const Model& model, std::string name,
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
-             float knock_rating, ImpactSound impact_sound, bool cookable);
+             float knock_rating, ImpactSound impact_sound, std::optional<CookProfile> cook);
     // Fills an item's box shape (half_extents, com_offset) from the union of its
     // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);

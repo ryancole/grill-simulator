@@ -5,6 +5,7 @@
 
 #include <PxPhysicsAPI.h>
 
+#include <algorithm>
 #include <cfloat>
 
 using namespace DirectX;
@@ -46,6 +47,18 @@ XMMATRIX FlatInHand() {
 XMMATRIX TongsInHand() {
     return XMMatrixRotationY(-XM_PIDIV2) * XMMatrixRotationX(-0.15f) *
            XMMatrixTranslation(0.16f, -0.30f, 0.52f);
+}
+
+// The in-hand pose a carryable's catalog hold style asks for. Props owns the two
+// poses; the catalog just names which one.
+XMMATRIX HoldFor(HoldStyle hold) {
+    switch (hold) {
+    case HoldStyle::Tongs:
+        return TongsInHand();
+    case HoldStyle::Flat:
+        break;
+    }
+    return FlatInHand();
 }
 
 MeshInstance MakeInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint = kWhite) {
@@ -91,29 +104,21 @@ struct PropQueryFilter : PxQueryFilterCallback {
 } // namespace
 
 Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
-    const PropModels& models = scene.PropModelIds();
     const std::vector<Model>& pool = scene.Models();
+    const std::vector<CarryableSpawn>& spawns = scene.Carryables();
 
     // Reserve so no push_back reallocates: each body's userData points at the tag
     // stored inside its Item, and that address has to stay put for the session.
-    items_.reserve(4);
+    items_.reserve(spawns.size());
 
-    // The tongs lie flat on the patio just beside the grill; the meat waits on the
-    // picnic table. All four sit in the player's view from the spawn point. Each
-    // carries the Model it was loaded from so its box collider can be measured off
-    // the mesh bounds. Placed a hair above the ground so physics settles it flat.
-    // The second-to-last argument is the 1..10 "hard to knock over" rating: the
-    // meat sits at a middling 4, the light tongs skitter more easily at 2. The last
-    // two are the sound each makes on landing -- the tongs clank, the meat splats --
-    // and whether it cooks: the three meats do, the tongs do not.
-    Add(models.tongs, pool[models.tongs], "tongs", {1.15f, 0.05f, 4.45f}, 25.0f, TongsInHand(),
-        2.0f, ImpactSound::Metal, false);
-    Add(models.steak, pool[models.steak], "steak", {-4.55f, 0.80f, 1.70f}, 18.0f, FlatInHand(),
-        4.0f, ImpactSound::Meat, true);
-    Add(models.patty, pool[models.patty], "patty", {-4.25f, 0.80f, 1.35f}, 0.0f, FlatInHand(),
-        4.0f, ImpactSound::Meat, true);
-    Add(models.patty, pool[models.patty], "patty", {-4.80f, 0.80f, 1.45f}, -24.0f, FlatInHand(),
-        4.0f, ImpactSound::Meat, true);
+    // The starting objects are the level's carryables, already joined to their catalog
+    // types by Scene: each hands over its loaded model, where it starts, how it is
+    // held, how it lands, and -- for a food -- how it cooks (nullopt leaves the tongs
+    // inert). Placed a hair above the ground in the files so physics settles them flat.
+    for (const CarryableSpawn& spawn : spawns) {
+        Add(spawn.model, pool[spawn.model], spawn.name, spawn.pos, spawn.yaw, HoldFor(spawn.hold),
+            spawn.knock_rating, spawn.impact_sound, spawn.cook);
+    }
 }
 
 void Props::DeriveBodyShape(Item& item, const Model& model) {
@@ -171,13 +176,13 @@ XMFLOAT3 Props::ItemTint(const Item& item) {
 
 void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XMFLOAT3 position,
                 float yaw_degrees, FXMMATRIX held_local, float knock_rating,
-                ImpactSound impact_sound, bool cookable) {
+                ImpactSound impact_sound, std::optional<CookProfile> cook) {
     Item item{};
     item.model = model_id;
     item.name = std::move(name);
     XMStoreFloat4x4(&item.held_local, held_local);
-    if (cookable) {
-        item.cook.emplace();
+    if (cook) {
+        item.cook.emplace(*cook);
     }
     DeriveBodyShape(item, model);
 
@@ -197,7 +202,8 @@ void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XM
     items_.back().rigid.Bind();
 }
 
-void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt) {
+void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt,
+                   std::span<const HeatSource> heat_sources) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
@@ -232,13 +238,26 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     }
 
-    // Advance the cook on every meat, carried or resting alike. There is no heat
-    // source yet, so each is surrounded by room air and simply holds at room
-    // temperature -- but the wiring is here for the grate that comes next.
-    for (Item& item : items_) {
-        if (item.cook) {
-            item.cook->Update(CookInformation::kRoomTempF, dt);
+    // Advance the cook on every meat, carried or resting alike. Each cooks against
+    // the surrounding air where it sits: room temperature by default, or the hottest
+    // temperature any heat source imposes there -- so a steak laid on the grill's
+    // grate finally crosses the cook threshold, while one carried away cools back to
+    // the yard. The sample point is the item's model origin, which sits on its
+    // underside -- exactly the face resting on the grate.
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        Item& item = items_[i];
+        if (!item.cook) {
+            continue;
         }
+        const XMMATRIX pose = i == carried_
+                                  ? XMLoadFloat4x4(&item.held_local) * camera_to_world
+                                  : XMLoadFloat4x4(&item.resting);
+        const XMVECTOR point = pose.r[3];
+        float ambient_f = CookInformation::kRoomTempF;
+        for (const HeatSource& source : heat_sources) {
+            ambient_f = std::max(ambient_f, source.TemperatureAt(point));
+        }
+        item.cook->Update(ambient_f, dt);
     }
 
     // Rebuild the draw lists from the current state. There are a handful of

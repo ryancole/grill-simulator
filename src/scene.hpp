@@ -1,12 +1,17 @@
 #pragma once
 
+#include "catalog.hpp"
 #include "collision.hpp"
+#include "heat_source.hpp"
 #include "model.hpp"
 #include "rigid_body.hpp"
 
 #include <DirectXMath.h>
 
 #include <cstdint>
+#include <optional>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 struct LevelDef;
@@ -28,13 +33,20 @@ struct MeshInstance {
     float checker;
 };
 
-// The models of the loose objects the player carries. The scene loads them like
-// any other prop so the renderer uploads them once, but it places no instances
-// of its own -- Props owns their placements and their movement.
-struct PropModels {
-    std::uint32_t tongs = 0;
-    std::uint32_t patty = 0;
-    std::uint32_t steak = 0;
+// One carryable the level placed, resolved and ready for Props to seed: its loaded
+// model, the name it reads as in the pick-up prompt, where it starts (position and
+// yaw), how it is held, how it lands, and -- for a food -- how it cooks. This is a
+// level's CarryablePlacement joined to its catalog type, so Props builds the starting
+// objects from these rather than a hardcoded list.
+struct CarryableSpawn {
+    std::uint32_t model = 0;
+    std::string name;
+    DirectX::XMFLOAT3 pos{0.0f, 0.0f, 0.0f};
+    float yaw = 0.0f;
+    HoldStyle hold = HoldStyle::Flat;
+    float knock_rating = 4.0f;
+    ImpactSound impact_sound = ImpactSound::Meat;
+    std::optional<CookProfile> cook;
 };
 
 // A world object the player can knock over -- the grill, the cooler -- given its
@@ -56,6 +68,15 @@ struct DynamicBody {
     // The sound the body makes on a hard landing, carried to its BodyTag so the
     // contact report can voice it (the grill clatters; the cooler stays None).
     ImpactSound impact_sound = ImpactSound::None;
+
+    // The heat this body radiates, if any -- present on the grill, empty on the
+    // cooler. Its origin is unset here (it is world state Furniture refreshes each
+    // frame from the body's pose); this carries only the fixed temperature and reach.
+    std::optional<HeatSource> heat;
+    // Where the heat centre sits in the model's own space -- up at the grate. Carried
+    // separately from the HeatSource because it is fixed body-space data Furniture
+    // transforms through the pose to place the source's world origin each frame.
+    DirectX::XMFLOAT3 heat_offset{0.0f, 0.0f, 0.0f};
 };
 
 // The runtime side of a level: it takes a LevelDef (pure data -- see level.hpp)
@@ -88,8 +109,9 @@ public:
     static constexpr std::uint32_t kCubeModel = 0;
     std::uint32_t CubeModel() const { return cube_; }
 
-    // The models Props places and moves. Loaded here, drawn there.
-    const PropModels& PropModelIds() const { return prop_models_; }
+    // The carryables the level placed, resolved against the catalog and ready to seed.
+    // Props reads these to set out the starting objects (tongs, meats).
+    const std::vector<CarryableSpawn>& Carryables() const { return carryables_; }
 
 private:
     std::uint32_t AddModel(Model model);
@@ -110,7 +132,8 @@ private:
     // where the body spawns, and `mass` sets how heavy it is to shove.
     void AddDynamicInstance(std::uint32_t model, DirectX::FXMMATRIX transform,
                             DirectX::XMFLOAT3 tint, float mass, float knock_rating,
-                            ImpactSound impact_sound);
+                            ImpactSound impact_sound, std::optional<HeatSource> heat,
+                            DirectX::XMFLOAT3 heat_offset);
 
     std::vector<Model> models_;
     std::vector<MeshInstance> instances_;
@@ -118,5 +141,6 @@ private:
     std::vector<DynamicBody> dynamic_bodies_;
 
     std::uint32_t cube_ = 0;
-    PropModels prop_models_{};
+    // The carryables the level placed, resolved against the catalog for Props to seed.
+    std::vector<CarryableSpawn> carryables_;
 };

@@ -3,7 +3,7 @@
 # A TOML file (parsed with toml++). A level has a name, a spawn (feet on the ground,
 # y the standing height), a facing (degrees; 0 looks north, +Z) and a sun (the
 # direction toward it). An optional [environment] table then sets the sky and
-# lighting, and two arrays of objects follow, boxes placed before props:
+# lighting, and three arrays of objects follow -- boxes, then props, then carryables:
 #   time_of_day -- an optional shortcut: a clock hour in 0..24 that generates a whole
 #           sky at once -- the sun's position on its arc (east at dawn, overhead at
 #           noon, west at dusk, a dim moon at night) and a matching [environment]
@@ -25,12 +25,14 @@
 #             exposure, bloom_intensity, bloom_threshold, bloom_knee -- the resolve:
 #               the exposure the scene is tonemapped at, and the glow's strength and
 #               its soft-knee bright-pass.
-#   box  -- a coloured cube: center + size in metres, with optional yaw and checker
-#           (metres per checker tile; omit for a flat surface).
-#   prop -- a .glb from assets/models: pos, with optional yaw, uniform scale and
-#           tint (defaults white); `dynamic = true` with mass and knock makes it a
-#           knock-over-able body, and an optional sound ("meat", "metal",
-#           "grill_base" or "grill_lid") is the clip it plays on a hard landing.
+#   box       -- a coloured cube: center + size in metres, with optional yaw and checker
+#                (metres per checker tile; omit for a flat surface).
+#   prop      -- a catalog prop (furniture/scenery) by `type`: pos, with optional yaw and
+#                uniform scale. What the type is -- model, physics, heat -- lives in
+#                assets/catalog.toml, so the grill is defined once and placed anywhere.
+#   carryable -- a catalog food or tool by `type`: pos, with optional yaw. The starting
+#                objects the player can pick up and grill; the type (in catalog.toml)
+#                supplies the model, how it cooks and how it is held.
 
 name = "Backyard"
 spawn = [0.0, 0.0, -7.0]
@@ -50,20 +52,30 @@ box = [
 ]
 
 prop = [
-  # The charcoal grill is two separate dynamic bodies -- a base and a lid resting on
-  # it -- so the lid can be knocked off on its own. Both topple; the cooler is heavier
-  # and low, so it mostly slides. The lid's y rests it on the base's bowl rim; nudge it
-  # if it floats or sinks in-game.
-  {model = "charcoal-grill-base.glb", pos = [0.0, 0.0, 5.0],   dynamic = true, mass = 10.0, knock = 8.0, sound = "grill_base"},
-  {model = "charcoal-grill-lid.glb",  pos = [0.0, 0.72, 5.0],  dynamic = true, mass = 3.0,  knock = 4.0, sound = "grill_lid"},
-  {model = "bench-basic.glb",  pos = [-4.5, 0.0, 1.5]},
-  {model = "cooler-basic.glb", pos = [3.6, 0.0, 6.5],   dynamic = true, mass = 14.0, knock = 7.0},
+  # The charcoal grill is two catalog types -- a base and a lid resting on it -- so the
+  # lid can be knocked off on its own. Both topple; the cooler is heavier and low, so it
+  # mostly slides. The lid's y rests it on the base's bowl rim; nudge it if it floats or
+  # sinks in-game. The grill's heat lives on the "charcoal_grill" type in catalog.toml.
+  {type = "charcoal_grill",     pos = [0.0, 0.0, 5.0]},
+  {type = "charcoal_grill_lid", pos = [0.0, 0.72, 5.0]},
+  {type = "bench",  pos = [-4.5, 0.0, 1.5]},
+  {type = "cooler", pos = [3.6, 0.0, 6.5]},
 
   # Two crates, the upper one knocked askew and standing on the lower.
-  {model = "crate.glb", pos = [5.8, 0.0, -2.0]},
-  {model = "crate.glb", pos = [5.8, 0.8, -2.0], yaw = 22.0, scale = 0.875},
+  {type = "crate", pos = [5.8, 0.0, -2.0]},
+  {type = "crate", pos = [5.8, 0.8, -2.0], yaw = 22.0, scale = 0.875},
 
   # Two of the same tree, told apart by a scale and a turn.
-  {model = "tree.glb", pos = [-8.0, 0.0, 7.5], yaw = 25.0},
-  {model = "tree.glb", pos = [8.5, 0.0, -6.0], yaw = -15.0, scale = 0.87},
+  {type = "tree", pos = [-8.0, 0.0, 7.5], yaw = 25.0},
+  {type = "tree", pos = [8.5, 0.0, -6.0], yaw = -15.0, scale = 0.87},
+]
+
+carryable = [
+  # The tongs lie flat on the patio beside the grill; the meat waits by the picnic
+  # table. All sit in view from the spawn. Placed a hair above the ground so physics
+  # settles them flat.
+  {type = "tongs", pos = [1.15, 0.05, 4.45], yaw = 25.0},
+  {type = "steak", pos = [-4.55, 0.80, 1.70], yaw = 18.0},
+  {type = "patty", pos = [-4.25, 0.80, 1.35]},
+  {type = "patty", pos = [-4.80, 0.80, 1.45], yaw = -24.0},
 ]
