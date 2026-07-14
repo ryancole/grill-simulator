@@ -415,10 +415,17 @@ int Run(HINSTANCE instance, int show_command) {
         // matching order's gauge -- matched on the raw type below, before the name is
         // uppercased for display.
         const std::optional<Props::MeatReadout> active_meat = props.ActiveMeat();
+        // A serve refused this frame shakes its order's card: resolve the rejected type to
+        // the first card of that type. -1 when no serve bounced.
+        const std::optional<std::string> rejected_type = props.RejectedServeType();
+        int rejected_order = -1;
         std::vector<Renderer::OrderCard> order_cards;
         order_cards.reserve(goals.size());
         for (std::size_t i = 0; i < goals.size(); ++i) {
             const FoodGoal& goal = goals[i];
+            if (rejected_order < 0 && rejected_type && *rejected_type == goal.type) {
+                rejected_order = static_cast<int>(i);
+            }
             const int marker =
                 (active_meat && active_meat->type == goal.type) ? active_meat->band : -1;
             std::string name = goal.type;
@@ -439,7 +446,7 @@ int Run(HINSTANCE instance, int show_command) {
                              props.HighlightInstances(),
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
                              view_projection, game.camera.Position(), props.PromptText(),
-                             debug_lines, order_cards);
+                             debug_lines, order_cards, rejected_order);
     }
 
     game.renderer.Shutdown();

@@ -81,6 +81,14 @@ public:
     };
     std::optional<MeatReadout> ActiveMeat() const;
 
+    // The order type of a serve that was attempted and refused this frame -- a meat
+    // carried onto a tray whose cook filled no open order -- or empty when the last
+    // Update saw no such rejection. Latched for exactly the frame the bad serve press
+    // lands and cleared at the next Update, so the HUD can shake the rejecting card
+    // once. An accepted serve is not reported here; it announces itself by advancing an
+    // order's filled count.
+    std::optional<std::string> RejectedServeType() const;
+
     // One line per meat in the yard for the debug overlay: "steak: medium rare
     // (139F)" -- its name, current doneness band, and internal temperature. A meat
     // is any item carrying cooking state; the tongs and other non-food carryables
@@ -212,6 +220,10 @@ private:
     // an about-to-be-rejected serve rather than silently doing nothing.
     bool serve_ok_ = false;
     std::string serve_need_;
+    // Latched for the one frame a serve press is refused: the rejected meat's order type,
+    // or empty. Set in Update when Serve() bounces a delivery, cleared at the top of the
+    // next Update. Read by RejectedServeType so the HUD can shake that order's card once.
+    std::string serve_rejected_type_;
 
     // Rebuilt each Update: every resting item, the carried one, and the one the
     // outline glows around.
