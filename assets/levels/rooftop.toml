@@ -1,6 +1,6 @@
 # The rooftop: a concrete deck ringed by a parapet, no grass or trees, with the same
 # props rearranged and the sun swung low from the west. A TOML file; see
-# backyard.level for the format.
+# backyard.toml for the format.
 
 name = "Rooftop"
 spawn = [-7.5, 0.0, 0.0]
@@ -10,7 +10,7 @@ sun = [-0.55, 0.45, 0.15]
 # The low western sun makes this a golden hour, against the backyard's midday blue:
 # warm light off a peach horizon under a deepening zenith, with stronger amber
 # shafts. The spawn looks east, away from the sun, so the deck is backlit -- the
-# ambient is kept up and warm so it still reads. See backyard.level for what each
+# ambient is kept up and warm so it still reads. See backyard.toml for what each
 # [environment] field does.
 [environment]
 sky_zenith = [0.30, 0.34, 0.48]

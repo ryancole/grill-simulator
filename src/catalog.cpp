@@ -81,7 +81,8 @@ HoldStyle HoldOr(const toml::node_view<const toml::node>& view, HoldStyle fallba
     }
     if (*name == "flat") return HoldStyle::Flat;
     if (*name == "tongs") return HoldStyle::Tongs;
-    Fail(path, "unknown hold '" + *name + "' (want flat or tongs)");
+    if (*name == "tray") return HoldStyle::Tray;
+    Fail(path, "unknown hold '" + *name + "' (want flat, tongs or tray)");
 }
 
 // The model name a type must name, or a catalog error.
@@ -196,6 +197,15 @@ void ReadCarryables(const toml::table& root, const char* section, bool is_food,
         if (is_food) {
             def.cook = ReadCook(*entry, name, path);
         }
+        // A serving tray declares `serve` (its ground-plane delivery radius) and
+        // optional `serve_offset` (its top surface in model space); other carryables
+        // omit it. Mirrors how a prop's heat reads, one level up.
+        if (const toml::node_view<const toml::node> serve = (*entry)["serve"]) {
+            ServeDef s;
+            s.radius = static_cast<float>(AsDouble(*serve.node(), path, "serve"));
+            s.offset = Vec3Or((*entry)["serve_offset"], s.offset, path, "serve_offset");
+            def.serve = s;
+        }
         def.knock_rating = NumberOr((*entry)["knock"], def.knock_rating, path, "knock");
         def.impact_sound = SoundOr((*entry)["sound"], def.impact_sound, path);
         def.hold = HoldOr((*entry)["hold"], def.hold, path);
@@ -247,14 +257,6 @@ Catalog Load(const std::filesystem::path& path) {
                 h.reach = NumberOr((*entry)["heat_reach"], h.reach, path, "heat_reach");
                 h.offset = Vec3Or((*entry)["heat_offset"], h.offset, path, "heat_offset");
                 def.heat = h;
-            }
-            // `serve` is the ground-plane radius; `serve_offset` lifts the zone's
-            // centre onto the surface, mirroring how `heat`/`heat_offset` read.
-            if (const toml::node_view<const toml::node> serve = (*entry)["serve"]) {
-                ServeDef s;
-                s.radius = static_cast<float>(AsDouble(*serve.node(), path, "serve"));
-                s.offset = Vec3Or((*entry)["serve_offset"], s.offset, path, "serve_offset");
-                def.serve = s;
             }
             out.props.emplace(name, std::move(def));
         }

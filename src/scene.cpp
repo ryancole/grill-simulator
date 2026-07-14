@@ -50,13 +50,6 @@ Scene::Scene(const LevelDef& level) {
         const PropDef& def = it->second;
         const std::uint32_t model = load(def.model);
         const XMMATRIX transform = XMLoadFloat4x4(&placement.transform);
-        // A serving prop contributes a delivery zone at its surface -- the model-space
-        // offset carried through the placement transform, so it lands wherever the level
-        // set the prop. Independent of dynamic/static: a serving surface stays put.
-        if (def.serve) {
-            const XMVECTOR center = XMVector3Transform(XMLoadFloat3(&def.serve->offset), transform);
-            serve_zones_.emplace_back(center, def.serve->radius);
-        }
         if (def.dynamic) {
             std::optional<HeatSource> heat;
             XMFLOAT3 offset{0.0f, 0.0f, 0.0f};
@@ -94,6 +87,7 @@ Scene::Scene(const LevelDef& level) {
         spawn.knock_rating = def.knock_rating;
         spawn.impact_sound = def.impact_sound;
         spawn.cook = def.cook;
+        spawn.serve = def.serve;
         carryables_.push_back(std::move(spawn));
     }
 }

@@ -26,8 +26,15 @@
 #       sound              -- clip on a hard landing ("meat", "metal", ...).
 #       hold               -- how it sits in hand ("flat" default, or "tongs").
 #
-#   [tool.<name>]  -- a carryable that does not cook (the tongs). Same fields as a food
-#       minus the cook profile.
+#   [tool.<name>]  -- a carryable that does not cook (the tongs, the serving tray). Same
+#       fields as a food minus the cook profile, plus:
+#       hold               -- how it sits in hand: "flat" (default), "tongs", or "tray".
+#       serve              -- delivery radius in metres (ground plane): makes the tool a
+#                             serving tray. A carried meat brought within it can be served,
+#                             filling a level's matching order, and sticks to the tray;
+#                             the tray itself is picked up and carried like any carryable.
+#                             With optional `serve_offset` ([x,y,z] to its top surface in
+#                             model space). Omit and the tool takes no food.
 #
 #   [prop.<name>]  -- placed furniture or scenery. Fields:
 #       model              -- the .glb (required).
@@ -39,11 +46,6 @@
 #                             that cooks the food set on it. With optional `heat_reach`
 #                             (metres it carries) and `heat_offset` ([x,y,z] up to the
 #                             grate). Omit and the prop is cold.
-#       serve              -- delivery radius in metres (ground plane): makes the prop a
-#                             serving counter. A carried meat brought within it can be
-#                             served, filling a level's matching order. With optional
-#                             `serve_offset` ([x,y,z] up onto the surface). Omit and the
-#                             prop takes no food.
 #
 # The two starting meats carry the original cook constants explicitly, so today they
 # still cook identically -- but each can now be tuned on its own (a chicken to a higher
@@ -101,6 +103,18 @@ knock = 2.0
 sound = "metal"
 hold = "tongs"
 
+# The serving tray: a carryable delivery surface. `serve` is the ground-plane radius a
+# meat must be brought within; `serve_offset` is its top face in model space, where
+# delivered meat sticks. It is picked up and carried like anything else -- served meat
+# rides it, raw meat merely resting on it falls off when it moves.
+[tool.tray]
+model = "tray.glb"
+serve = 0.8
+serve_offset = [0.0, 0.023, 0.050]
+hold = "tray"
+knock = 3.0
+sound = "metal"
+
 # --- Props: furniture and scenery --------------------------------------------------
 
 # The charcoal grill is two separate dynamic bodies -- a base and a lid -- so the lid
@@ -132,17 +146,6 @@ knock = 7.0
 
 [prop.bench]
 model = "bench-basic.glb"
-
-# The serving counter: where cooked food is delivered to satisfy a level's orders. The
-# tray mesh is small (~0.28 m) and flat, so a level scales it up to a visible platter
-# and lifts it to rest on the ground (see backyard.level). `serve` is the ground-plane
-# radius the player must stand within; `serve_offset` is in the model's own space -- it
-# sits at the tray's top surface (0.010 m up) and scales with the prop, so a delivered
-# meat rests on the tray whatever size the level makes it.
-[prop.serving_table]
-model = "tray.glb"
-serve = 0.8
-serve_offset = [0.0, 0.010, 0.0]
 
 [prop.crate]
 model = "crate.glb"

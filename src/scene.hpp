@@ -5,7 +5,6 @@
 #include "heat_source.hpp"
 #include "model.hpp"
 #include "rigid_body.hpp"
-#include "serve_zone.hpp"
 
 #include <DirectXMath.h>
 
@@ -57,6 +56,9 @@ struct CarryableSpawn {
     float knock_rating = 4.0f;
     ImpactSound impact_sound = ImpactSound::Meat;
     std::optional<CookProfile> cook;
+    // Set only on a serving tray: the delivery surface it provides. Props builds a
+    // live serve zone from it that rides the tray wherever it is set down or carried.
+    std::optional<ServeDef> serve;
 };
 
 // A world object the player can knock over -- the grill, the cooler -- given its
@@ -120,13 +122,8 @@ public:
     std::uint32_t CubeModel() const { return cube_; }
 
     // The carryables the level placed, resolved against the catalog and ready to seed.
-    // Props reads these to set out the starting objects (tongs, meats).
+    // Props reads these to set out the starting objects (tongs, meats, the serving tray).
     const std::vector<CarryableSpawn>& Carryables() const { return carryables_; }
-
-    // The delivery zones the level placed -- one per serving prop, at wherever it
-    // stands. Props tests a carried meat against these to serve it, and never moves
-    // them, so they are handed back by const reference like the rest of the scene.
-    const std::vector<ServeZone>& ServeZones() const { return serve_zones_; }
 
 private:
     std::uint32_t AddModel(Model model);
@@ -158,6 +155,4 @@ private:
     std::uint32_t cube_ = 0;
     // The carryables the level placed, resolved against the catalog for Props to seed.
     std::vector<CarryableSpawn> carryables_;
-    // The delivery zones the level placed, one per serving prop (see ServeZones).
-    std::vector<ServeZone> serve_zones_;
 };

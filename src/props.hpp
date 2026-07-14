@@ -43,14 +43,13 @@ public:
     // it. The Interact action, edge-triggered, is what grabs and drops. `dt` is the
     // frame time in seconds, which the cookable meats advance their cook on.
     // `heat_sources` are the yard's hot objects this frame (the grill's grate): each
-    // meat cooks against the hottest air any of them imposes at where it sits, or
-    // room air when none reaches it. `serve_zones` are the level's delivery counters:
-    // pressing Interact while carrying a meat held over one delivers it -- `objectives`
-    // decides whether that cook fills an open order, and an accepted meat is set down on
-    // the counter as a static display while a rejected one stays in hand.
+    // meat cooks against the hottest air any of them imposes at where it sits, or room
+    // air when none reaches it. Delivery is against the serving tray, which is itself a
+    // carryable Props owns: pressing Interact while holding a meat over the tray's live
+    // serve zone delivers it -- `objectives` decides whether that cook fills an open
+    // order, an accepted meat sticks to the tray, and a rejected one stays in hand.
     void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt,
-                std::span<const HeatSource> heat_sources, std::span<const ServeZone> serve_zones,
-                Objectives& objectives);
+                std::span<const HeatSource> heat_sources, Objectives& objectives);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -123,11 +122,21 @@ private:
         // they are not food, so there is nothing to cook.
         std::optional<CookInformation> cook;
 
-        // Set once a meat has been delivered to a serving zone. A served item is done
-        // with play: it rests at the counter as a static display -- still drawn, but no
-        // longer cooked, picked up, or highlighted -- so its cook is frozen at the band
-        // it was served in and its body stays out of the simulation.
+        // Set only on the serving tray: the delivery surface it carries. Props reads it
+        // to place a live serve zone at the tray's current pose and to rest delivered
+        // meat on it. Empty on foods and the tongs.
+        std::optional<ServeDef> serve;
+
+        // Set once a meat has been delivered onto a tray. A served meat is done with
+        // play: its cook is frozen at the band it was served in and its body stays out
+        // of the simulation. It is not a static display -- it is stuck to the tray it
+        // was served on (`stuck_to`, `stuck_local`) and rides that tray wherever it goes.
         bool served = false;
+        // The item index of the tray a served meat is stuck to, or -1. `stuck_local` is
+        // its pose in that tray's own frame, so its world pose is stuck_local * tray pose
+        // each frame -- delivered meat travels with the tray, resting or carried.
+        int stuck_to = -1;
+        DirectX::XMFLOAT4X4 stuck_local;
     };
 
     // `stages` are the item's cook-stage models (at least one); `base_model` is the
@@ -137,7 +146,8 @@ private:
     // simply never cook.
     void Add(std::vector<CookStage> stages, const Model& base_model, std::string name,
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
-             float knock_rating, ImpactSound impact_sound, std::optional<CookProfile> cook);
+             float knock_rating, ImpactSound impact_sound, std::optional<CookProfile> cook,
+             std::optional<ServeDef> serve);
     // Fills an item's box shape (half_extents, com_offset) from the union of its
     // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);
@@ -164,21 +174,25 @@ private:
     // exact pose it was held, takes a gentle toss along the gaze, and falls from
     // there.
     void Drop(DirectX::FXMMATRIX camera_to_world);
-    // Attempts to deliver the carried meat `index` to `zone`, asking `objectives`
-    // whether its current doneness fills an open order. On acceptance the item is
-    // marked served, set down as a static display on the counter, and released from the
-    // hand; on rejection nothing changes and it stays carried. Returns whether it was
-    // served, so the caller can fall back to a plain drop when it was not.
-    bool Serve(int index, const ServeZone& zone, Objectives& objectives);
+    // Attempts to deliver the carried meat `meat` onto tray item `tray`, asking
+    // `objectives` whether its current doneness fills an open order. On acceptance the
+    // meat is marked served, stuck to the tray (its pose stored in the tray's frame) and
+    // released from the hand; on rejection nothing changes and it stays carried. Returns
+    // whether it was served.
+    bool Serve(int meat, int tray, Objectives& objectives);
+    // The world-space model-to-world transform an item is drawn and posed under right
+    // now: the held pose while carried, otherwise its resting pose. Used to place a
+    // tray's serve zone and to hang served meat off it, resting or in hand.
+    DirectX::XMMATRIX CurrentPose(int index, DirectX::FXMMATRIX camera_to_world) const;
 
     Physics* physics_;
     std::vector<Item> items_;
     int carried_ = -1; // index into items_, or -1
     int hovered_ = -1; // item in reach and looked at this frame, or -1
-    // The serve zone the carried meat is held over this frame, or -1. Cached in Update
-    // so the (const) prompt can read it -- it drives the "[E] Serve" hint and is what
-    // the Interact press serves into.
-    int serve_zone_ = -1;
+    // The tray item the carried meat is held over this frame (its serve zone contains
+    // the meat), or -1. Cached in Update so the (const) prompt can read it -- it drives
+    // the "[E] Serve" hint and is what the Interact press serves onto.
+    int serve_tray_ = -1;
     // Whether the carried meat's current cook would be accepted at that zone this frame,
     // and -- when it would not -- the doneness the outstanding order still wants, as
     // ready-made text ("medium well to well done") or empty if no order needs this type.

@@ -65,12 +65,6 @@ prop = [
   {type = "bench",  pos = [-4.5, 0.0, 1.5]},
   {type = "cooler", pos = [3.6, 0.0, 6.5]},
 
-  # The serving tray, at its natural (real-tray) size, resting on the bench: the player
-  # delivers cooked meat here (see the goals). Its origin sits near its centre, ~0.012 m
-  # below its underside, so it is lifted onto the bench top (0.755) by that much to rest
-  # on the bench rather than sink through it. The raw meats start on the bench around it.
-  {type = "serving_table", pos = [-4.5, 0.767, 1.5]},
-
   # Two crates, the upper one knocked askew and standing on the lower.
   {type = "crate", pos = [5.8, 0.0, -2.0]},
   {type = "crate", pos = [5.8, 0.8, -2.0], yaw = 22.0, scale = 0.875},
@@ -81,15 +75,19 @@ prop = [
 ]
 
 carryable = [
-  # The tongs lie flat on the patio beside the grill; the raw meats start on the bench
-  # top (0.755, spawned a hair above at 0.80 so physics settles them flat), spread around
-  # the serving tray in its centre -- one to each side, clear of the tray's ~0.28 x 0.35 m
-  # footprint so none start perched on it. All sit in view from the spawn.
+  # The tongs lie flat on the patio beside the grill. The serving tray is a carryable
+  # too: it starts on the bench (spawned a hair above the 0.755 bench top so physics
+  # settles it flat) and can be picked up and carried like anything else. The four raw
+  # meats start on top of the tray, in a 2x2 within its ~0.64 x 0.82 m face (whose centre
+  # sits at z 1.55, +0.05 from the tray origin), spawned just above its top (~0.805) so
+  # physics drops them onto it. They are not served, so they merely rest there -- lift the
+  # tray and they slide off. All in view from the spawn.
   {type = "tongs", pos = [1.15, 0.05, 4.45], yaw = 25.0},
-  {type = "steak", pos = [-4.90, 0.80, 1.55], yaw = 18.0},
-  {type = "chicken", pos = [-4.10, 0.80, 1.55], yaw = -8.0},
-  {type = "patty", pos = [-4.50, 0.80, 1.12]},
-  {type = "patty", pos = [-4.50, 0.80, 1.88], yaw = -24.0},
+  {type = "tray",  pos = [-4.50, 0.80, 1.50]},
+  {type = "steak", pos = [-4.35, 0.87, 1.73], yaw = 18.0},
+  {type = "chicken", pos = [-4.65, 0.87, 1.37], yaw = -8.0},
+  {type = "patty", pos = [-4.35, 0.87, 1.37]},
+  {type = "patty", pos = [-4.65, 0.87, 1.73], yaw = -24.0},
 ]
 
 # The order ticket: cook and deliver each of these to the serving_table to win. The

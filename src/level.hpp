@@ -56,7 +56,7 @@ struct FoodGoal {
 
 // Everything that makes one level its own place: a name, where the player starts,
 // which way the sun falls, and the things standing in it. Plain data, parsed from a
-// `.level` text file by LoadFromFile -- this struct is that format's schema, so a
+// level's TOML file by LoadFromFile -- this struct is that format's schema, so a
 // field added here is a field the loader (and the files) grow.
 struct LevelDef {
     std::string name;
@@ -92,8 +92,8 @@ struct LevelDef {
 
 namespace levels {
 
-// Reads a level from a `.level` TOML file (see assets/levels/backyard.level, which
-// documents the format). The top level carries name/spawn/facing/sun; an optional
+// Reads a level from a TOML file (see assets/levels/backyard.toml, which documents the
+// format). The top level carries name/spawn/facing/sun; an optional
 // `time_of_day` (clock hours) generates a whole sky, which an optional `[environment]`
 // table (and the explicit `sun`) then override field by field -- every field falling
 // back to the default look. A `box` array holds inline cube geometry (centre/size/yaw/

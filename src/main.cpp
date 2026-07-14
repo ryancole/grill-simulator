@@ -196,10 +196,10 @@ int Run(HINSTANCE instance, int show_command) {
     // The device and pipelines first -- the session's, independent of any level.
     game.renderer.Initialize(hwnd, kDefaultWidth, kDefaultHeight);
 
-    // The levels the player switches between, as the .level files staged under
+    // The levels the player switches between, as the .toml files staged under
     // assets/levels, in the order the number keys select them. Loading is by file so
     // a level is a text edit, not a rebuild.
-    const std::array<const char*, 2> level_files = {"backyard.level", "rooftop.level"};
+    const std::array<const char*, 2> level_files = {"backyard.toml", "rooftop.toml"};
     // The names the menu shows for each level, parallel to level_files.
     const std::array<const char*, 2> level_names = {"Backyard", "Rooftop"};
     const std::filesystem::path levels_dir = ExecutableDirectory() / "assets" / "levels";
@@ -371,8 +371,7 @@ int Run(HINSTANCE instance, int show_command) {
         // update, so the meats cook against this frame's grate position.
         game.world->furniture().Update();
         game.world->props().Update(camera_to_world, game.actions, dt,
-                                   game.world->furniture().HeatSources(),
-                                   game.world->scene().ServeZones(), game.world->objectives());
+                                   game.world->furniture().HeatSources(), game.world->objectives());
 
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
