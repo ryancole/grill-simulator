@@ -57,13 +57,14 @@ public:
     // outline; empty rings nothing. `viewmodel` and `held_props` are drawn last,
     // over a cleared depth buffer, so the player's arms and whatever they carry
     // are never sliced open by the wall they are standing against. `hud_prompt`
-    // is the one line of HUD text laid over the finished frame; empty draws
-    // nothing.
+    // is the one centred line of HUD text laid over the finished frame; empty draws
+    // nothing. `debug_lines` are the read-only debug overlay -- one line each,
+    // anchored down the top-left corner; empty draws no overlay.
     void Render(const Scene& scene, std::span<const MeshInstance> props,
                 std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                 std::span<const MeshInstance> held_props,
                 const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
-                std::string_view hud_prompt);
+                std::string_view hud_prompt, std::span<const std::string> debug_lines);
     // Draws the launch/pause menu as its own complete frame: a solid backdrop, a
     // `title`, and the vertical list of `entries` with the one at `selected` picked
     // out. Owns the swapchain buffer from clear to present, so the game loop calls
@@ -195,11 +196,34 @@ private:
     // Loads the font's glyph metrics and uploads its atlas into the shared
     // texture heap. Shares the scene upload's open command list and staging list.
     void LoadFontAtlas(std::vector<ComPtr<ID3D12Resource>>& staging);
-    // Lays `text` out into a centred line near the bottom of the screen and draws
-    // it -- a dark shadow pass, then the text -- into the current frame. A no-op
-    // for empty text. Assumes the render target is already bound. This is the HUD
-    // prompt; the menu draws its own lines through the shared helpers below.
-    void DrawText(std::string_view text);
+    // Loads one baked face -- its glyph CSV into `font` and its .png atlas into
+    // `texture` at heap slot `descriptor`, recording the atlas pixel size in
+    // `width`/`height`. Shares the open command list and `staging` list. Both HUD
+    // faces (Inter, monospace) come up through this from LoadFontAtlas.
+    void LoadFontFace(const std::filesystem::path& csv, const std::filesystem::path& png,
+                      UINT descriptor, Font& font, ComPtr<ID3D12Resource>& texture, UINT& width,
+                      UINT& height, std::vector<ComPtr<ID3D12Resource>>& staging);
+
+    // One baked MSDF face for the text pass: its glyph metrics and the atlas it
+    // samples (the SRV slot plus the texture's pixel size, needed for UVs and the
+    // antialiasing range). LayoutLine and DrawTextRun take one, so the same code
+    // draws either the Inter HUD face or the monospace debug face.
+    struct FontFace {
+        const Font* font;
+        UINT atlas_descriptor;
+        UINT atlas_width;
+        UINT atlas_height;
+    };
+    FontFace HudFace() const { return {&font_, atlas_descriptor_, atlas_width_, atlas_height_}; }
+    FontFace MonoFace() const {
+        return {&mono_font_, mono_atlas_descriptor_, mono_atlas_width_, mono_atlas_height_};
+    }
+    // Draws the in-game HUD over the resolved frame: the centred `prompt` near the
+    // bottom, and the `debug_lines` overlay anchored down the top-left corner. Both
+    // are packed into this frame's text region back-to-back before either is drawn,
+    // so they never alias in the shared buffer the way two DrawText calls would (see
+    // DrawMenu). A no-op when both are empty. Assumes the render target is bound.
+    void DrawHud(std::string_view prompt, std::span<const std::string> debug_lines);
     // Draws the menu overlay -- the title and the highlighted list of entries --
     // into the current frame, over whatever backdrop the caller has cleared. All
     // lines are packed into this frame's text vertex region back-to-back and only
@@ -207,20 +231,33 @@ private:
     // repeated DrawText calls would.
     void DrawMenu(std::string_view title, std::span<const std::string> entries, int selected);
 
-    // Writes the glyph quads for one horizontally-centred line into this frame's
-    // text vertex region, beginning at vertex index `first`, and returns the new
-    // running vertex count. `baseline` and `pixel` (the glyph height) are in pixels,
-    // origin top-left. It only fills the buffer -- the caller picks the colour and
-    // issues the draw -- so several lines can share one fill before any is drawn.
-    // Stops early if the region fills; empty text writes nothing.
-    UINT LayoutLine(std::string_view text, float baseline, float pixel, UINT first);
-    // Binds the text pipeline, its root signature, the atlas table and this frame's
-    // text vertex buffer, ready for one or more DrawTextRun calls.
+    // Writes the glyph quads for one line into this frame's text vertex region,
+    // beginning at vertex index `first`, and returns the new running vertex count.
+    // `baseline` and `pixel` (the glyph height) are in pixels, origin top-left. It
+    // only fills the buffer -- the caller picks the colour and issues the draw -- so
+    // several lines can share one fill before any is drawn. Stops early if the region
+    // fills; empty text writes nothing. `left_px` >= 0 left-anchors the line at that
+    // x (the debug overlay); a negative value, the default, centres it horizontally
+    // (the prompt and menu). `face` picks which baked font to lay the glyphs from.
+    UINT LayoutLine(const FontFace& face, std::string_view text, float baseline, float pixel,
+                    UINT first, float left_px = -1.0f);
+    // Writes one solid rectangle (two triangles) into this frame's text vertex
+    // region at vertex `first`, its corners the pixel box [x0,y0]-[x1,y1] (origin
+    // top-left), and returns the new running vertex count. Drawn with the text
+    // pipeline's solid mode, it backs the debug overlay with a translucent panel.
+    // Stops without writing if the region is full.
+    UINT LayoutSolidQuad(float x0, float y0, float x1, float y1, UINT first);
+    // Binds the text pipeline, its root signature, a default atlas table and this
+    // frame's text vertex buffer, ready for one or more DrawTextRun calls (each of
+    // which rebinds the atlas to its own face).
     void BindTextPipeline();
     // Issues the shadow-then-fill draw pair for the run of `count` vertices starting
-    // at `first`, tinting the fill `color` (the shadow is a translucent black scaled
-    // by the fill's alpha). Assumes BindTextPipeline has run.
-    void DrawTextRun(UINT first, UINT count, DirectX::XMFLOAT4 color);
+    // at `first`, drawn from `face`'s atlas and tinted `color` (the shadow is a
+    // translucent black scaled by the fill's alpha). Assumes BindTextPipeline has run.
+    void DrawTextRun(const FontFace& face, UINT first, UINT count, DirectX::XMFLOAT4 color);
+    // Draws a run of solid-mode vertices (from LayoutSolidQuad) filled flat with
+    // `color` -- the debug panel. No shadow pass; assumes BindTextPipeline has run.
+    void DrawSolidRun(UINT first, UINT count, DirectX::XMFLOAT4 color);
 
     // Fills a default-heap buffer through a staging copy. The staging resource is
     // appended to `staging`, which the caller must keep alive until the GPU has
@@ -393,6 +430,14 @@ private:
     UINT atlas_width_ = 0;
     UINT atlas_height_ = 0;
     Font font_;
+    // A second baked face, monospace, drawn only by the debug overlay so its columns
+    // line up; the prompt and menu stay on font_ (Inter). Its atlas rides the same
+    // texture_heap_ at mono_atlas_descriptor_, right after font_'s.
+    ComPtr<ID3D12Resource> mono_atlas_texture_;
+    UINT mono_atlas_descriptor_ = 0;
+    UINT mono_atlas_width_ = 0;
+    UINT mono_atlas_height_ = 0;
+    Font mono_font_;
     ComPtr<ID3D12Resource> text_vertex_buffer_;
     std::byte* text_vertex_mapped_ = nullptr;
 

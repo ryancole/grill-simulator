@@ -312,13 +312,18 @@ struct TextConstants {
     XMFLOAT4 color;
     XMFLOAT2 unit_range;
     XMFLOAT2 ndc_offset;
+    // >0.5 fills the quad flat with `color` instead of sampling the atlas -- the
+    // panel behind the debug overlay. Zero-initialised, so the glyph draws leave it 0.
+    float solid = 0.0f;
 };
 
 static_assert(sizeof(TextConstants) % sizeof(UINT) == 0);
 constexpr UINT kTextConstantDwords = sizeof(TextConstants) / sizeof(UINT);
 
 // The most glyphs one HUD line can draw. A prompt is a few words; this is roomy.
-constexpr UINT kMaxTextGlyphs = 256;
+// Enough for the prompt plus the debug overlay's lines packed into one frame region;
+// LayoutLine stops filling once this is reached, so an overrun just clips the tail.
+constexpr UINT kMaxTextGlyphs = 512;
 constexpr UINT kTextVerticesPerGlyph = 6; // Two triangles.
 constexpr UINT kTextRegionVertices = kMaxTextGlyphs * kTextVerticesPerGlyph;
 constexpr UINT kTextRegionBytes = kTextRegionVertices * sizeof(TextVertex);
@@ -328,6 +333,10 @@ constexpr UINT kTextRegionBytes = kTextRegionVertices * sizeof(TextVertex);
 constexpr float kTextHeightFraction = 0.040f;
 // The shadow's offset from the text, in pixels, down and to the right.
 constexpr float kTextShadowPixels = 1.25f;
+// The debug overlay reads as tooling, so its lines are smaller than the prompt.
+constexpr float kDebugTextHeightFraction = 0.019f;
+// Line pitch of the debug overlay, in its own glyph heights.
+constexpr float kDebugTextLineFactor = 1.35f;
 
 // The launch menu. A dark neutral backdrop so the warm text reads over it; the
 // title sits in the upper third with the entries stacked below the middle. All
@@ -466,6 +475,7 @@ void Renderer::ReleaseScene() {
     textures_.clear();
     texture_heap_.Reset();
     atlas_texture_.Reset();
+    mono_atlas_texture_.Reset();
     probe_cube_.Reset();
     probe_rtv_heap_.Reset();
     probe_depth_.Reset();
@@ -1677,9 +1687,10 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     }
 
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
-    // The white texture and the flat normal, then every model image, then the HUD
-    // font atlas, the sun's shadow map, and the reflection probe cubemap last.
-    heap_desc.NumDescriptors = 2 + image_count + 1 + 1 + 1;
+    // The white texture and the flat normal, then every model image, then the two
+    // HUD font atlases (Inter + monospace), the sun's shadow map, and the reflection
+    // probe cubemap last.
+    heap_desc.NumDescriptors = 2 + image_count + 2 + 1 + 1;
     heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(device_->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&texture_heap_)),
@@ -1801,16 +1812,17 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
         }
     }
 
-    // The HUD font atlas takes the descriptor after the last model image, and
-    // rides the same command list and staging buffers to the GPU.
+    // The HUD font atlases take the descriptors after the last model image, and
+    // ride the same command list and staging buffers to the GPU. LoadFontAtlas
+    // claims two slots: the Inter face here and the monospace face right after it.
     atlas_descriptor_ = next_descriptor;
     LoadFontAtlas(staging);
 
-    // The shadow map's resource view takes the descriptor after the atlas. The
+    // The shadow map's resource view takes the descriptor after the atlases. The
     // texture itself was already created in CreateShadowMap; only its SRV lands
     // here, in the shader-visible heap the scene pass binds. Writing a descriptor
     // is immediate, so it needs no command list of its own.
-    shadow_descriptor_ = atlas_descriptor_ + 1;
+    shadow_descriptor_ = mono_atlas_descriptor_ + 1;
     D3D12_SHADER_RESOURCE_VIEW_DESC shadow_srv{};
     shadow_srv.Format = kShadowSrvFormat;
     shadow_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -1993,21 +2005,33 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
     FlushGpu();
 }
 
-void Renderer::LoadFontAtlas(std::vector<ComPtr<ID3D12Resource>>& staging) {
-    const std::filesystem::path dir = ExecutableDirectory() / "assets" / "fonts";
-    font_ = LoadFontCsv(dir / "hud.csv");
+void Renderer::LoadFontFace(const std::filesystem::path& csv, const std::filesystem::path& png,
+                            UINT descriptor, Font& font, ComPtr<ID3D12Resource>& texture,
+                            UINT& width, UINT& height,
+                            std::vector<ComPtr<ID3D12Resource>>& staging) {
+    font = LoadFontCsv(csv);
 
-    const std::vector<std::byte> png = ReadBinaryFile(dir / "hud.png");
-    Image atlas = DecodeImage(png);
-    atlas_width_ = atlas.width;
-    atlas_height_ = atlas.height;
+    Image atlas = DecodeImage(ReadBinaryFile(png));
+    width = atlas.width;
+    height = atlas.height;
 
     // Deliberately no mip chain: a lower mip of a distance-field atlas averages
     // neighbouring glyphs' distances together, so the edges bleed and the text
     // turns to mush the moment it is minified. DecodeImage built the chain; drop
     // all but the full-resolution level before the upload.
     atlas.levels.resize(1);
-    atlas_texture_ = UploadTexture(atlas, atlas_descriptor_, kTextureFormat, staging);
+    texture = UploadTexture(atlas, descriptor, kTextureFormat, staging);
+}
+
+void Renderer::LoadFontAtlas(std::vector<ComPtr<ID3D12Resource>>& staging) {
+    const std::filesystem::path dir = ExecutableDirectory() / "assets" / "fonts";
+    // The Inter HUD face at atlas_descriptor_, then the monospace debug face in the
+    // slot straight after it.
+    LoadFontFace(dir / "hud.csv", dir / "hud.png", atlas_descriptor_, font_, atlas_texture_,
+                 atlas_width_, atlas_height_, staging);
+    mono_atlas_descriptor_ = atlas_descriptor_ + 1;
+    LoadFontFace(dir / "mono.csv", dir / "mono.png", mono_atlas_descriptor_, mono_font_,
+                 mono_atlas_texture_, mono_atlas_width_, mono_atlas_height_, staging);
 }
 
 void Renderer::CreateTextPipeline() {
@@ -2116,22 +2140,27 @@ void Renderer::CreateTextPipeline() {
     text_vertex_mapped_ = static_cast<std::byte*>(mapped);
 }
 
-UINT Renderer::LayoutLine(std::string_view text, float baseline, float pixel, UINT first) {
+UINT Renderer::LayoutLine(const FontFace& face, std::string_view text, float baseline, float pixel,
+                          UINT first, float left_px) {
     if (text.empty()) {
         return first;
     }
 
-    // Centre the line: total advance sets the left edge, then the pen walks right.
-    float total_width = 0.0f;
-    for (const char c : text) {
-        if (const Glyph* glyph = font_.Find(static_cast<unsigned char>(c))) {
-            total_width += glyph->advance * pixel;
+    // Left-anchored lines (left_px >= 0) start at that x; otherwise the line is
+    // centred -- its total advance sets the left edge, then the pen walks right.
+    float pen_x = left_px;
+    if (left_px < 0.0f) {
+        float total_width = 0.0f;
+        for (const char c : text) {
+            if (const Glyph* glyph = face.font->Find(static_cast<unsigned char>(c))) {
+                total_width += glyph->advance * pixel;
+            }
         }
+        pen_x = (static_cast<float>(width_) - total_width) * 0.5f;
     }
-    float pen_x = (static_cast<float>(width_) - total_width) * 0.5f;
 
-    const float atlas_w = static_cast<float>(atlas_width_);
-    const float atlas_h = static_cast<float>(atlas_height_);
+    const float atlas_w = static_cast<float>(face.atlas_width);
+    const float atlas_h = static_cast<float>(face.atlas_height);
 
     // Pixel coordinates (origin top-left) into clip space.
     auto to_ndc = [this](float px, float py) {
@@ -2144,7 +2173,7 @@ UINT Renderer::LayoutLine(std::string_view text, float baseline, float pixel, UI
                                                        kTextRegionBytes);
     UINT count = first;
     for (const char c : text) {
-        const Glyph* glyph = font_.Find(static_cast<unsigned char>(c));
+        const Glyph* glyph = face.font->Find(static_cast<unsigned char>(c));
         if (glyph == nullptr) {
             continue;
         }
@@ -2193,14 +2222,18 @@ void Renderer::BindTextPipeline() {
     command_list_->IASetVertexBuffers(0, 1, &vbv);
 }
 
-void Renderer::DrawTextRun(UINT first, UINT count, XMFLOAT4 color) {
+void Renderer::DrawTextRun(const FontFace& face, UINT first, UINT count, XMFLOAT4 color) {
     if (count == 0) {
         return;
     }
 
+    // This run's glyphs come from `face`'s atlas, so bind it and size the distance
+    // field to its dimensions -- the two faces' atlases differ in size.
+    command_list_->SetGraphicsRootDescriptorTable(1, TextureHandle(face.atlas_descriptor));
+
     TextConstants constants{};
-    constants.unit_range = {kDistanceRange / static_cast<float>(atlas_width_),
-                            kDistanceRange / static_cast<float>(atlas_height_)};
+    constants.unit_range = {kDistanceRange / static_cast<float>(face.atlas_width),
+                            kDistanceRange / static_cast<float>(face.atlas_height)};
 
     // A soft drop shadow first, nudged down and right, so the text reads over a
     // bright sky or a dark fence alike; then the text itself over the top. The
@@ -2217,21 +2250,135 @@ void Renderer::DrawTextRun(UINT first, UINT count, XMFLOAT4 color) {
     command_list_->DrawInstanced(count, 1, first, 0);
 }
 
-void Renderer::DrawText(std::string_view text) {
-    if (text.empty() || width_ == 0 || height_ == 0) {
+UINT Renderer::LayoutSolidQuad(float x0, float y0, float x1, float y1, UINT first) {
+    // One rectangle costs the same six vertices a glyph does; bail if it won't fit.
+    if (first + kTextVerticesPerGlyph > kTextRegionVertices) {
+        return first;
+    }
+
+    auto to_ndc = [this](float px, float py) {
+        return XMFLOAT2{px / static_cast<float>(width_) * 2.0f - 1.0f,
+                        1.0f - py / static_cast<float>(height_) * 2.0f};
+    };
+
+    auto* vertices = reinterpret_cast<TextVertex*>(text_vertex_mapped_ +
+                                                   static_cast<size_t>(frame_index_) *
+                                                       kTextRegionBytes);
+    // The uv is unused in solid mode, so any value does.
+    const TextVertex lt{to_ndc(x0, y0), {0.0f, 0.0f}};
+    const TextVertex rt{to_ndc(x1, y0), {0.0f, 0.0f}};
+    const TextVertex rb{to_ndc(x1, y1), {0.0f, 0.0f}};
+    const TextVertex lb{to_ndc(x0, y1), {0.0f, 0.0f}};
+
+    UINT count = first;
+    vertices[count++] = lt;
+    vertices[count++] = rt;
+    vertices[count++] = rb;
+    vertices[count++] = lt;
+    vertices[count++] = rb;
+    vertices[count++] = lb;
+    return count;
+}
+
+void Renderer::DrawSolidRun(UINT first, UINT count, XMFLOAT4 color) {
+    if (count == 0) {
+        return;
+    }
+    TextConstants constants{};
+    constants.color = color;
+    constants.solid = 1.0f;
+    command_list_->SetGraphicsRoot32BitConstants(0, kTextConstantDwords, &constants, 0);
+    command_list_->DrawInstanced(count, 1, first, 0);
+}
+
+void Renderer::DrawHud(std::string_view prompt, std::span<const std::string> debug_lines) {
+    if (width_ == 0 || height_ == 0) {
         return;
     }
 
-    const float pixel = static_cast<float>(height_) * kTextHeightFraction;
-    // The baseline sits a little above the bottom of the screen.
-    const float baseline = static_cast<float>(height_) - pixel * 2.2f;
-    const UINT count = LayoutLine(text, baseline, pixel, 0);
-    if (count == 0) {
+    // Pack the panel, the prompt and every debug line into this frame's text region
+    // first, remembering each one's vertex range, colour and kind, then draw them all
+    // in order -- so the lines never overwrite one another in the shared buffer (as
+    // DrawMenu does), and the panel, packed and drawn before the lines, sits behind them.
+    struct Run {
+        UINT first;
+        UINT count;
+        XMFLOAT4 color;
+        bool solid;     // A flat panel fill rather than glyphs.
+        FontFace face;  // Which atlas the glyphs draw from (ignored when solid).
+    };
+    std::vector<Run> runs;
+    runs.reserve(debug_lines.size() + 2);
+    UINT cursor = 0;
+
+    // The pick-up prompt: one white line centred a little above the bottom.
+    if (!prompt.empty()) {
+        const float pixel = static_cast<float>(height_) * kTextHeightFraction;
+        const float baseline = static_cast<float>(height_) - pixel * 2.2f;
+        const UINT first = cursor;
+        cursor = LayoutLine(HudFace(), prompt, baseline, pixel, cursor);
+        runs.push_back({first, cursor - first, XMFLOAT4{1.0f, 1.0f, 1.0f, 1.0f}, false, HudFace()});
+    }
+
+    // The debug overlay: white monospace lines marching down from the top-left
+    // corner, backed by a translucent black panel so they read over any background.
+    const FontFace mono = MonoFace();
+    const float debug_pixel = static_cast<float>(height_) * kDebugTextHeightFraction;
+    const float left = debug_pixel * 0.6f;      // A small inset from the left edge.
+    const float first_baseline = debug_pixel * 1.6f; // First line's baseline.
+    const float line_pitch = debug_pixel * kDebugTextLineFactor;
+
+    if (!debug_lines.empty()) {
+        // Size the panel to the widest line, padded, and to the run of baselines --
+        // reaching above the tallest cap and below the lowest descender.
+        auto line_width = [&mono](const std::string& line, float pixel) {
+            float w = 0.0f;
+            for (const char c : line) {
+                if (const Glyph* glyph = mono.font->Find(static_cast<unsigned char>(c))) {
+                    w += glyph->advance * pixel;
+                }
+            }
+            return w;
+        };
+        float widest = 0.0f;
+        for (const std::string& line : debug_lines) {
+            widest = std::max(widest, line_width(line, debug_pixel));
+        }
+        const float last_baseline =
+            first_baseline + static_cast<float>(debug_lines.size() - 1) * line_pitch;
+        const float pad_x = debug_pixel * 0.5f;
+        const float pad_y = debug_pixel * 0.35f;
+        const float x0 = left - pad_x;
+        const float x1 = left + widest + pad_x;
+        const float y0 = first_baseline - debug_pixel * 0.85f - pad_y;
+        const float y1 = last_baseline + debug_pixel * 0.30f + pad_y;
+
+        const UINT first = cursor;
+        cursor = LayoutSolidQuad(x0, y0, x1, y1, cursor);
+        runs.push_back({first, cursor - first, XMFLOAT4{0.0f, 0.0f, 0.0f, 0.5f}, true, mono});
+    }
+
+    const XMFLOAT4 debug_color{1.0f, 1.0f, 1.0f, 1.0f};
+    float baseline = first_baseline;
+    for (const std::string& line : debug_lines) {
+        const UINT first = cursor;
+        cursor = LayoutLine(mono, line, baseline, debug_pixel, cursor, left);
+        runs.push_back({first, cursor - first, debug_color, false, mono});
+        baseline += line_pitch;
+    }
+
+    if (cursor == 0) {
         return;
     }
 
     BindTextPipeline();
-    DrawTextRun(0, count, XMFLOAT4{1.0f, 1.0f, 1.0f, 1.0f});
+    for (const Run& run : runs) {
+        if (run.solid) {
+            DrawSolidRun(run.first, run.count, run.color);
+        } else {
+            DrawTextRun(run.face, run.first, run.count, run.color);
+        }
+    }
 }
 
 void Renderer::DrawMenu(std::string_view title, std::span<const std::string> entries,
@@ -2263,9 +2410,11 @@ void Renderer::DrawMenu(std::string_view title, std::span<const std::string> ent
     std::vector<Run> runs;
     runs.reserve(entries.size() + 1);
 
+    // The menu draws from the Inter HUD face, like the prompt.
+    const FontFace face = HudFace();
     UINT cursor = 0;
     const UINT title_first = cursor;
-    cursor = LayoutLine(title, h * kMenuTitleBaselineFraction, title_pixel, cursor);
+    cursor = LayoutLine(face, title, h * kMenuTitleBaselineFraction, title_pixel, cursor);
     runs.push_back({title_first, cursor - title_first, title_color});
 
     for (std::size_t i = 0; i < entries.size(); ++i) {
@@ -2276,7 +2425,7 @@ void Renderer::DrawMenu(std::string_view title, std::span<const std::string> ent
         const float baseline =
             h * kMenuFirstEntryBaselineFraction + static_cast<float>(i) * spacing;
         const UINT entry_first = cursor;
-        cursor = LayoutLine(line, baseline, entry_pixel, cursor);
+        cursor = LayoutLine(face, line, baseline, entry_pixel, cursor);
         runs.push_back(
             {entry_first, cursor - entry_first, is_selected ? selected_color : entry_color});
     }
@@ -2287,7 +2436,7 @@ void Renderer::DrawMenu(std::string_view title, std::span<const std::string> ent
 
     BindTextPipeline();
     for (const Run& run : runs) {
-        DrawTextRun(run.first, run.count, run.color);
+        DrawTextRun(face, run.first, run.count, run.color);
     }
 }
 
@@ -2469,7 +2618,8 @@ void Renderer::DrawOutlines(std::span<const MeshInstance> instances,
 void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                       std::span<const MeshInstance> held_props, const XMMATRIX& view_projection,
-                      XMFLOAT3 camera_position, std::string_view hud_prompt) {
+                      XMFLOAT3 camera_position, std::string_view hud_prompt,
+                      std::span<const std::string> debug_lines) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
@@ -2665,7 +2815,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // per-level texture heap, so bind that back before drawing.
     ID3D12DescriptorHeap* text_heaps[] = {texture_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(text_heaps), text_heaps);
-    DrawText(hud_prompt);
+    DrawHud(hud_prompt, debug_lines);
 
     // The frame is complete; hand the swapchain buffer back for presentation.
     TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),

@@ -325,6 +325,20 @@ std::string Props::PromptText() const {
     return {};
 }
 
+std::vector<std::string> Props::MeatDebugLines() const {
+    std::vector<std::string> lines;
+    for (const Item& item : items_) {
+        // Only the food cooks; the tongs and any other non-food carryable carry no
+        // CookInformation, so they are not meats and have nothing to report.
+        if (!item.cook) {
+            continue;
+        }
+        lines.push_back(item.name + ": " + std::string(item.cook->DonenessLabel()) + " (" +
+                        std::to_string(static_cast<int>(item.cook->InternalTempF())) + "F)");
+    }
+    return lines;
+}
+
 int Props::PickTarget(FXMVECTOR eye, FXMVECTOR forward) const {
     XMFLOAT3 origin;
     XMFLOAT3 direction;
