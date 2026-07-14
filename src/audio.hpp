@@ -2,6 +2,8 @@
 
 #include <DirectXMath.h>
 
+#include <vector>
+
 // FMOD Core types, forward-declared so fmod.hpp stays out of this header and off
 // the rest of the game's include graph. Only pointers to these are held below.
 namespace FMOD {
@@ -51,6 +53,11 @@ private:
     FMOD::Sound* sizzle_ = nullptr;
     FMOD::Sound* splat_ = nullptr;
     FMOD::Sound* clank_ = nullptr;
+    // The grill's knocks, in several interchangeable takes each so a run of hits does
+    // not machine-gun one sample: the base's baking-tray clatter, the lid's pot top.
+    // PlayImpact picks one at random. Only clips that loaded are kept.
+    std::vector<FMOD::Sound*> grill_base_;
+    std::vector<FMOD::Sound*> grill_lid_;
     FMOD::Channel* channel_ = nullptr;
 
     // Set once the engine hits an error it will not come back from -- no audio

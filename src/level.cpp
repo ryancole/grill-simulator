@@ -30,7 +30,8 @@ Placement MakeBox(XMFLOAT3 center, XMFLOAT3 size, float yaw_degrees, XMFLOAT3 co
 }
 
 Placement MakeProp(std::string model, XMFLOAT3 position, float yaw_degrees, float scale,
-                   XMFLOAT3 tint, bool dynamic, float mass, float knock_rating) {
+                   XMFLOAT3 tint, bool dynamic, float mass, float knock_rating,
+                   ImpactSound impact_sound) {
     Placement placement;
     placement.model = std::move(model);
     XMStoreFloat4x4(&placement.transform,
@@ -41,6 +42,7 @@ Placement MakeProp(std::string model, XMFLOAT3 position, float yaw_degrees, floa
     placement.dynamic = dynamic;
     placement.mass = mass;
     placement.knock_rating = knock_rating;
+    placement.impact_sound = impact_sound;
     return placement;
 }
 
@@ -100,6 +102,33 @@ XMFLOAT2 Vec2Or(const toml::node_view<const toml::node>& view, XMFLOAT2 fallback
 float NumberOr(const toml::node_view<const toml::node>& view, float fallback,
                const std::filesystem::path& path, const char* what) {
     return view ? static_cast<float>(AsDouble(*view.node(), path, what)) : fallback;
+}
+
+// An optional impact sound named by string, falling back to None when the key is
+// absent. Only a dynamic prop voices it; a static one that names a sound is
+// harmless. An unrecognised name is a level error, not a silent default.
+ImpactSound SoundOr(const toml::node_view<const toml::node>& view,
+                    const std::filesystem::path& path) {
+    if (!view) {
+        return ImpactSound::None;
+    }
+    const auto name = view.value<std::string>();
+    if (!name) {
+        Fail(path, "prop sound must be a string");
+    }
+    if (*name == "meat") {
+        return ImpactSound::Meat;
+    }
+    if (*name == "metal") {
+        return ImpactSound::Metal;
+    }
+    if (*name == "grill_base") {
+        return ImpactSound::GrillBase;
+    }
+    if (*name == "grill_lid") {
+        return ImpactSound::GrillLid;
+    }
+    Fail(path, "unknown prop sound '" + *name + "' (want meat, metal, grill_base or grill_lid)");
 }
 
 } // namespace
@@ -206,8 +235,9 @@ LevelDef LoadFromFile(const std::filesystem::path& path) {
             const bool dynamic = (*prop)["dynamic"].value_or(false);
             const float mass = NumberOr((*prop)["mass"], 1.0f, path, "prop mass");
             const float knock = NumberOr((*prop)["knock"], 1.0f, path, "prop knock");
+            const ImpactSound sound = SoundOr((*prop)["sound"], path);
             level.placements.push_back(
-                MakeProp(std::move(model), pos, yaw, scale, tint, dynamic, mass, knock));
+                MakeProp(std::move(model), pos, yaw, scale, tint, dynamic, mass, knock, sound));
         }
     }
 

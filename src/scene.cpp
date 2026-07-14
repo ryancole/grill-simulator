@@ -40,7 +40,7 @@ Scene::Scene(const LevelDef& level) {
         const XMMATRIX transform = XMLoadFloat4x4(&placement.transform);
         if (placement.dynamic) {
             AddDynamicInstance(model, transform, placement.tint, placement.mass,
-                               placement.knock_rating);
+                               placement.knock_rating, placement.impact_sound);
         } else {
             AddInstance(model, transform, placement.tint, placement.checker);
         }
@@ -78,12 +78,13 @@ void Scene::AddInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
 }
 
 void Scene::AddDynamicInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
-                               float mass, float knock_rating) {
+                               float mass, float knock_rating, ImpactSound impact_sound) {
     DynamicBody body{};
     body.instance = static_cast<std::uint32_t>(instances_.size());
     XMStoreFloat4x4(&body.initial_transform, transform);
     body.mass = mass;
     body.knock_rating = knock_rating;
+    body.impact_sound = impact_sound;
 
     MeshInstance instance{};
     instance.model = model;

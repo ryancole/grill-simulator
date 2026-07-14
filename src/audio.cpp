@@ -9,8 +9,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
+#include <initializer_list>
 #include <random>
 #include <string>
+#include <vector>
 
 using namespace DirectX;
 
@@ -105,6 +107,29 @@ FMOD::Sound* LoadImpactSound(FMOD::System* system, const char* filename) {
     return sound;
 }
 
+// One of a sound's interchangeable takes, chosen at random -- or null if none of
+// them loaded. Picking per hit keeps a run of impacts from repeating one sample.
+FMOD::Sound* PickVariant(const std::vector<FMOD::Sound*>& clips) {
+    if (clips.empty()) {
+        return nullptr;
+    }
+    std::uniform_int_distribution<std::size_t> pick(0, clips.size() - 1);
+    return clips[pick(g_pitch_rng)];
+}
+
+// Loads each named clip and keeps the ones that came up, so a missing take just
+// narrows the variety rather than failing. Shared by the grill's base and lid.
+std::vector<FMOD::Sound*> LoadVariants(FMOD::System* system,
+                                       std::initializer_list<const char*> files) {
+    std::vector<FMOD::Sound*> clips;
+    for (const char* file : files) {
+        if (FMOD::Sound* sound = LoadImpactSound(system, file)) {
+            clips.push_back(sound);
+        }
+    }
+    return clips;
+}
+
 } // namespace
 
 Audio::Audio() {
@@ -151,11 +176,17 @@ Audio::Audio() {
     }
     sizzle_->set3DCustomRolloff(g_sizzle_curve_points, kSizzleCurvePointCount);
 
-    // The impact one-shots: a wet splat for the meat, a metal clank for the tongs.
-    // A missing clip is not fatal -- the sizzle already loaded, so the game runs on
-    // and PlayImpact simply skips whichever sound failed (it null-checks the clip).
+    // The impact one-shots: a wet splat for the meat, a metal clank for the tongs,
+    // and the grill's own knocks -- the base like the baking tray it is shaped like,
+    // the lid like a pot top -- each in two takes PlayImpact chooses between. A
+    // missing clip is not fatal -- the sizzle already loaded, so the game runs on and
+    // PlayImpact simply skips whichever sound failed (it null-checks the clip).
     splat_ = LoadImpactSound(system_, "232135__yottasounds__splat-005.wav");
     clank_ = LoadImpactSound(system_, "446128__justinvoke__metal-clank-4.wav");
+    grill_base_ = LoadVariants(system_, {"820059__lukemeney__round-baking-tray-new-1.wav",
+                                         "820060__lukemeney__round-baking-tray-new-2.wav"});
+    grill_lid_ = LoadVariants(system_, {"820057__lukemeney__big-pot-top-2.wav",
+                                        "820058__lukemeney__big-pot-top-3.wav"});
 
     // Playback deliberately does not start here -- see started_ in the header and
     // the first-frame handling in Update.
@@ -229,6 +260,12 @@ void Audio::PlayImpact(const XMFLOAT3& position, float strength, ImpactSound sou
         break;
     case ImpactSound::Metal:
         clip = clank_;
+        break;
+    case ImpactSound::GrillBase:
+        clip = PickVariant(grill_base_);
+        break;
+    case ImpactSound::GrillLid:
+        clip = PickVariant(grill_lid_);
         break;
     case ImpactSound::None:
         break;

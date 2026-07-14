@@ -17,9 +17,10 @@ Furniture::Furniture(Scene& scene, Physics& physics) : scene_(&scene) {
         Body& stored = bodies_.emplace_back();
         stored.instance = body.instance;
         // prop_index stays -1: furniture is shovable but never carried, so the
-        // gaze-pick sweep skips it. The rating rides along for the shove. Bind only
-        // now that `stored` sits in its final slot in bodies_.
-        stored.body.Adopt(actor, body.knock_rating, -1);
+        // gaze-pick sweep skips it. The rating rides along for the shove, and the
+        // impact sound so the contact report can voice a hard landing (the grill
+        // clatters). Bind only now that `stored` sits in its final slot in bodies_.
+        stored.body.Adopt(actor, body.knock_rating, -1, body.impact_sound);
         stored.body.Bind();
     }
 }
