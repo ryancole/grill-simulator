@@ -15,7 +15,17 @@
 // hold. Flat things (food) are tipped up to show a face; the tongs point away down the
 // gaze. Named by the catalog so a carryable picks its pose without Props knowing the
 // object.
-enum class HoldStyle { Flat, Tongs };
+enum class HoldStyle { Flat, Tongs, Tray };
+
+// The serving surface a carryable provides, as pure data: how close (metres, measured
+// in the ground plane) a carried meat must be brought to deliver it, and where the
+// surface sits in the model's own space (its top face). Present only on a serving tray;
+// left off, the carryable takes no food. Props turns this into a live serve zone that
+// rides the tray wherever it is set down or carried, and rests delivered meat on it.
+struct ServeDef {
+    float radius = 0.8f;
+    DirectX::XMFLOAT3 offset{0.0f, 0.0f, 0.0f};
+};
 
 // The heat a prop radiates, as pure data: the air temperature at the centre, how far
 // (metres) it carries before fading to room air, and where the hot centre sits in the
@@ -48,6 +58,9 @@ struct CarryableDef {
     // by band each frame (see Props::CurrentModel).
     std::vector<CookStageModel> models;
     std::optional<CookProfile> cook; // set for foods, empty for tools
+    // Set only on a serving tray: the surface cooked meat is delivered onto. A food or
+    // an ordinary tool leaves it empty and accepts no deliveries.
+    std::optional<ServeDef> serve;
     float knock_rating = 4.0f;
     ImpactSound impact_sound = ImpactSound::Meat;
     HoldStyle hold = HoldStyle::Flat;

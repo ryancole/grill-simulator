@@ -1,6 +1,7 @@
 #pragma once
 
 #include "furniture.hpp"
+#include "objectives.hpp"
 #include "props.hpp"
 #include "scene.hpp"
 
@@ -36,6 +37,8 @@ public:
     const Scene& scene() const { return scene_; }
     Props& props() { return props_; }
     Furniture& furniture() { return furniture_; }
+    Objectives& objectives() { return objectives_; }
+    const Objectives& objectives() const { return objectives_; }
 
 private:
     // Declared before props_/furniture_ so it is built first (they take a Scene&)
@@ -43,6 +46,9 @@ private:
     Scene scene_;
     Props props_;
     Furniture furniture_;
+    // The level's win-condition tracker, seeded from its goals. Ordinary per-level
+    // state -- it borrows nothing, so its position among the members is free.
+    Objectives objectives_;
 
     // The persistent systems this level's content was loaded into, so the
     // destructor can hand it all back.

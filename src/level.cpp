@@ -219,6 +219,40 @@ LevelDef LoadFromFile(const std::filesystem::path& path) {
         }
     }
 
+    // The win condition: each goal names a food `type`, how many (`count`, default 1),
+    // and the doneness band range it must be served in (`min`/`max`, as the same tokens
+    // the catalog uses). An unknown band token is named rather than guessed, like a bad
+    // sound or hold in the catalog.
+    if (const toml::array* goals = root["goal"].as_array()) {
+        for (const toml::node& node : *goals) {
+            const toml::table* goal = node.as_table();
+            if (goal == nullptr) {
+                Fail(path, "each goal must be a table");
+            }
+            FoodGoal g;
+            g.type = (*goal)["type"].value_or(std::string{});
+            if (g.type.empty()) {
+                Fail(path, "each goal needs a type");
+            }
+            g.count = static_cast<int>(NumberOr((*goal)["count"], 1.0f, path, "goal count"));
+            if (const auto min = (*goal)["min"].value<std::string>()) {
+                const auto band = ParseDoneness(*min);
+                if (!band) {
+                    Fail(path, "unknown goal min doneness '" + *min + "'");
+                }
+                g.min = *band;
+            }
+            if (const auto max = (*goal)["max"].value<std::string>()) {
+                const auto band = ParseDoneness(*max);
+                if (!band) {
+                    Fail(path, "unknown goal max doneness '" + *max + "'");
+                }
+                g.max = *band;
+            }
+            level.goals.push_back(std::move(g));
+        }
+    }
+
     return level;
 }
 

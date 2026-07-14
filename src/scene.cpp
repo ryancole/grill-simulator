@@ -87,6 +87,7 @@ Scene::Scene(const LevelDef& level) {
         spawn.knock_rating = def.knock_rating;
         spawn.impact_sound = def.impact_sound;
         spawn.cook = def.cook;
+        spawn.serve = def.serve;
         carryables_.push_back(std::move(spawn));
     }
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cook_information.hpp"
 #include "environment.hpp"
 
 #include <DirectXMath.h>
@@ -40,9 +41,22 @@ struct CarryablePlacement {
     float yaw = 0.0f;
 };
 
+// One line of a level's win condition: a number of a food `type` (a catalog food name,
+// as the level places it) the player must deliver to a serving zone cooked into the
+// doneness band range [min, max], inclusive. Because doneness only ever rises, `min` is
+// "at least this cooked" (an undercooked serve is rejected) and `max` is "no more than
+// this" (max = WellDone rejects a burnt serve). The defaults span a forgiving middle --
+// at least rare, no more than well done, one needed -- so a terse goal is just a type.
+struct FoodGoal {
+    std::string type;
+    int count = 1;
+    CookInformation::Doneness min = CookInformation::Doneness::Rare;
+    CookInformation::Doneness max = CookInformation::Doneness::WellDone;
+};
+
 // Everything that makes one level its own place: a name, where the player starts,
 // which way the sun falls, and the things standing in it. Plain data, parsed from a
-// `.level` text file by LoadFromFile -- this struct is that format's schema, so a
+// level's TOML file by LoadFromFile -- this struct is that format's schema, so a
 // field added here is a field the loader (and the files) grow.
 struct LevelDef {
     std::string name;
@@ -69,12 +83,17 @@ struct LevelDef {
     std::vector<BoxPlacement> boxes;
     std::vector<PropPlacement> props;
     std::vector<CarryablePlacement> carryables;
+
+    // The level's win condition: the orders the player must deliver to a serving zone,
+    // each cooked into its band range. Empty on a level that sets no `goal` array, which
+    // is simply a level with nothing to win (the sandbox levels leave it so).
+    std::vector<FoodGoal> goals;
 };
 
 namespace levels {
 
-// Reads a level from a `.level` TOML file (see assets/levels/backyard.level, which
-// documents the format). The top level carries name/spawn/facing/sun; an optional
+// Reads a level from a TOML file (see assets/levels/backyard.toml, which documents the
+// format). The top level carries name/spawn/facing/sun; an optional
 // `time_of_day` (clock hours) generates a whole sky, which an optional `[environment]`
 // table (and the explicit `sun`) then override field by field -- every field falling
 // back to the default look. A `box` array holds inline cube geometry (centre/size/yaw/

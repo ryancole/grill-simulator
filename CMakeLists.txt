@@ -49,7 +49,9 @@ add_executable(grill WIN32
   src/level.cpp
   src/menu.cpp
   src/model.cpp
+  src/objectives.cpp
   src/scene.cpp
+  src/serve_zone.cpp
   src/physics.cpp
   src/props.cpp
   src/furniture.cpp
@@ -110,7 +112,7 @@ add_hlsl_shader(grill SOURCE shaders/outline.hlsl ENTRY PSMain PROFILE ps_6_6 OU
 add_hlsl_shader(grill SOURCE shaders/shadow.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT shadow.vs.cso)
 
 stage_assets(grill DIRECTORY assets/models
-  FILES charcoal-grill-base.glb charcoal-grill-lid.glb tree.glb bench-basic.glb crate.glb cooler-basic.glb tongs-metal.glb burger-raw.glb steak-cooked.glb chicken-raw.glb chicken-cooked.glb)
+  FILES charcoal-grill-base.glb charcoal-grill-lid.glb tree.glb bench-basic.glb crate.glb cooler-basic.glb tray.glb tongs-metal.glb burger-raw.glb steak-cooked.glb chicken-raw.glb chicken-cooked.glb)
 
 stage_assets(grill DIRECTORY assets/audio
   FILES sizzle.wav 232135__yottasounds__splat-005.wav 446128__justinvoke__metal-clank-4.wav
@@ -120,7 +122,7 @@ stage_assets(grill DIRECTORY assets/audio
 # The levels are text, parsed at runtime (see src/level.cpp), so editing one and
 # re-staging needs no recompile -- only the copy next to the executable.
 stage_assets(grill DIRECTORY assets/levels
-  FILES backyard.level rooftop.level)
+  FILES backyard.toml rooftop.toml)
 
 # The control bindings and the object catalog, likewise text parsed at runtime (see
 # src/actions.cpp, src/catalog.cpp): editing one is a text edit and a re-stage, no

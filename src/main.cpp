@@ -196,10 +196,10 @@ int Run(HINSTANCE instance, int show_command) {
     // The device and pipelines first -- the session's, independent of any level.
     game.renderer.Initialize(hwnd, kDefaultWidth, kDefaultHeight);
 
-    // The levels the player switches between, as the .level files staged under
+    // The levels the player switches between, as the .toml files staged under
     // assets/levels, in the order the number keys select them. Loading is by file so
     // a level is a text edit, not a rebuild.
-    const std::array<const char*, 2> level_files = {"backyard.level", "rooftop.level"};
+    const std::array<const char*, 2> level_files = {"backyard.toml", "rooftop.toml"};
     // The names the menu shows for each level, parallel to level_files.
     const std::array<const char*, 2> level_names = {"Backyard", "Rooftop"};
     const std::filesystem::path levels_dir = ExecutableDirectory() / "assets" / "levels";
@@ -371,7 +371,7 @@ int Run(HINSTANCE instance, int show_command) {
         // update, so the meats cook against this frame's grate position.
         game.world->furniture().Update();
         game.world->props().Update(camera_to_world, game.actions, dt,
-                                   game.world->furniture().HeatSources());
+                                   game.world->furniture().HeatSources(), game.world->objectives());
 
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
@@ -385,6 +385,23 @@ int Run(HINSTANCE instance, int show_command) {
             debug_lines.push_back(
                 "heat " + std::to_string(i) + ": " +
                 std::to_string(static_cast<int>(heat_sources[i].EmitterTempF())) + "F");
+        }
+
+        // The order ticket: each goal, how many are filled, and its accepted band range.
+        // A level with no goals shows nothing here; one whose orders are all filled adds
+        // a completion line -- the win condition, made legible until there is a proper
+        // level-complete screen to raise.
+        const Objectives& objectives = game.world->objectives();
+        const std::span<const FoodGoal> goals = objectives.Goals();
+        for (std::size_t i = 0; i < goals.size(); ++i) {
+            const FoodGoal& goal = goals[i];
+            debug_lines.push_back(
+                "order " + goal.type + ": " + std::to_string(objectives.Filled(i)) + "/" +
+                std::to_string(goal.count) + " " + std::string(DonenessName(goal.min)) + "-" +
+                std::string(DonenessName(goal.max)));
+        }
+        if (!goals.empty() && objectives.Complete()) {
+            debug_lines.push_back("LEVEL COMPLETE! (R to replay)");
         }
 
         game.renderer.Render(game.world->scene(), props.WorldInstances(),

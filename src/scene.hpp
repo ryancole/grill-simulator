@@ -56,6 +56,9 @@ struct CarryableSpawn {
     float knock_rating = 4.0f;
     ImpactSound impact_sound = ImpactSound::Meat;
     std::optional<CookProfile> cook;
+    // Set only on a serving tray: the delivery surface it provides. Props builds a
+    // live serve zone from it that rides the tray wherever it is set down or carried.
+    std::optional<ServeDef> serve;
 };
 
 // A world object the player can knock over -- the grill, the cooler -- given its
@@ -119,7 +122,7 @@ public:
     std::uint32_t CubeModel() const { return cube_; }
 
     // The carryables the level placed, resolved against the catalog and ready to seed.
-    // Props reads these to set out the starting objects (tongs, meats).
+    // Props reads these to set out the starting objects (tongs, meats, the serving tray).
     const std::vector<CarryableSpawn>& Carryables() const { return carryables_; }
 
 private:
