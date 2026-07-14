@@ -15,15 +15,21 @@ using namespace physx;
 
 namespace {
 
-constexpr float kEyeHeight = 1.7f;
 constexpr float kBodyRadius = 0.35f;
+// The player's stature, foot to crown, and how far the eyes sit below that crown --
+// real eyes are set into the face, not perched on top of the head. The eye rides at
+// kEyeHeight; the capsule keeps the full body height, so the whole person still clears
+// (and knocks into, and falls) as someone that tall would.
+constexpr float kBodyHeight = 1.7f; // foot to crown, ~5'7"
+constexpr float kEyeDrop = 0.1f;    // eyes this far below the crown
+constexpr float kEyeHeight = kBodyHeight - kEyeDrop; // 1.6 m eyeline
 constexpr float kWalkSpeed = 3.4f;   // metres per second
 constexpr float kSprintSpeed = 6.4f; // metres per second
 
-// The capsule: a 0.35 m radius cylinder segment capped by two hemispheres, sized
-// so foot-to-crown is exactly the eye height. The eye then rides at the crown.
-//   total height = kCapsuleHeight + 2*radius = 1.0 + 0.7 = 1.7 = kEyeHeight
-constexpr float kCapsuleHeight = kEyeHeight - 2.0f * kBodyRadius; // cylinder part
+// The capsule: a 0.35 m radius cylinder segment capped by two hemispheres, sized so
+// foot-to-crown is the full body height. The eye then rides kEyeDrop below the crown.
+//   total height = kCapsuleHeight + 2*radius = 1.0 + 0.7 = 1.7 = kBodyHeight
+constexpr float kCapsuleHeight = kBodyHeight - 2.0f * kBodyRadius; // cylinder part
 // A thin skin PhysX keeps between the capsule and what it touches, so contact is
 // detected a hair early rather than after interpenetrating.
 constexpr float kContactOffset = 0.05f;
