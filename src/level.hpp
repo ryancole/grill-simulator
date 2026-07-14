@@ -35,6 +35,25 @@ struct Placement {
     // grill clatters). None -- the default -- for the silent furniture (the cooler)
     // and every static placement, which never reads it.
     ImpactSound impact_sound = ImpactSound::None;
+
+    // Whether this placement radiates heat -- the grill does, and nothing else in
+    // the yard yet. When set, Scene gives its dynamic body a HeatSource so the meats
+    // set on it cook; the three fields below are how hot and how far. Off by default,
+    // so a placement that says nothing about heat is stone cold and the fields are
+    // ignored. Heat currently rides only dynamic bodies (Furniture moves the hot zone
+    // with the body's pose), so a static placement that asks for heat has none.
+    bool emits_heat = false;
+    // The air temperature at the heat centre, in degrees Fahrenheit, and how far in
+    // metres that heat carries before it fades back to room air. A charcoal grate
+    // runs a few hundred degrees; the reach is a hand's-breadth around the grate, so
+    // food has to sit on it to cook.
+    float heat_temp_f = 400.0f;
+    float heat_reach = 1.0f;
+    // Where the heat centre sits relative to the model's origin, in the model's own
+    // space -- for the grill, up at the grate rather than down at the feet. Carried
+    // through the body's pose each frame, so the hot spot stays on the grate even
+    // after the grill is knocked over.
+    DirectX::XMFLOAT3 heat_offset{0.0f, 0.0f, 0.0f};
 };
 
 // Everything that makes one level its own place: a name, where the player starts,

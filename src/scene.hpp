@@ -1,12 +1,14 @@
 #pragma once
 
 #include "collision.hpp"
+#include "heat_source.hpp"
 #include "model.hpp"
 #include "rigid_body.hpp"
 
 #include <DirectXMath.h>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 struct LevelDef;
@@ -56,6 +58,15 @@ struct DynamicBody {
     // The sound the body makes on a hard landing, carried to its BodyTag so the
     // contact report can voice it (the grill clatters; the cooler stays None).
     ImpactSound impact_sound = ImpactSound::None;
+
+    // The heat this body radiates, if any -- present on the grill, empty on the
+    // cooler. Its origin is unset here (it is world state Furniture refreshes each
+    // frame from the body's pose); this carries only the fixed temperature and reach.
+    std::optional<HeatSource> heat;
+    // Where the heat centre sits in the model's own space -- up at the grate. Carried
+    // separately from the HeatSource because it is fixed body-space data Furniture
+    // transforms through the pose to place the source's world origin each frame.
+    DirectX::XMFLOAT3 heat_offset{0.0f, 0.0f, 0.0f};
 };
 
 // The runtime side of a level: it takes a LevelDef (pure data -- see level.hpp)
@@ -110,7 +121,8 @@ private:
     // where the body spawns, and `mass` sets how heavy it is to shove.
     void AddDynamicInstance(std::uint32_t model, DirectX::FXMMATRIX transform,
                             DirectX::XMFLOAT3 tint, float mass, float knock_rating,
-                            ImpactSound impact_sound);
+                            ImpactSound impact_sound, std::optional<HeatSource> heat,
+                            DirectX::XMFLOAT3 heat_offset);
 
     std::vector<Model> models_;
     std::vector<MeshInstance> instances_;

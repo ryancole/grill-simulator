@@ -31,7 +31,8 @@ Placement MakeBox(XMFLOAT3 center, XMFLOAT3 size, float yaw_degrees, XMFLOAT3 co
 
 Placement MakeProp(std::string model, XMFLOAT3 position, float yaw_degrees, float scale,
                    XMFLOAT3 tint, bool dynamic, float mass, float knock_rating,
-                   ImpactSound impact_sound) {
+                   ImpactSound impact_sound, bool emits_heat, float heat_temp_f, float heat_reach,
+                   XMFLOAT3 heat_offset) {
     Placement placement;
     placement.model = std::move(model);
     XMStoreFloat4x4(&placement.transform,
@@ -43,6 +44,10 @@ Placement MakeProp(std::string model, XMFLOAT3 position, float yaw_degrees, floa
     placement.mass = mass;
     placement.knock_rating = knock_rating;
     placement.impact_sound = impact_sound;
+    placement.emits_heat = emits_heat;
+    placement.heat_temp_f = heat_temp_f;
+    placement.heat_reach = heat_reach;
+    placement.heat_offset = heat_offset;
     return placement;
 }
 
@@ -236,8 +241,18 @@ LevelDef LoadFromFile(const std::filesystem::path& path) {
             const float mass = NumberOr((*prop)["mass"], 1.0f, path, "prop mass");
             const float knock = NumberOr((*prop)["knock"], 1.0f, path, "prop knock");
             const ImpactSound sound = SoundOr((*prop)["sound"], path);
-            level.placements.push_back(
-                MakeProp(std::move(model), pos, yaw, scale, tint, dynamic, mass, knock, sound));
+            // Heat is opt-in: a `heat` temperature (the grate, a few hundred °F) turns
+            // the prop into a heat source, with an optional reach and an offset up to
+            // the grate. Absent, the prop is cold and the reach/offset go unread.
+            const toml::node_view<const toml::node> heat = (*prop)["heat"];
+            const bool emits_heat = static_cast<bool>(heat);
+            const float heat_temp = NumberOr(heat, 400.0f, path, "prop heat");
+            const float heat_reach = NumberOr((*prop)["heat_reach"], 1.0f, path, "prop heat_reach");
+            const XMFLOAT3 heat_offset =
+                Vec3Or((*prop)["heat_offset"], XMFLOAT3{0.0f, 0.0f, 0.0f}, path, "prop heat_offset");
+            level.placements.push_back(MakeProp(std::move(model), pos, yaw, scale, tint, dynamic,
+                                                mass, knock, sound, emits_heat, heat_temp,
+                                                heat_reach, heat_offset));
         }
     }
 

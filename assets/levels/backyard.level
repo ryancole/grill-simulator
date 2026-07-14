@@ -30,7 +30,11 @@
 #   prop -- a .glb from assets/models: pos, with optional yaw, uniform scale and
 #           tint (defaults white); `dynamic = true` with mass and knock makes it a
 #           knock-over-able body, and an optional sound ("meat", "metal",
-#           "grill_base" or "grill_lid") is the clip it plays on a hard landing.
+#           "grill_base" or "grill_lid") is the clip it plays on a hard landing. An
+#           optional `heat` (grate temperature in °F) makes a dynamic prop radiate
+#           heat that cooks the meat set on it, with optional `heat_reach` (metres the
+#           heat carries) and `heat_offset` ([x,y,z] lifting the hot centre to the
+#           grate); omit `heat` and the prop is cold.
 
 name = "Backyard"
 spawn = [0.0, 0.0, -7.0]
@@ -54,7 +58,13 @@ prop = [
   # it -- so the lid can be knocked off on its own. Both topple; the cooler is heavier
   # and low, so it mostly slides. The lid's y rests it on the base's bowl rim; nudge it
   # if it floats or sinks in-game.
-  {model = "charcoal-grill-base.glb", pos = [0.0, 0.0, 5.0],   dynamic = true, mass = 10.0, knock = 8.0, sound = "grill_base"},
+  #
+  # The base radiates heat: `heat` is the grate temperature in °F, `heat_reach` how far
+  # (metres) that heat carries before it fades to room air, and `heat_offset` lifts the
+  # hot centre from the model origin (at the feet) up to the grate. Meat laid on the
+  # grate cooks; carry it off and it cools. These three are the cook's tuning knobs --
+  # the level is text, so a tweak is an edit and an in-game reload (R), no rebuild.
+  {model = "charcoal-grill-base.glb", pos = [0.0, 0.0, 5.0],   dynamic = true, mass = 10.0, knock = 8.0, sound = "grill_base", heat = 425.0, heat_reach = 1.0, heat_offset = [0.0, 0.62, 0.0]},
   {model = "charcoal-grill-lid.glb",  pos = [0.0, 0.72, 5.0],  dynamic = true, mass = 3.0,  knock = 4.0, sound = "grill_lid"},
   {model = "bench-basic.glb",  pos = [-4.5, 0.0, 1.5]},
   {model = "cooler-basic.glb", pos = [3.6, 0.0, 6.5],   dynamic = true, mass = 14.0, knock = 7.0},

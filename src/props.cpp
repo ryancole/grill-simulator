@@ -5,6 +5,7 @@
 
 #include <PxPhysicsAPI.h>
 
+#include <algorithm>
 #include <cfloat>
 
 using namespace DirectX;
@@ -197,7 +198,8 @@ void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XM
     items_.back().rigid.Bind();
 }
 
-void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt) {
+void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt,
+                   std::span<const HeatSource> heat_sources) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
@@ -232,13 +234,26 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     }
 
-    // Advance the cook on every meat, carried or resting alike. There is no heat
-    // source yet, so each is surrounded by room air and simply holds at room
-    // temperature -- but the wiring is here for the grate that comes next.
-    for (Item& item : items_) {
-        if (item.cook) {
-            item.cook->Update(CookInformation::kRoomTempF, dt);
+    // Advance the cook on every meat, carried or resting alike. Each cooks against
+    // the surrounding air where it sits: room temperature by default, or the hottest
+    // temperature any heat source imposes there -- so a steak laid on the grill's
+    // grate finally crosses the cook threshold, while one carried away cools back to
+    // the yard. The sample point is the item's model origin, which sits on its
+    // underside -- exactly the face resting on the grate.
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        Item& item = items_[i];
+        if (!item.cook) {
+            continue;
         }
+        const XMMATRIX pose = i == carried_
+                                  ? XMLoadFloat4x4(&item.held_local) * camera_to_world
+                                  : XMLoadFloat4x4(&item.resting);
+        const XMVECTOR point = pose.r[3];
+        float ambient_f = CookInformation::kRoomTempF;
+        for (const HeatSource& source : heat_sources) {
+            ambient_f = std::max(ambient_f, source.TemperatureAt(point));
+        }
+        item.cook->Update(ambient_f, dt);
     }
 
     // Rebuild the draw lists from the current state. There are a handful of

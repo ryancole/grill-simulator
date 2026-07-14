@@ -39,8 +39,16 @@ Scene::Scene(const LevelDef& level) {
 
         const XMMATRIX transform = XMLoadFloat4x4(&placement.transform);
         if (placement.dynamic) {
+            // A placement that radiates heat becomes a HeatSource on its body; a cold
+            // one passes nullopt and the body carries no heat. The origin is left
+            // unset -- Furniture places it each frame from the body's pose.
+            std::optional<HeatSource> heat;
+            if (placement.emits_heat) {
+                heat.emplace(placement.heat_temp_f, placement.heat_reach);
+            }
             AddDynamicInstance(model, transform, placement.tint, placement.mass,
-                               placement.knock_rating, placement.impact_sound);
+                               placement.knock_rating, placement.impact_sound, heat,
+                               placement.heat_offset);
         } else {
             AddInstance(model, transform, placement.tint, placement.checker);
         }
@@ -78,13 +86,16 @@ void Scene::AddInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
 }
 
 void Scene::AddDynamicInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
-                               float mass, float knock_rating, ImpactSound impact_sound) {
+                               float mass, float knock_rating, ImpactSound impact_sound,
+                               std::optional<HeatSource> heat, XMFLOAT3 heat_offset) {
     DynamicBody body{};
     body.instance = static_cast<std::uint32_t>(instances_.size());
     XMStoreFloat4x4(&body.initial_transform, transform);
     body.mass = mass;
     body.knock_rating = knock_rating;
     body.impact_sound = impact_sound;
+    body.heat = heat;
+    body.heat_offset = heat_offset;
 
     MeshInstance instance{};
     instance.model = model;

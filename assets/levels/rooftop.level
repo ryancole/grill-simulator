@@ -38,7 +38,7 @@ box = [
 prop = [
   # Grill (base + lid, two separate dynamic bodies) dead ahead of the west-edge spawn,
   # cooler off to one side. The lid's y rests it on the base's bowl rim; nudge if needed.
-  {model = "charcoal-grill-base.glb", pos = [1.5, 0.0, 0.0],  dynamic = true, mass = 10.0, knock = 8.0, sound = "grill_base"},
+  {model = "charcoal-grill-base.glb", pos = [1.5, 0.0, 0.0],  dynamic = true, mass = 10.0, knock = 8.0, sound = "grill_base", heat = 425.0, heat_reach = 1.0, heat_offset = [0.0, 0.62, 0.0]},
   {model = "charcoal-grill-lid.glb",  pos = [1.5, 0.72, 0.0], dynamic = true, mass = 3.0,  knock = 4.0, sound = "grill_lid"},
   {model = "cooler-basic.glb", pos = [3.8, 0.0, -2.6], dynamic = true, mass = 14.0, knock = 7.0},
 
