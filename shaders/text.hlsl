@@ -13,6 +13,9 @@ cbuffer Constants : register(b0) {
     // spares the shader from knowing the atlas size or the text's on-screen scale.
     float2 g_unit_range;
     float2 g_padding;
+    // >0.5 fills the quad flat with g_color and ignores the atlas -- the translucent
+    // panel drawn behind the debug overlay. 0 (the default) is the glyph path below.
+    float g_solid;
 };
 
 Texture2D<float4> g_atlas : register(t0);
@@ -42,6 +45,11 @@ float Median(float3 msd) {
 }
 
 float4 PSMain(PSInput input) : SV_TARGET {
+    // A solid panel: the quad fills flat with the (translucent) colour, no atlas.
+    if (g_solid > 0.5f) {
+        return g_color;
+    }
+
     const float3 msd = g_atlas.Sample(g_sampler, input.uv).rgb;
     const float distance = Median(msd) - 0.5f;
 

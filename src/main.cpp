@@ -17,8 +17,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <fstream>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -374,10 +376,22 @@ int Run(HINSTANCE instance, int show_command) {
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
         Props& props = game.world->props();
+
+        // The debug overlay, anchored top-left: every meat's doneness, then every
+        // heat source's emitting temperature.
+        std::vector<std::string> debug_lines = props.MeatDebugLines();
+        const std::span<const HeatSource> heat_sources = game.world->furniture().HeatSources();
+        for (std::size_t i = 0; i < heat_sources.size(); ++i) {
+            debug_lines.push_back(
+                "heat " + std::to_string(i) + ": " +
+                std::to_string(static_cast<int>(heat_sources[i].EmitterTempF())) + "F");
+        }
+
         game.renderer.Render(game.world->scene(), props.WorldInstances(),
                              props.HighlightInstances(),
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
-                             view_projection, game.camera.Position(), props.PromptText());
+                             view_projection, game.camera.Position(), props.PromptText(),
+                             debug_lines);
     }
 
     game.renderer.Shutdown();

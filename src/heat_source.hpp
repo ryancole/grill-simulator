@@ -36,6 +36,11 @@ public:
     void SetOrigin(DirectX::FXMVECTOR origin) { DirectX::XMStoreFloat3(&origin_, origin); }
     DirectX::XMFLOAT3 Origin() const { return origin_; }
 
+    // The air temperature at the very centre of the source, in degrees Fahrenheit --
+    // the emitting temperature that is its fixed character, before any distance
+    // falloff. A debug readout of "how hot is this heat source" reads this.
+    float EmitterTempF() const { return emitter_temp_f_; }
+
     // The air temperature this source imposes at `point`, in degrees Fahrenheit: the
     // full emitter temperature at the centre, easing smoothly down to room temperature
     // by `reach` metres away and holding at room temperature beyond it. Never returns

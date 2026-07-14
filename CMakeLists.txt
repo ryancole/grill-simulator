@@ -131,3 +131,6 @@ stage_assets(grill DIRECTORY assets
 # The HUD font atlas is baked from the committed .ttf at build time; only the
 # .png/.csv it produces are read at runtime, and those live in the build tree.
 bake_font_atlas(grill FONT assets/fonts/Inter-Regular.ttf IMAGE hud.png CSV hud.csv)
+# A second atlas, monospace, baked the same way -- the debug overlay draws from it
+# so its columns line up; the prompt and menu keep the Inter atlas above.
+bake_font_atlas(grill FONT assets/fonts/JetBrainsMono-Regular.ttf IMAGE mono.png CSV mono.csv)

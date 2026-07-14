@@ -64,6 +64,13 @@ public:
     // or empty when E would do nothing. Recomputed each Update.
     std::string PromptText() const;
 
+    // One line per meat in the yard for the debug overlay: "steak: medium rare
+    // (139F)" -- its name, current doneness band, and internal temperature. A meat
+    // is any item carrying cooking state; the tongs and other non-food carryables
+    // have none and are skipped, so this is exactly the cookable objects, resting or
+    // carried. Empty on a level that placed no food.
+    std::vector<std::string> MeatDebugLines() const;
+
 private:
     // One loose object, modelled as a single oriented box (an approximation --
     // the meshes are not perfectly boxy, but these things are small).
