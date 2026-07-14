@@ -33,13 +33,22 @@ struct MeshInstance {
     float checker;
 };
 
+// One model of a carryable's cook progression, resolved to a loaded model id: the
+// model to draw once the cook reaches `from`. This is catalog's CookStageModel with
+// the .glb already loaded into Scene::Models(). A single-model carryable (a tool, a
+// steak) has one stage at Raw and so never changes look.
+struct CookStage {
+    std::uint32_t model = 0;
+    CookInformation::Doneness from = CookInformation::Doneness::Raw;
+};
+
 // One carryable the level placed, resolved and ready for Props to seed: its loaded
-// model, the name it reads as in the pick-up prompt, where it starts (position and
+// model(s), the name it reads as in the pick-up prompt, where it starts (position and
 // yaw), how it is held, how it lands, and -- for a food -- how it cooks. This is a
 // level's CarryablePlacement joined to its catalog type, so Props builds the starting
 // objects from these rather than a hardcoded list.
 struct CarryableSpawn {
-    std::uint32_t model = 0;
+    std::vector<CookStage> models; // at least one; the base is drawn while raw
     std::string name;
     DirectX::XMFLOAT3 pos{0.0f, 0.0f, 0.0f};
     float yaw = 0.0f;

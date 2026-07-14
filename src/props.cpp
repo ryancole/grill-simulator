@@ -116,8 +116,10 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
     // held, how it lands, and -- for a food -- how it cooks (nullopt leaves the tongs
     // inert). Placed a hair above the ground in the files so physics settles them flat.
     for (const CarryableSpawn& spawn : spawns) {
-        Add(spawn.model, pool[spawn.model], spawn.name, spawn.pos, spawn.yaw, HoldFor(spawn.hold),
-            spawn.knock_rating, spawn.impact_sound, spawn.cook);
+        // The base (raw) model cuts the physics box; the whole stage list rides along
+        // so the item can swap look as it cooks.
+        Add(spawn.models, pool[spawn.models.front().model], spawn.name, spawn.pos, spawn.yaw,
+            HoldFor(spawn.hold), spawn.knock_rating, spawn.impact_sound, spawn.cook);
     }
 }
 
@@ -174,17 +176,36 @@ XMFLOAT3 Props::ItemTint(const Item& item) {
     return item.cook ? item.cook->SurfaceTint() : kWhite;
 }
 
-void Props::Add(std::uint32_t model_id, const Model& model, std::string name, XMFLOAT3 position,
-                float yaw_degrees, FXMMATRIX held_local, float knock_rating,
+std::uint32_t Props::CurrentModel(const Item& item) {
+    // Pick the stage with the highest `from` band the cook has reached. A non-food has
+    // no cook, so it reads as Raw and shows its single base stage. The scan does not
+    // assume the stages are sorted -- it takes the greatest matching band outright --
+    // so the browning tint still layers on top of whichever model this returns.
+    const int band = static_cast<int>(item.cook ? item.cook->DonenessBand()
+                                                 : CookInformation::Doneness::Raw);
+    std::uint32_t model = item.stages.front().model;
+    int best = -1;
+    for (const CookStage& stage : item.stages) {
+        const int from = static_cast<int>(stage.from);
+        if (from <= band && from > best) {
+            best = from;
+            model = stage.model;
+        }
+    }
+    return model;
+}
+
+void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::string name,
+                XMFLOAT3 position, float yaw_degrees, FXMMATRIX held_local, float knock_rating,
                 ImpactSound impact_sound, std::optional<CookProfile> cook) {
     Item item{};
-    item.model = model_id;
+    item.stages = std::move(stages);
     item.name = std::move(name);
     XMStoreFloat4x4(&item.held_local, held_local);
     if (cook) {
         item.cook.emplace(*cook);
     }
-    DeriveBodyShape(item, model);
+    DeriveBodyShape(item, base_model);
 
     // Seed the body so the model origin lands at `position`, yawed -- the same
     // placement the old yaw-and-translate gave.
@@ -269,11 +290,11 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         if (i == carried_) {
             continue;
         }
-        world_.push_back(MakeInstance(items_[i].model, XMLoadFloat4x4(&items_[i].resting),
+        world_.push_back(MakeInstance(CurrentModel(items_[i]), XMLoadFloat4x4(&items_[i].resting),
                                       ItemTint(items_[i])));
     }
     if (carried_ >= 0) {
-        held_.push_back(MakeInstance(items_[carried_].model,
+        held_.push_back(MakeInstance(CurrentModel(items_[carried_]),
                                      XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world,
                                      ItemTint(items_[carried_])));
     }
@@ -281,7 +302,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     // it lines up exactly with the world copy above. The outline shader ignores
     // tint, so the browning does not matter here, but pass it for consistency.
     if (hovered_ >= 0) {
-        highlight_.push_back(MakeInstance(items_[hovered_].model,
+        highlight_.push_back(MakeInstance(CurrentModel(items_[hovered_]),
                                           XMLoadFloat4x4(&items_[hovered_].resting),
                                           ItemTint(items_[hovered_])));
     }

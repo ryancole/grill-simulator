@@ -94,6 +94,59 @@ std::string ModelOf(const toml::table& entry, const std::string& name,
     return model;
 }
 
+// A doneness band named by string, for a food's model stages. The names match the
+// readout labels, with underscores standing in for the spaces in the two-word bands.
+CookInformation::Doneness DonenessFromName(const std::string& name,
+                                           const std::filesystem::path& path) {
+    if (name == "raw") return CookInformation::Doneness::Raw;
+    if (name == "rare") return CookInformation::Doneness::Rare;
+    if (name == "medium_rare") return CookInformation::Doneness::MediumRare;
+    if (name == "medium") return CookInformation::Doneness::Medium;
+    if (name == "medium_well") return CookInformation::Doneness::MediumWell;
+    if (name == "well_done") return CookInformation::Doneness::WellDone;
+    if (name == "burnt") return CookInformation::Doneness::Burnt;
+    Fail(path, "unknown doneness '" + name +
+                   "' (want raw, rare, medium_rare, medium, medium_well, well_done or burnt)");
+}
+
+// The model(s) a carryable draws. Two spellings, mutually exclusive: a single
+// `model = "x.glb"` (one stage at Raw -- how every tool and every single-look food is
+// written), or a `models = [{model, from}, ...]` list for a food that changes model
+// as it cooks (chicken swaps to its cooked look at `from = "medium"`). `from` defaults
+// to raw, so the base stage can omit it.
+std::vector<CookStageModel> ModelsOf(const toml::table& entry, const std::string& name,
+                                     const std::filesystem::path& path) {
+    const bool has_single = static_cast<bool>(entry["model"]);
+    const toml::array* staged = entry["models"].as_array();
+    if (has_single && staged != nullptr) {
+        Fail(path, "'" + name + "' gives both model and models -- use one");
+    }
+    if (staged != nullptr) {
+        std::vector<CookStageModel> models;
+        for (const toml::node& node : *staged) {
+            const toml::table* stage = node.as_table();
+            if (stage == nullptr) {
+                Fail(path, "each entry of '" + name + "' models must be a table {model, from}");
+            }
+            CookStageModel model;
+            model.model = (*stage)["model"].value_or(std::string{});
+            if (model.model.empty()) {
+                Fail(path, "a models entry of '" + name + "' needs a model");
+            }
+            if (const auto from = (*stage)["from"].value<std::string>()) {
+                model.from = DonenessFromName(*from, path);
+            }
+            models.push_back(std::move(model));
+        }
+        if (models.empty()) {
+            Fail(path, "'" + name + "' models must list at least one model");
+        }
+        return models;
+    }
+    // The common case: a single required model, drawn from raw on.
+    return {CookStageModel{ModelOf(entry, name, path), CookInformation::Doneness::Raw}};
+}
+
 // Reads the cook profile from a food entry: each field over the CookProfile default, so
 // a food that names none cooks the game's original single way. The six band starts are
 // given together as [rare..burnt] so they cannot be set half-and-half.
@@ -139,7 +192,7 @@ void ReadCarryables(const toml::table& root, const char* section, bool is_food,
         const std::string name(key.str());
 
         CarryableDef def;
-        def.model = ModelOf(*entry, name, path);
+        def.models = ModelsOf(*entry, name, path);
         if (is_food) {
             def.cook = ReadCook(*entry, name, path);
         }

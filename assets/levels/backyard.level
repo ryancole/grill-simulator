@@ -76,6 +76,7 @@ carryable = [
   # settles them flat.
   {type = "tongs", pos = [1.15, 0.05, 4.45], yaw = 25.0},
   {type = "steak", pos = [-4.55, 0.80, 1.70], yaw = 18.0},
+  {type = "chicken", pos = [-4.05, 0.80, 1.70], yaw = -8.0},
   {type = "patty", pos = [-4.25, 0.80, 1.35]},
   {type = "patty", pos = [-4.80, 0.80, 1.45], yaw = -24.0},
 ]

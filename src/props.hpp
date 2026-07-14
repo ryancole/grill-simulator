@@ -79,7 +79,12 @@ private:
     // simulation (eDISABLE_SIMULATION) so it neither falls nor shoves anything
     // while it hangs in the hand.
     struct Item {
-        std::uint32_t model;
+        // The models this item draws as it cooks, resolved to loaded ids and each
+        // tagged with the doneness band it begins at. A tool or single-model food has
+        // one stage, so CurrentModel never varies; a chicken has a raw and a cooked
+        // stage, and its cook's doneness picks between them each frame. Always
+        // non-empty; the first is the base drawn while raw.
+        std::vector<CookStage> stages;
         std::string name; // As it reads in the pick-up prompt.
 
         // Box shape, in the model's own space. `half_extents` are half the box's
@@ -106,9 +111,12 @@ private:
         std::optional<CookInformation> cook;
     };
 
-    // `cook` gives the item a cooking state built from that food's profile; the tongs
-    // and any other non-food carryable pass nullopt and simply never cook.
-    void Add(std::uint32_t model_id, const Model& model, std::string name,
+    // `stages` are the item's cook-stage models (at least one); `base_model` is the
+    // model the physics box is cut from -- the base look, since the collider does not
+    // resize as the food swaps model. `cook` gives the item a cooking state built from
+    // that food's profile; the tongs and any other non-food carryable pass nullopt and
+    // simply never cook.
+    void Add(std::vector<CookStage> stages, const Model& base_model, std::string name,
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
              float knock_rating, ImpactSound impact_sound, std::optional<CookProfile> cook);
     // Fills an item's box shape (half_extents, com_offset) from the union of its
@@ -125,6 +133,10 @@ private:
     // The colour to draw an item under: a cooking meat browns with its doneness,
     // everything else stays white (its model's own colours, unchanged).
     static DirectX::XMFLOAT3 ItemTint(const Item& item);
+    // The model to draw this frame: the cook stage with the highest `from` band the
+    // item has reached (the base while raw, or for a non-food that never cooks). So a
+    // chicken shows its raw model until it hits medium, then its cooked one.
+    static std::uint32_t CurrentModel(const Item& item);
     // The item the player is looking at within reach, or -1. A sphere swept down
     // the gaze picks the nearest prop it meets; the query is filtered to prop
     // bodies, so the static world and the player's own capsule are ignored.
