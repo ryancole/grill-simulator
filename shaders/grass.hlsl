@@ -25,9 +25,9 @@
 #define BLADE_SEGMENTS 4
 #define VERTS_PER_BLADE (2 * (BLADE_SEGMENTS + 1)) // a left/right pair per ring
 #define PRIMS_PER_BLADE (2 * BLADE_SEGMENTS)       // two triangles per quad
-#define BLADES_PER_GROUP 16
-#define GROUP_VERTS (BLADES_PER_GROUP * VERTS_PER_BLADE) // 160
-#define GROUP_PRIMS (BLADES_PER_GROUP * PRIMS_PER_BLADE) // 128
+#define BLADES_PER_GROUP 24
+#define GROUP_VERTS (BLADES_PER_GROUP * VERTS_PER_BLADE) // 240
+#define GROUP_PRIMS (BLADES_PER_GROUP * PRIMS_PER_BLADE) // 192
 
 // One amplification group tests this many cells -- one thread each -- and launches a
 // mesh group for each that survives the cull. Must match kGrassAsGroup in renderer.cpp,
@@ -283,23 +283,35 @@ void MSMain(uint gtid : SV_GroupThreadID, uint3 gid : SV_GroupID, in payload Pay
     // cells that only partly overlap one.
     const bool blocked = PointBlocked(pos2);
 
-    // Per-blade variation, so the sward is not a lawn of clones.
-    const float height = g_blade_height * (0.7f + 0.6f * r2);
-    const float width = g_blade_width * (0.75f + 0.5f * r3);
+    // Low-frequency clumping: grass grows in lusher tufts and thinner patches, not an
+    // even carpet, so height and colour drift over a slow noise across the yard. This is
+    // most of what turns a field of identical spikes into something that reads as a lawn.
+    const float clump = SkyValueNoise(pos2 * 0.6f);
+
+    // Per-blade variation, folded with the clump, so no two blades match and the tufts
+    // stand taller than the gaps between them.
+    const float height = g_blade_height * (0.55f + 0.7f * r2) * (0.7f + 0.6f * clump);
+    const float width = g_blade_width * (0.8f + 0.5f * r3);
     const float yaw = r4 * (2.0f * kPi);
     const float2 wdir = float2(cos(yaw), sin(yaw)); // the width axis, in the ground plane
     const float3 w = float3(wdir.x, 0.0f, wdir.y);
-    // The blade leans along the axis across its width; a static lean plus the wind.
-    const float2 lean_axis = float2(-wdir.y, wdir.x);
-    const float static_lean = 0.12f * height * (r5 * 2.0f - 1.0f);
-    // A travelling sine over the field gives gusts that roll across the yard rather
-    // than every blade waving in lockstep.
+    // The blade arcs over -- a strong per-blade droop plus the wind -- so the field reads
+    // as a curved canopy that overlaps and hides the ground, rather than a bed of vertical
+    // spikes. The droop is quadratic up the blade (applied as t*t below), so the base
+    // stays planted and only the upper half curls.
+    const float2 lean_dir = float2(-wdir.y, wdir.x);
+    const float droop = (0.35f + 0.3f * r5) * height;
+    // A travelling sine over the field gives gusts that roll across the yard rather than
+    // every blade waving in lockstep.
     const float phase = r6 * (2.0f * kPi) + dot(pos2, float2(0.6f, 0.4f));
     const float sway = sin(g_grass_time * 1.7f + phase);
-    const float2 lean = lean_axis * static_lean + g_wind * (0.18f + 0.12f * sway);
+    const float2 lean = lean_dir * droop + g_wind * (0.2f + 0.14f * sway);
     const float3 bend = float3(lean.x, 0.0f, lean.y);
 
-    const float3 tint = g_blade_color * (0.72f + 0.5f * r0);
+    // Per-blade colour: a value jitter, warmer/drier in the sparse patches and greener in
+    // the lush clumps, so the field is never one flat green.
+    const float3 tint = g_blade_color * (0.7f + 0.5f * r0) *
+                        lerp(float3(1.08f, 0.98f, 0.72f), float3(0.9f, 1.05f, 0.88f), clump);
     const float3 to_cam = g_grass_camera - base;
 
     const uint v_base = blade * VERTS_PER_BLADE;
@@ -376,16 +388,30 @@ float GrassSunVisibility(float3 world, float3 normal) {
 
 float4 PSMain(MSOut input) : SV_TARGET {
     const float3 normal = normalize(input.normal);
-    const float3 albedo = SrgbToLinear(input.tint);
+    const float3 sun_color = SrgbToLinear(g_sun_color) * g_sun_intensity;
 
-    // Direct sun, Lambert only -- a blade is matte, and a specular lobe on grass reads
-    // as wet plastic -- gated by the shadow map so blades shade each other and the
-    // grill and fence throw shade across the field. The 1/pi matches the scene's
-    // diffuse normalisation so the brightness lines up with the ground beneath.
+    // Root-to-tip gradient: darker at the base, where light is buried in the sward, and
+    // brightening toward the tip. Gives each blade depth instead of one flat fill and is
+    // a big part of the field reading as volume rather than paint.
+    const float3 tint = SrgbToLinear(input.tint);
+    const float3 albedo = tint * lerp(0.5f, 1.2f, input.height_t);
+
+    // Direct sun, Lambert only -- a blade is matte, and a specular lobe on grass reads as
+    // wet plastic -- gated by the shadow map so blades shade each other and the grill and
+    // fence throw shade across the field. The 1/pi matches the scene's diffuse
+    // normalisation so the brightness lines up with the ground beneath.
     const float n_dot_l = saturate(dot(normal, g_grass_sun));
     const float shadow = GrassSunVisibility(input.world, normal);
-    const float3 sun =
-        SrgbToLinear(g_sun_color) * g_sun_intensity * n_dot_l * shadow * (1.0f / kPi);
+    const float3 sun = sun_color * n_dot_l * shadow * (1.0f / kPi);
+
+    // Translucency: sunlight passing through the thin blade toward the eye -- strongest
+    // when looking into the sun and toward the tip, where the blade is thinnest. This
+    // soft green glow is what makes a lawn read as lit from within rather than flat, and
+    // it is gated by the same shadow so a blade in shade does not glow.
+    const float3 view = normalize(g_grass_camera - input.world);
+    const float backlight = pow(saturate(dot(view, -g_grass_sun)), 3.0f);
+    const float3 transmission =
+        tint * sun_color * shadow * backlight * (0.35f + 0.65f * input.height_t) * 0.7f;
 
     // Hemisphere ambient: sky tone from above, ground bounce from below, the same pair
     // the scene's ambient uses.
@@ -394,9 +420,9 @@ float4 PSMain(MSOut input) : SV_TARGET {
                            g_ambient_strength;
     // Darken toward the root, where light is buried in the sward, and let the tip catch
     // the most -- the cheap fake of grass self-occlusion.
-    const float ao = lerp(0.45f, 1.0f, input.height_t);
+    const float ao = lerp(0.4f, 1.0f, input.height_t);
 
-    float3 color = albedo * (sun + ambient * ao);
+    float3 color = albedo * (sun + ambient * ao) + transmission;
 
     // Dissolve into the very sky drawn behind, exactly as the scene fog does, so the
     // far edge of the field melts into the horizon instead of ending on a hard line.

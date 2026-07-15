@@ -211,8 +211,9 @@ static_assert(kGrassConstantDwords + 5 <= 64, "A root signature holds at most 64
 
 // The world size of one grass cell -- one mesh-shader group's patch of ground. A
 // group grows up to BLADES_PER_GROUP blades (see grass.hlsl), so this sets the peak
-// density: a 0.5 m cell with 16 blades is 64 blades per square metre up close.
-constexpr float kGrassCellSize = 0.5f;
+// density: a 0.28 m cell with 24 blades is about 300 blades per square metre up close,
+// dense enough that the overlapping blades read as a full sward rather than spikes.
+constexpr float kGrassCellSize = 0.28f;
 // How many cells one amplification group culls, one thread each. Must match AS_GROUP
 // in grass.hlsl, which sizes the payload the group hands to its mesh groups.
 constexpr UINT kGrassAsGroup = 32;
