@@ -122,7 +122,7 @@ stage_assets(grill DIRECTORY assets/audio
 # The levels are text, parsed at runtime (see src/level.cpp), so editing one and
 # re-staging needs no recompile -- only the copy next to the executable.
 stage_assets(grill DIRECTORY assets/levels
-  FILES backyard.toml rooftop.toml)
+  FILES backyard.toml)
 
 # The control bindings and the object catalog, likewise text parsed at runtime (see
 # src/actions.cpp, src/catalog.cpp): editing one is a text edit and a re-stage, no

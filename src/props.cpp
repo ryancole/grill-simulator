@@ -519,6 +519,20 @@ std::vector<std::string> Props::MeatDebugLines() const {
     return lines;
 }
 
+std::vector<Props::MeatStatus> Props::MeatStatuses() const {
+    std::vector<MeatStatus> statuses;
+    for (const Item& item : items_) {
+        // Only the food cooks; the tongs and any other non-food carryable carry no
+        // CookInformation, so they are not meats and belong on no meats panel.
+        if (!item.cook) {
+            continue;
+        }
+        statuses.push_back(
+            MeatStatus{item.name, static_cast<int>(item.cook->DonenessBand()), item.served});
+    }
+    return statuses;
+}
+
 std::optional<Props::MeatReadout> Props::ActiveMeat() const {
     // Prefer a meat clamped in the tongs, then the carried item, then the one merely
     // looked at while empty-handed -- so a steak carried in the jaws (the tongs

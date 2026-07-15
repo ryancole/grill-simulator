@@ -2334,7 +2334,8 @@ void Renderer::DrawSolidRun(UINT first, UINT count, XMFLOAT4 color) {
 }
 
 void Renderer::DrawHud(std::string_view prompt, std::span<const std::string> debug_lines,
-                       std::span<const OrderCard> orders, float seconds, int rejected_order) {
+                       std::span<const OrderCard> orders, float seconds, int rejected_order,
+                       std::span<const MeatCard> meats) {
     if (width_ == 0 || height_ == 0) {
         return;
     }
@@ -2357,13 +2358,19 @@ void Renderer::DrawHud(std::string_view prompt, std::span<const std::string> deb
         runs.push_back({first, cursor - first, XMFLOAT4{1.0f, 1.0f, 1.0f, 1.0f}, false, HudFace()});
     }
 
-    // The debug overlay: white monospace lines marching down from the top-left
-    // corner, backed by a translucent black panel so they read over any background.
+    // The debug overlay: white monospace lines in the bottom-left corner, backed by a
+    // translucent black panel so they read over any background. Anchored to the bottom so
+    // it clears the top-left meats panel: the block stacks downward from first_baseline as
+    // before, but first_baseline is placed so the last line lands a small inset above the
+    // bottom edge -- the vertical mirror of the top inset it used to sit at.
     const FontFace mono = MonoFace();
     const float debug_pixel = static_cast<float>(height_) * kDebugTextHeightFraction;
     const float left = debug_pixel * 0.6f;      // A small inset from the left edge.
-    const float first_baseline = debug_pixel * 1.6f; // First line's baseline.
     const float line_pitch = debug_pixel * kDebugTextLineFactor;
+    const float last_baseline = static_cast<float>(height_) - debug_pixel * 1.6f;
+    const float first_baseline =
+        last_baseline -
+        (debug_lines.empty() ? 0.0f : static_cast<float>(debug_lines.size() - 1)) * line_pitch;
 
     if (!debug_lines.empty()) {
         // Size the panel to the widest line, padded, and to the run of baselines --
@@ -2381,8 +2388,6 @@ void Renderer::DrawHud(std::string_view prompt, std::span<const std::string> deb
         for (const std::string& line : debug_lines) {
             widest = std::max(widest, line_width(line, debug_pixel));
         }
-        const float last_baseline =
-            first_baseline + static_cast<float>(debug_lines.size() - 1) * line_pitch;
         const float pad_x = debug_pixel * 0.5f;
         const float pad_y = debug_pixel * 0.35f;
         const float x0 = left - pad_x;
@@ -2404,9 +2409,11 @@ void Renderer::DrawHud(std::string_view prompt, std::span<const std::string> deb
         baseline += line_pitch;
     }
 
-    // The polished, non-debug half: the order rail down the top-right corner, packed
-    // into the same buffer so it draws in the same batch as the prompt and overlay.
+    // The polished, non-debug half: the order rail down the top-right corner and the
+    // meats rail down the top-left, both packed into the same buffer so they draw in the
+    // same batch as the prompt and overlay.
     DrawObjectivesRail(orders, seconds, rejected_order, runs, cursor);
+    DrawMeatRail(meats, runs, cursor);
 
     if (cursor == 0) {
         return;
@@ -2708,6 +2715,130 @@ void Renderer::DrawObjectivesRail(std::span<const OrderCard> orders, float secon
             const UINT first = cursor;
             cursor = LayoutLine(face, order.band, caption_baseline, caption_pixel, cursor,
                                 cx0 + pad);
+            runs.push_back({first, cursor - first, fade(caption_color, alpha), false, face});
+        }
+
+        top += card_h + card_gap;
+    }
+}
+
+void Renderer::DrawMeatRail(std::span<const MeatCard> meats, std::vector<HudRun>& runs,
+                            UINT& cursor) {
+    if (meats.empty()) {
+        return;
+    }
+
+    const float h = static_cast<float>(height_);
+
+    // Share the objective rail's metrics so the two rails read as one UI, mirrored to
+    // the left. The name is the loud line; the doneness caption below is quieter.
+    const FontFace face = HudFace();
+    const float name_pixel = h * 0.024f;
+    const float caption_pixel = h * 0.016f;
+    const float pad = name_pixel * 0.6f;      // Inner padding on all four sides.
+    const float card_w = h * 0.28f;           // Uniform card width.
+    const float gauge_h = name_pixel * 0.42f; // The doneness bar's thickness.
+    const float row_gap = name_pixel * 0.55f; // Vertical gap between a card's rows.
+    const float card_gap = name_pixel * 0.6f; // Gap between stacked cards.
+
+    // Left-anchored, inset from the left edge by the same margin the order rail sits
+    // in from the right and both sit below the top.
+    const float margin = h * 0.04f;
+    const float card_h = pad + name_pixel + row_gap + gauge_h + row_gap + caption_pixel + pad;
+    const float x0 = margin;
+    const float x1 = x0 + card_w;
+
+    // The same warm palette as the order rail: amber for a cooking meat, a calm green
+    // once it has been served, and a dim wash for the unreached part of the gauge.
+    const XMFLOAT4 panel_color{0.04f, 0.03f, 0.02f, 0.62f};
+    const XMFLOAT4 name_color{1.0f, 0.82f, 0.48f, 1.0f};
+    const XMFLOAT4 served_color{0.55f, 0.85f, 0.45f, 1.0f};
+    const XMFLOAT4 caption_color{0.72f, 0.72f, 0.75f, 0.9f};
+    const XMFLOAT4 gauge_on{1.0f, 0.70f, 0.30f, 0.95f};
+    const XMFLOAT4 gauge_off{1.0f, 1.0f, 1.0f, 0.12f};
+
+    auto fade = [](XMFLOAT4 c, float a) {
+        c.w *= a;
+        return c;
+    };
+
+    // A header over the stack, the left twin of the ORDERS header on the right.
+    {
+        const float header_pixel = h * 0.020f;
+        const float header_baseline = margin - header_pixel * 0.4f;
+        const UINT first = cursor;
+        cursor = LayoutLine(face, "MEATS", header_baseline, header_pixel, cursor, x0);
+        runs.push_back({first, cursor - first, name_color, false, face});
+    }
+
+    float top = margin;
+    for (const MeatCard& meat : meats) {
+        // A served meat has done its job; fade the whole card back so the eye stays on
+        // the ones still cooking.
+        const float alpha = meat.served ? 0.5f : 1.0f;
+
+        // The card's translucent backing, packed first so its glyphs and bar sit over it.
+        {
+            const UINT first = cursor;
+            cursor = LayoutSolidQuad(x0, top, x1, top + card_h, cursor);
+            runs.push_back({first, cursor - first, fade(panel_color, alpha), true, face});
+        }
+
+        // Row 1 -- the meat's name on the left, and once handed off a small green
+        // "SERVED" tag on the right where an order card would show its pips.
+        const float name_baseline = top + pad + name_pixel;
+        {
+            const UINT first = cursor;
+            cursor = LayoutLine(face, meat.name, name_baseline, name_pixel, cursor, x0 + pad);
+            runs.push_back({first, cursor - first,
+                            fade(meat.served ? served_color : name_color, alpha), false, face});
+        }
+        if (meat.served) {
+            const std::string_view tag = "SERVED";
+            const float tag_w = TextWidth(face, tag, caption_pixel);
+            const UINT first = cursor;
+            cursor = LayoutLine(face, tag, name_baseline - name_pixel * 0.12f, caption_pixel,
+                                cursor, x1 - pad - tag_w);
+            runs.push_back({first, cursor - first, fade(served_color, alpha), false, face});
+        }
+
+        // Row 2 -- the doneness gauge: one segment per band, filled through the meat's
+        // current band so its cook reads as a level rising across the bar, with a bright
+        // tick over the current band echoing the order gauge's playhead.
+        const float gauge_top = name_baseline + row_gap;
+        {
+            const int bands = std::max(meat.band_count, 1);
+            const int band = std::clamp(meat.band_index, 0, bands - 1);
+            const float seg_gap = card_w * 0.008f;
+            const float inner = card_w - 2.0f * pad;
+            const float seg_w =
+                (inner - static_cast<float>(bands - 1) * seg_gap) / static_cast<float>(bands);
+            float sx = x0 + pad;
+            for (int i = 0; i < bands; ++i) {
+                const bool lit = i <= band;
+                const UINT first = cursor;
+                cursor = LayoutSolidQuad(sx, gauge_top, sx + seg_w, gauge_top + gauge_h, cursor);
+                runs.push_back(
+                    {first, cursor - first, fade(lit ? gauge_on : gauge_off, alpha), true, face});
+                sx += seg_w + seg_gap;
+            }
+            const float cx =
+                x0 + pad + static_cast<float>(band) * (seg_w + seg_gap) + seg_w * 0.5f;
+            const float half = std::max(card_w * 0.006f, 1.5f);
+            const float over = gauge_h * 0.6f;
+            const XMFLOAT4 marker_color{1.0f, 0.97f, 0.9f, 0.95f};
+            const UINT first = cursor;
+            cursor = LayoutSolidQuad(cx - half, gauge_top - over, cx + half,
+                                     gauge_top + gauge_h + over, cursor);
+            runs.push_back({first, cursor - first, fade(marker_color, alpha), true, face});
+        }
+
+        // Row 3 -- the current doneness in words, quiet and small beneath the bar.
+        const float caption_baseline = gauge_top + gauge_h + row_gap + caption_pixel;
+        if (!meat.band.empty()) {
+            const UINT first = cursor;
+            cursor =
+                LayoutLine(face, meat.band, caption_baseline, caption_pixel, cursor, x0 + pad);
             runs.push_back({first, cursor - first, fade(caption_color, alpha), false, face});
         }
 
@@ -3036,7 +3167,8 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const MeshInstance> held_props, const XMMATRIX& view_projection,
                       XMFLOAT3 camera_position, std::string_view hud_prompt,
                       std::span<const std::string> debug_lines,
-                      std::span<const OrderCard> orders, int rejected_order) {
+                      std::span<const OrderCard> orders, int rejected_order,
+                      std::span<const MeatCard> meats) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
@@ -3232,7 +3364,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // per-level texture heap, so bind that back before drawing.
     ID3D12DescriptorHeap* text_heaps[] = {texture_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(text_heaps), text_heaps);
-    DrawHud(hud_prompt, debug_lines, orders, seconds, rejected_order);
+    DrawHud(hud_prompt, debug_lines, orders, seconds, rejected_order, meats);
 
     // The frame is complete; hand the swapchain buffer back for presentation.
     TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),

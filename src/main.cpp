@@ -219,7 +219,7 @@ int Run(HINSTANCE instance, int show_command) {
     AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
 
     HWND hwnd = CreateWindowExW(0, kWindowClass,
-                                L"Grill Simulator - WASD walk, E grab, 1/2 levels, R reload",
+                                L"Grill Simulator - WASD walk, E grab, R reload",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                 bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr,
                                 nullptr, instance, &game);
@@ -231,15 +231,15 @@ int Run(HINSTANCE instance, int show_command) {
     // The device and pipelines first -- the session's, independent of any level.
     game.renderer.Initialize(hwnd, kDefaultWidth, kDefaultHeight);
 
-    // The levels the player switches between, as the .toml files staged under
-    // assets/levels, in the order the number keys select them. Loading is by file so
-    // a level is a text edit, not a rebuild.
-    const std::array<const char*, 2> level_files = {"backyard.toml", "rooftop.toml"};
+    // The levels the player can load, as the .toml files staged under assets/levels, in
+    // the order the number keys select them. Loading is by file so a level is a text
+    // edit, not a rebuild. An array of one for now; add a file and a name to grow it.
+    const std::array<const char*, 1> level_files = {"backyard.toml"};
     // The names the menu shows for each level, parallel to level_files.
-    const std::array<const char*, 2> level_names = {"Backyard", "Rooftop"};
+    const std::array<const char*, 1> level_names = {"Backyard"};
     const std::filesystem::path levels_dir = ExecutableDirectory() / "assets" / "levels";
     int current_level = 0;
-    // Whether the top-left debug overlay is drawn. Toggled by the ToggleDebug action
+    // Whether the bottom-left debug overlay is drawn. Toggled by the ToggleDebug action
     // (backtick); starts hidden, so the polished HUD is what shows by default.
     bool show_debug = false;
 
@@ -504,14 +504,12 @@ int Run(HINSTANCE instance, int show_command) {
             continue;
         }
 
-        // The level controls are all edge-triggered so a held key fires once: 1 and 2
-        // switch to the backyard and the rooftop, R reloads whatever is current
-        // (restoring a level knocked about in play). Read every frame so each stays
-        // current, then act on at most one. Swapping here, before anything reads the
-        // world this frame, means the step and draw below run entirely on the freshly
-        // loaded level.
+        // The level controls are edge-triggered so a held key fires once: 1 selects the
+        // backyard, R reloads whatever is current (restoring a level knocked about in
+        // play). Read every frame so each stays current, then act on at most one. Swapping
+        // here, before anything reads the world this frame, means the step and draw below
+        // run entirely on the freshly loaded level.
         const bool pick_backyard = game.actions.WasPressed(Action::SelectLevel1);
-        const bool pick_rooftop = game.actions.WasPressed(Action::SelectLevel2);
         const bool reload = game.actions.WasPressed(Action::ReloadLevel);
         // Backtick flips the debug overlay on the rising edge, so a single tap toggles.
         if (game.actions.WasPressed(Action::ToggleDebug)) {
@@ -519,8 +517,6 @@ int Run(HINSTANCE instance, int show_command) {
         }
         if (pick_backyard) {
             load_level(0);
-        } else if (pick_rooftop) {
-            load_level(1);
         } else if (reload) {
             load_level(current_level);
         }
@@ -561,7 +557,7 @@ int Run(HINSTANCE instance, int show_command) {
         const Objectives& objectives = game.world->objectives();
         const std::span<const FoodGoal> goals = objectives.Goals();
 
-        // The debug overlay, anchored top-left and toggled by backtick (ToggleDebug):
+        // The debug overlay, anchored bottom-left and toggled by backtick (ToggleDebug):
         // every meat's doneness, then each heat source's emitting temperature, then the
         // raw order ticket -- each goal, how many are filled, and its accepted band range
         // -- and a completion line once they are all met (the win condition, legible
@@ -625,11 +621,28 @@ int Run(HINSTANCE instance, int show_command) {
                 static_cast<int>(goal.min), static_cast<int>(goal.max), band_count, marker});
         }
 
+        // The polished, always-on meats panel on the top-left: one card per cooking meat
+        // in the yard, showing its doneness -- the player-facing twin of the debug
+        // overlay's meat lines. The renderer draws a gauge from the band index, so here we
+        // only shape the loud uppercased name and the quiet band caption. Built fresh each
+        // frame; it is a handful of meats.
+        const int meat_band_count = static_cast<int>(CookInformation::Doneness::Burnt) + 1;
+        std::vector<Renderer::MeatCard> meat_cards;
+        for (const Props::MeatStatus& meat : props.MeatStatuses()) {
+            std::string name = meat.name;
+            for (char& c : name) {
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            }
+            std::string band(DonenessName(static_cast<CookInformation::Doneness>(meat.band)));
+            meat_cards.push_back(Renderer::MeatCard{std::move(name), std::move(band), meat.band,
+                                                    meat_band_count, meat.served});
+        }
+
         game.renderer.Render(game.world->scene(), props.WorldInstances(),
                              props.HighlightInstances(),
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
                              view_projection, game.camera.Position(), props.PromptText(),
-                             debug_lines, order_cards, rejected_order);
+                             debug_lines, order_cards, rejected_order, meat_cards);
     }
 
     game.renderer.Shutdown();

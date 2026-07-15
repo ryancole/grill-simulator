@@ -35,7 +35,6 @@ primary_action = "Mouse1"
 # Developer shortcuts.
 reload_level   = "R"
 select_level_1 = "1"
-select_level_2 = "2"
 toggle_debug   = "Backtick"
 
 # Menu navigation (the launch screen, and later the pause menu). Bound to both the

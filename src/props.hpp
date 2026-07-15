@@ -96,6 +96,19 @@ public:
     // carried. Empty on a level that placed no food.
     std::vector<std::string> MeatDebugLines() const;
 
+    // One entry per meat in the yard for the on-screen "meats" panel -- the polished,
+    // always-on twin of MeatDebugLines. `name` is the food's type (the string
+    // Objectives keys on, uppercased for display by the caller), `band` its current
+    // doneness band index, and `served` whether it has already been handed off. A meat
+    // is any item carrying cooking state; non-food carryables are skipped. Empty on a
+    // level that placed no food.
+    struct MeatStatus {
+        std::string name;
+        int band = 0;
+        bool served = false;
+    };
+    std::vector<MeatStatus> MeatStatuses() const;
+
 private:
     // One loose object, modelled as a single oriented box (an approximation --
     // the meshes are not perfectly boxy, but these things are small).
