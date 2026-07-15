@@ -584,29 +584,14 @@ int Run(HINSTANCE instance, int show_command) {
             }
         }
 
-        // The same order ticket, presented for the player rather than the debugger:
-        // one card per goal on the top-right rail. The renderer draws pips and a
-        // doneness gauge from these fields, so here we only shape the two strings --
-        // a loud uppercased name and a quiet band caption -- and hand across the raw
-        // counts and band indices. Built fresh each frame; it is a handful of goals.
-        const int band_count = static_cast<int>(CookInformation::Doneness::Burnt) + 1;
-        // The meat the player is acting on, so its live doneness can be marked on the
-        // matching order's gauge -- matched on the raw type below, before the name is
-        // uppercased for display.
-        const std::optional<Props::MeatReadout> active_meat = props.ActiveMeat();
-        // A serve refused this frame shakes its order's card: resolve the rejected type to
-        // the first card of that type. -1 when no serve bounced.
-        const std::optional<std::string> rejected_type = props.RejectedServeType();
-        int rejected_order = -1;
+        // The same order ticket, presented for the player rather than the debugger: one
+        // bulleted line per goal on the top-right list. Just the standing orders -- no
+        // progress or pass/fail -- so here we only shape the loud uppercased name and the
+        // quiet doneness caption, and hand across the wanted count. Built fresh each frame;
+        // it is a handful of goals.
         std::vector<Renderer::OrderCard> order_cards;
         order_cards.reserve(goals.size());
-        for (std::size_t i = 0; i < goals.size(); ++i) {
-            const FoodGoal& goal = goals[i];
-            if (rejected_order < 0 && rejected_type && *rejected_type == goal.type) {
-                rejected_order = static_cast<int>(i);
-            }
-            const int marker =
-                (active_meat && active_meat->type == goal.type) ? active_meat->band : -1;
+        for (const FoodGoal& goal : goals) {
             std::string name = goal.type;
             for (char& c : name) {
                 c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -616,16 +601,14 @@ int Run(HINSTANCE instance, int show_command) {
                 band += " to ";
                 band += DonenessName(goal.max);
             }
-            order_cards.push_back(Renderer::OrderCard{
-                std::move(name), std::move(band), objectives.Filled(i), goal.count,
-                static_cast<int>(goal.min), static_cast<int>(goal.max), band_count, marker});
+            order_cards.push_back(Renderer::OrderCard{std::move(name), std::move(band), goal.count});
         }
 
         // The polished, always-on meats panel on the top-left: one card per cooking meat
-        // in the yard, showing its doneness -- the player-facing twin of the debug
-        // overlay's meat lines. The renderer draws a gauge from the band index, so here we
-        // only shape the loud uppercased name and the quiet band caption. Built fresh each
-        // frame; it is a handful of meats.
+        // in the yard, showing its doneness and live temperature -- the player-facing twin
+        // of the debug overlay's meat lines. The renderer draws a gauge from the band
+        // index, so here we only shape the loud uppercased name, the quiet band caption and
+        // the temperature string. Built fresh each frame; it is a handful of meats.
         const int meat_band_count = static_cast<int>(CookInformation::Doneness::Burnt) + 1;
         std::vector<Renderer::MeatCard> meat_cards;
         for (const Props::MeatStatus& meat : props.MeatStatuses()) {
@@ -634,15 +617,17 @@ int Run(HINSTANCE instance, int show_command) {
                 c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
             }
             std::string band(DonenessName(static_cast<CookInformation::Doneness>(meat.band)));
-            meat_cards.push_back(Renderer::MeatCard{std::move(name), std::move(band), meat.band,
-                                                    meat_band_count, meat.served});
+            std::string temp = std::to_string(meat.temp_f) + "F";
+            meat_cards.push_back(Renderer::MeatCard{std::move(name), std::move(band),
+                                                    std::move(temp), meat.band, meat_band_count,
+                                                    meat.served});
         }
 
         game.renderer.Render(game.world->scene(), props.WorldInstances(),
                              props.HighlightInstances(),
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
                              view_projection, game.camera.Position(), props.PromptText(),
-                             debug_lines, order_cards, rejected_order, meat_cards);
+                             debug_lines, order_cards, meat_cards);
     }
 
     game.renderer.Shutdown();

@@ -2294,34 +2294,6 @@ UINT Renderer::LayoutSolidQuad(float x0, float y0, float x1, float y1, UINT firs
     return count;
 }
 
-UINT Renderer::LayoutSolidQuadPts(XMFLOAT2 a, XMFLOAT2 b, XMFLOAT2 c, XMFLOAT2 d, UINT first) {
-    if (first + kTextVerticesPerGlyph > kTextRegionVertices) {
-        return first;
-    }
-
-    auto to_ndc = [this](XMFLOAT2 p) {
-        return XMFLOAT2{p.x / static_cast<float>(width_) * 2.0f - 1.0f,
-                        1.0f - p.y / static_cast<float>(height_) * 2.0f};
-    };
-
-    auto* vertices = reinterpret_cast<TextVertex*>(text_vertex_mapped_ +
-                                                   static_cast<size_t>(frame_index_) *
-                                                       kTextRegionBytes);
-    const TextVertex va{to_ndc(a), {0.0f, 0.0f}};
-    const TextVertex vb{to_ndc(b), {0.0f, 0.0f}};
-    const TextVertex vc{to_ndc(c), {0.0f, 0.0f}};
-    const TextVertex vd{to_ndc(d), {0.0f, 0.0f}};
-
-    UINT count = first;
-    vertices[count++] = va;
-    vertices[count++] = vb;
-    vertices[count++] = vc;
-    vertices[count++] = va;
-    vertices[count++] = vc;
-    vertices[count++] = vd;
-    return count;
-}
-
 void Renderer::DrawSolidRun(UINT first, UINT count, XMFLOAT4 color) {
     if (count == 0) {
         return;
@@ -2334,8 +2306,7 @@ void Renderer::DrawSolidRun(UINT first, UINT count, XMFLOAT4 color) {
 }
 
 void Renderer::DrawHud(std::string_view prompt, std::span<const std::string> debug_lines,
-                       std::span<const OrderCard> orders, float seconds, int rejected_order,
-                       std::span<const MeatCard> meats) {
+                       std::span<const OrderCard> orders, std::span<const MeatCard> meats) {
     if (width_ == 0 || height_ == 0) {
         return;
     }
@@ -2409,10 +2380,10 @@ void Renderer::DrawHud(std::string_view prompt, std::span<const std::string> deb
         baseline += line_pitch;
     }
 
-    // The polished, non-debug half: the order rail down the top-right corner and the
+    // The polished, non-debug half: the orders list down the top-right corner and the
     // meats rail down the top-left, both packed into the same buffer so they draw in the
     // same batch as the prompt and overlay.
-    DrawObjectivesRail(orders, seconds, rejected_order, runs, cursor);
+    DrawObjectivesRail(orders, runs, cursor);
     DrawMeatRail(meats, runs, cursor);
 
     if (cursor == 0) {
@@ -2439,286 +2410,106 @@ float Renderer::TextWidth(const FontFace& face, std::string_view text, float pix
     return w;
 }
 
-void Renderer::DrawObjectivesRail(std::span<const OrderCard> orders, float seconds,
-                                  int rejected_order, std::vector<HudRun>& runs, UINT& cursor) {
+void Renderer::DrawObjectivesRail(std::span<const OrderCard> orders, std::vector<HudRun>& runs,
+                                  UINT& cursor) {
     if (orders.empty()) {
         return;
-    }
-
-    // The animation state is index-parallel to the orders and outlives the frame. When
-    // the order set changes -- a new level, or a reload -- rebuild it and restamp the
-    // intro clock so the cards slide in afresh; seeding last_filled to the current count
-    // keeps a mid-play reload from mistaking the reset for a fresh serve.
-    std::string signature;
-    for (const OrderCard& order : orders) {
-        signature += order.name;
-        signature += '/';
-        signature += std::to_string(order.count);
-        signature += ';';
-    }
-    if (signature != rail_signature_ || rail_anim_.size() != orders.size()) {
-        rail_signature_ = signature;
-        rail_intro_ = seconds;
-        rail_anim_.assign(orders.size(), RailAnim{});
-        for (std::size_t i = 0; i < orders.size(); ++i) {
-            rail_anim_[i].last_filled = orders[i].filled;
-        }
     }
 
     const float h = static_cast<float>(height_);
     const float w = static_cast<float>(width_);
 
-    // Every metric is a fraction of the back-buffer height, so the rail keeps its
-    // proportions across resolutions, exactly as the menu and prompt do. The name is
-    // the loud line; the caption below it is quieter and smaller.
+    // A plain bulleted list of what to cook -- no progress, no doneness gauge, no
+    // success/failure: just the standing orders. Right-anchored in the top-right corner
+    // to mirror the meats panel on the left. Every metric is a fraction of the back-buffer
+    // height so the list keeps its proportions across resolutions.
     const FontFace face = HudFace();
-    const float name_pixel = h * 0.024f;
-    const float caption_pixel = h * 0.016f;
-    const float pad = name_pixel * 0.6f;         // Inner padding on all four sides.
-    const float card_w = h * 0.28f;              // Uniform ticket width.
-    const float gauge_h = name_pixel * 0.42f;    // The doneness bar's thickness.
-    const float pip = name_pixel * 0.5f;         // A progress pip's side.
-    const float row_gap = name_pixel * 0.55f;    // Vertical gap between a card's rows.
-    const float card_gap = name_pixel * 0.6f;    // Gap between stacked cards.
-
-    // A card is name row + gauge + caption, plus padding above and below; the whole
-    // stack is right-anchored, inset from the right edge by the same margin it sits
-    // below the top edge.
+    const float text_pixel = h * 0.019f;
+    const float line_pitch = text_pixel * 1.75f; // Baseline-to-baseline within the list.
+    const float pad = text_pixel * 0.9f;         // Inner padding of the panel.
+    const float bullet = text_pixel * 0.24f;     // The bullet dot's side.
+    const float bullet_gap = text_pixel * 0.7f;  // Dot-to-text gap.
+    const float col_gap = text_pixel * 0.8f;     // Name-to-doneness gap on a line.
     const float margin = h * 0.04f;
-    const float card_h = pad + name_pixel + row_gap + gauge_h + row_gap + caption_pixel + pad;
-    const float x1 = w - margin;
-    const float x0 = x1 - card_w;
 
-    // The warm palette the menu already established, so the rail reads as the same
-    // game's UI: amber for live orders, a calm green once an order is filled, and a
-    // dim wash for the parts of the doneness bar outside the accepted window.
+    // The warm palette the menu and meats panel already use: amber names and bullets, a
+    // quiet grey for the doneness, over a translucent panel.
     const XMFLOAT4 panel_color{0.04f, 0.03f, 0.02f, 0.62f};
     const XMFLOAT4 name_color{1.0f, 0.82f, 0.48f, 1.0f};
-    const XMFLOAT4 done_color{0.55f, 0.85f, 0.45f, 1.0f};
-    const XMFLOAT4 caption_color{0.72f, 0.72f, 0.75f, 0.9f};
-    const XMFLOAT4 gauge_on{1.0f, 0.70f, 0.30f, 0.95f};
-    const XMFLOAT4 gauge_on_done{0.55f, 0.85f, 0.45f, 0.95f};
-    const XMFLOAT4 gauge_off{1.0f, 1.0f, 1.0f, 0.12f};
-    const XMFLOAT4 pip_off{1.0f, 1.0f, 1.0f, 0.14f};
+    const XMFLOAT4 band_color{0.72f, 0.72f, 0.75f, 0.95f};
+    const XMFLOAT4 bullet_color{1.0f, 0.70f, 0.30f, 0.95f};
 
-    // A quadratic ease-out for the intro slide, and a helper that scales a colour's
-    // alpha so a whole card can fade in (or a run be dimmed) by multiplying through.
-    auto ease_out = [](float t) {
-        t = std::clamp(t, 0.0f, 1.0f);
-        return 1.0f - (1.0f - t) * (1.0f - t);
+    // Shape each line's two strings once and measure the widest, so the panel hugs the
+    // list. The name carries the count when more than one is wanted ("PATTY x2").
+    struct Line {
+        std::string name;
+        std::string band;
+        float name_w;
     };
-    auto fade = [](XMFLOAT4 c, float a) {
-        c.w *= a;
-        return c;
-    };
-    // Draws one thick straight stroke between two points as a rotated quad -- the two
-    // strokes of the completion checkmark, which the axis-aligned quad cannot slant.
-    auto stroke = [&](XMFLOAT2 p, XMFLOAT2 q, float thick, XMFLOAT4 col) {
-        const float dxs = q.x - p.x;
-        const float dys = q.y - p.y;
-        const float len = std::sqrt(dxs * dxs + dys * dys);
-        if (len < 1e-4f) {
-            return;
-        }
-        const float nx = -dys / len * thick * 0.5f;
-        const float ny = dxs / len * thick * 0.5f;
-        const UINT first = cursor;
-        cursor = LayoutSolidQuadPts({p.x + nx, p.y + ny}, {q.x + nx, q.y + ny},
-                                    {q.x - nx, q.y - ny}, {p.x - nx, p.y - ny}, cursor);
-        runs.push_back({first, cursor - first, col, true, face});
-    };
-
-    // A small header above the stack: "ORDERS" while any remain, a green "SERVICE
-    // COMPLETE!" once every card is filled -- the polished twin of the debug overlay's
-    // completion line, right-anchored over the first card. It fades in with the intro.
-    bool all_done = true;
+    std::vector<Line> lines;
+    lines.reserve(orders.size());
+    float widest = 0.0f;
     for (const OrderCard& order : orders) {
-        if (order.filled < order.count) {
-            all_done = false;
-            break;
+        std::string name = order.name;
+        if (order.count > 1) {
+            name += " x" + std::to_string(order.count);
         }
+        const float name_w = TextWidth(face, name, text_pixel);
+        const float band_w = TextWidth(face, order.band, text_pixel);
+        widest = std::max(widest, name_w + (order.band.empty() ? 0.0f : col_gap + band_w));
+        lines.push_back({std::move(name), order.band, name_w});
     }
-    const std::string_view header = all_done ? "SERVICE COMPLETE!" : "ORDERS";
-    const XMFLOAT4 header_color = all_done ? done_color : name_color;
-    const float header_alpha = ease_out((seconds - rail_intro_) / 0.4f);
+
+    const float panel_w = bullet + bullet_gap + widest + 2.0f * pad;
+    const float x1 = w - margin;
+    const float x0 = x1 - panel_w;
+    const float top = margin;
+
+    // The "ORDERS" header, right-anchored over the panel -- the twin of the meats "MEATS".
     {
         const float header_pixel = h * 0.020f;
+        const std::string_view header = "ORDERS";
         const float header_w = TextWidth(face, header, header_pixel);
         const float header_baseline = margin - header_pixel * 0.4f;
         const UINT first = cursor;
-        cursor = LayoutLine(face, header, header_baseline, header_pixel, cursor,
-                            x1 - header_w);
-        runs.push_back({first, cursor - first, fade(header_color, header_alpha), false, face});
+        cursor = LayoutLine(face, header, header_baseline, header_pixel, cursor, x1 - header_w);
+        runs.push_back({first, cursor - first, name_color, false, face});
     }
 
-    float top = margin;
-    for (std::size_t idx = 0; idx < orders.size(); ++idx) {
-        const OrderCard& order = orders[idx];
-        RailAnim& anim = rail_anim_[idx];
-        const bool done = order.filled >= order.count;
+    // One translucent panel behind the whole list, packed first so the text sits over it.
+    const float panel_h =
+        2.0f * pad + static_cast<float>(lines.size() - 1) * line_pitch + text_pixel;
+    {
+        const UINT first = cursor;
+        cursor = LayoutSolidQuad(x0, top, x1, top + panel_h, cursor);
+        runs.push_back({first, cursor - first, panel_color, true, face});
+    }
 
-        // Catch the transitions this frame: an order whose filled count rose flashes,
-        // and a card the caller flags as just-refused starts its shake. Both stamp a
-        // wall-clock start the effects below decay from.
-        if (order.filled > anim.last_filled) {
-            anim.fill_flash = seconds;
-        }
-        anim.last_filled = order.filled;
-        if (static_cast<int>(idx) == rejected_order) {
-            anim.shake_start = seconds;
-        }
-
-        // The intro: each card eases in from the right, staggered so they arrive in a
-        // quick cascade, fading up as they settle. `dx` slides the whole card; `alpha`
-        // fades every run.
-        const float intro = ease_out((seconds - rail_intro_ - static_cast<float>(idx) * 0.09f) / 0.4f);
-        const float alpha = intro;
-        float dx = (1.0f - intro) * card_w * 0.55f;
-
-        // The shake: a quick damped horizontal wobble after a refused serve, so a
-        // bounce is felt, not just silently ignored. A matching red wash is added below.
-        const float shake_t = seconds - anim.shake_start;
-        const bool shaking = shake_t >= 0.0f && shake_t < 0.4f;
-        if (shaking) {
-            dx += std::sin(shake_t * 46.0f) * card_w * 0.03f * (1.0f - shake_t / 0.4f);
-        }
-
-        // The completion flash: a bright wash over the card that decays, brightest at
-        // the instant an order was filled.
-        const float flash_t = seconds - anim.fill_flash;
-        const float flash = (flash_t >= 0.0f && flash_t < 0.55f) ? (1.0f - flash_t / 0.55f) : 0.0f;
-
-        // The ready pulse: while the player's live marker sits inside the accepted
-        // window of an unfilled order, the lit segments breathe brighter -- a "serve it
-        // now" cue that needs no text.
-        const bool marker_ready = !done && order.marker_band >= order.band_min &&
-                                  order.marker_band <= order.band_max && order.marker_band >= 0;
-        const float pulse = marker_ready ? 0.5f + 0.5f * std::sin(seconds * 7.0f) : 0.0f;
-
-        const float cx0 = x0 + dx;
-        const float cx1 = x1 + dx;
-
-        // The card's translucent backing, packed and pushed first so its glyphs and
-        // bars all sit over it.
+    const float text_x = x0 + pad + bullet + bullet_gap;
+    float baseline = top + pad + text_pixel;
+    for (const Line& line : lines) {
+        // The bullet: a small amber square centred on the text's x-height.
+        const float by = baseline - text_pixel * 0.30f - bullet * 0.5f;
+        const float bx = x0 + pad;
         {
             const UINT first = cursor;
-            cursor = LayoutSolidQuad(cx0, top, cx1, top + card_h, cursor);
-            runs.push_back({first, cursor - first, fade(panel_color, alpha), true, face});
+            cursor = LayoutSolidQuad(bx, by, bx + bullet, by + bullet, cursor);
+            runs.push_back({first, cursor - first, bullet_color, true, face});
         }
-        // The completion wash (green) and the reject wash (red), each over the panel and
-        // under the glyphs, so the flash reads as the card lighting up rather than the
-        // text blinking out.
-        if (flash > 0.0f) {
-            const UINT first = cursor;
-            cursor = LayoutSolidQuad(cx0, top, cx1, top + card_h, cursor);
-            runs.push_back({first, cursor - first,
-                            fade(XMFLOAT4{0.55f, 0.85f, 0.45f, 0.5f * flash}, alpha), true, face});
-        }
-        if (shaking) {
-            const float rw = (1.0f - shake_t / 0.4f) * 0.35f;
-            const UINT first = cursor;
-            cursor = LayoutSolidQuad(cx0, top, cx1, top + card_h, cursor);
-            runs.push_back({first, cursor - first,
-                            fade(XMFLOAT4{0.9f, 0.25f, 0.2f, rw}, alpha), true, face});
-        }
-
-        // Row 1 -- the order name on the left, uppercased by the caller, and on the
-        // right either the progress pips or, once the order is met, a checkmark. Pips
-        // are little squares, filled ones warm and empty ones a dim wash, so the count
-        // reads at a glance without a "2/3" to parse.
-        const float name_baseline = top + pad + name_pixel;
+        // The meat's name (with its count), amber.
         {
             const UINT first = cursor;
-            cursor = LayoutLine(face, order.name, name_baseline, name_pixel, cursor, cx0 + pad);
-            runs.push_back(
-                {first, cursor - first, fade(done ? done_color : name_color, alpha), false, face});
+            cursor = LayoutLine(face, line.name, baseline, text_pixel, cursor, text_x);
+            runs.push_back({first, cursor - first, name_color, false, face});
         }
-        if (done) {
-            // The checkmark: two slanted strokes, popping in with the fill flash so the
-            // completion lands with a beat, then settling to a steady green tick.
-            const float scale = 1.0f + 0.35f * flash;
-            const float ck = name_pixel * 0.95f * scale;
-            const float cyc = name_baseline - name_pixel * 0.30f;
-            const float cxc = cx1 - pad - ck * 0.5f;
-            const float thick = ck * 0.17f;
-            const XMFLOAT4 col = fade(XMFLOAT4{0.6f, 0.9f, 0.5f, 1.0f}, alpha);
-            stroke({cxc - ck * 0.45f, cyc + ck * 0.02f}, {cxc - ck * 0.10f, cyc + ck * 0.34f},
-                   thick, col);
-            stroke({cxc - ck * 0.10f, cyc + ck * 0.34f}, {cxc + ck * 0.5f, cyc - ck * 0.40f}, thick,
-                   col);
-        } else {
-            const float pip_gap = pip * 0.5f;
-            const int count = std::max(order.count, 1);
-            const float pips_w =
-                static_cast<float>(count) * pip + static_cast<float>(count - 1) * pip_gap;
-            // Vertically centre the pip row on the name's x-height.
-            const float pip_top = name_baseline - name_pixel * 0.62f;
-            float px = cx1 - pad - pips_w;
-            for (int i = 0; i < count; ++i) {
-                const bool filled = i < order.filled;
-                const UINT first = cursor;
-                cursor = LayoutSolidQuad(px, pip_top, px + pip, pip_top + pip, cursor);
-                runs.push_back(
-                    {first, cursor - first, fade(filled ? gauge_on : pip_off, alpha), true, face});
-                px += pip + pip_gap;
-            }
-        }
-
-        // Row 2 -- the doneness gauge: one segment per band across the card's inner
-        // width, the accepted window [band_min, band_max] lit and the rest dimmed, so
-        // the target reads as a place on a scale rather than two words to decode.
-        const float gauge_top = name_baseline + row_gap;
-        {
-            const int bands = std::max(order.band_count, 1);
-            const float seg_gap = card_w * 0.008f;
-            const float inner = card_w - 2.0f * pad;
-            const float seg_w = (inner - static_cast<float>(bands - 1) * seg_gap) /
-                                static_cast<float>(bands);
-            float sx = cx0 + pad;
-            for (int i = 0; i < bands; ++i) {
-                const bool lit = i >= order.band_min && i <= order.band_max;
-                XMFLOAT4 seg_color = lit ? (done ? gauge_on_done : gauge_on) : gauge_off;
-                // The ready pulse warms and brightens the lit window toward white.
-                if (lit && pulse > 0.0f) {
-                    seg_color.y = std::min(1.0f, seg_color.y + 0.25f * pulse);
-                    seg_color.z = std::min(1.0f, seg_color.z + 0.35f * pulse);
-                    seg_color.w = std::min(1.0f, seg_color.w + 0.05f * pulse);
-                }
-                const UINT first = cursor;
-                cursor = LayoutSolidQuad(sx, gauge_top, sx + seg_w, gauge_top + gauge_h, cursor);
-                runs.push_back({first, cursor - first, fade(seg_color, alpha), true, face});
-                sx += seg_w + seg_gap;
-            }
-
-            // The live playhead: a bright vertical tick centred on the band the player's
-            // meat currently sits at, overhanging the bar top and bottom so it reads as a
-            // pointer onto the scale. Drawn last, over the segments. Skipped when no meat
-            // of this type is in hand or in view, or the band falls off the gauge.
-            if (order.marker_band >= 0 && order.marker_band < bands) {
-                const float cx = cx0 + pad +
-                                 static_cast<float>(order.marker_band) * (seg_w + seg_gap) +
-                                 seg_w * 0.5f;
-                const float half = std::max(card_w * 0.006f, 1.5f);
-                const float over = gauge_h * 0.6f;
-                const XMFLOAT4 marker_color{1.0f, 0.97f, 0.9f, 0.95f};
-                const UINT first = cursor;
-                cursor = LayoutSolidQuad(cx - half, gauge_top - over, cx + half,
-                                         gauge_top + gauge_h + over, cursor);
-                runs.push_back({first, cursor - first, fade(marker_color, alpha), true, face});
-            }
-        }
-
-        // Row 3 -- the caption naming the window in words, quiet and small beneath the
-        // bar, so the gauge is legible to a glance and precise on a read.
-        const float caption_baseline = gauge_top + gauge_h + row_gap + caption_pixel;
-        if (!order.band.empty()) {
+        // The wanted doneness, quiet grey, following the name on the same line.
+        if (!line.band.empty()) {
             const UINT first = cursor;
-            cursor = LayoutLine(face, order.band, caption_baseline, caption_pixel, cursor,
-                                cx0 + pad);
-            runs.push_back({first, cursor - first, fade(caption_color, alpha), false, face});
+            cursor = LayoutLine(face, line.band, baseline, text_pixel, cursor,
+                                text_x + line.name_w + col_gap);
+            runs.push_back({first, cursor - first, band_color, false, face});
         }
-
-        top += card_h + card_gap;
+        baseline += line_pitch;
     }
 }
 
@@ -2804,7 +2595,7 @@ void Renderer::DrawMeatRail(std::span<const MeatCard> meats, std::vector<HudRun>
 
         // Row 2 -- the doneness gauge: one segment per band, filled through the meat's
         // current band so its cook reads as a level rising across the bar, with a bright
-        // tick over the current band echoing the order gauge's playhead.
+        // tick over the current band marking exactly where the cook sits.
         const float gauge_top = name_baseline + row_gap;
         {
             const int bands = std::max(meat.band_count, 1);
@@ -2833,12 +2624,21 @@ void Renderer::DrawMeatRail(std::span<const MeatCard> meats, std::vector<HudRun>
             runs.push_back({first, cursor - first, fade(marker_color, alpha), true, face});
         }
 
-        // Row 3 -- the current doneness in words, quiet and small beneath the bar.
+        // Row 3 -- the current doneness in words on the left, and the meat's live internal
+        // temperature right-anchored beside it, both quiet and small beneath the bar: the
+        // word for a glance, the number for a read (as the debug overlay pairs them).
         const float caption_baseline = gauge_top + gauge_h + row_gap + caption_pixel;
         if (!meat.band.empty()) {
             const UINT first = cursor;
             cursor =
                 LayoutLine(face, meat.band, caption_baseline, caption_pixel, cursor, x0 + pad);
+            runs.push_back({first, cursor - first, fade(caption_color, alpha), false, face});
+        }
+        if (!meat.temp.empty()) {
+            const float temp_w = TextWidth(face, meat.temp, caption_pixel);
+            const UINT first = cursor;
+            cursor = LayoutLine(face, meat.temp, caption_baseline, caption_pixel, cursor,
+                                x1 - pad - temp_w);
             runs.push_back({first, cursor - first, fade(caption_color, alpha), false, face});
         }
 
@@ -3167,8 +2967,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const MeshInstance> held_props, const XMMATRIX& view_projection,
                       XMFLOAT3 camera_position, std::string_view hud_prompt,
                       std::span<const std::string> debug_lines,
-                      std::span<const OrderCard> orders, int rejected_order,
-                      std::span<const MeatCard> meats) {
+                      std::span<const OrderCard> orders, std::span<const MeatCard> meats) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
@@ -3364,7 +3163,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // per-level texture heap, so bind that back before drawing.
     ID3D12DescriptorHeap* text_heaps[] = {texture_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(text_heaps), text_heaps);
-    DrawHud(hud_prompt, debug_lines, orders, seconds, rejected_order, meats);
+    DrawHud(hud_prompt, debug_lines, orders, meats);
 
     // The frame is complete; hand the swapchain buffer back for presentation.
     TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
