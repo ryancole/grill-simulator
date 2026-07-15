@@ -36,11 +36,10 @@ box = [
 ]
 
 prop = [
-  # Grill (base + lid, two catalog types) dead ahead of the west-edge spawn, cooler off
-  # to one side. The lid's y rests it on the base's bowl rim; nudge if needed. The
-  # grill's heat lives on the "charcoal_grill" type in catalog.toml.
+  # Grill base dead ahead of the west-edge spawn, cooler off to one side. The grill's heat
+  # lives on the "charcoal_grill" type in catalog.toml; its lid is a carryable, placed
+  # below -- lift it off the grate to cook.
   {type = "charcoal_grill",     pos = [1.5, 0.0, 0.0]},
-  {type = "charcoal_grill_lid", pos = [1.5, 0.72, 0.0]},
   {type = "cooler", pos = [3.8, 0.0, -2.6]},
 
   # A bench along the north parapet, turned to face back into the deck.
@@ -55,6 +54,8 @@ prop = [
 carryable = [
   # The tongs by the grill, the meat set out on the deck near the bench.
   {type = "tongs", pos = [2.6, 0.05, 0.0], yaw = 25.0},
+  # The grill lid rests on the base's bowl rim; lift it off to expose the grate.
+  {type = "lid", pos = [1.5, 0.72, 0.0]},
   {type = "steak", pos = [-1.0, 0.80, 5.8], yaw = 18.0},
   {type = "chicken", pos = [-1.0, 0.80, 5.4], yaw = -8.0},
   {type = "patty", pos = [-1.4, 0.80, 6.1]},

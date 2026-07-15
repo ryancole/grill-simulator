@@ -115,12 +115,23 @@ hold = "tray"
 knock = 3.0
 sound = "metal"
 
+# The grill lid: a carryable, not furniture. It starts resting on the grill base and can
+# be lifted off (E) to expose the grate, carried around, and set back down -- like the
+# tongs or tray, it is a dynamic body, so a dropped lid falls and tumbles. Held "tray"
+# style so it rides dome-up out front. It takes no food, so no `serve`. Its type is a
+# plain "lid" so the pick-up prompt reads "[E] Pick up lid", not an underscored key.
+[tool.lid]
+model = "charcoal-grill-lid.glb"
+hold = "tray"
+knock = 4.0
+sound = "grill_lid"
+
 # --- Props: furniture and scenery --------------------------------------------------
 
-# The charcoal grill is two separate dynamic bodies -- a base and a lid -- so the lid
-# can be knocked off on its own. The base radiates heat from its grate; `heat_offset`
-# lifts the hot centre up off the feet. These three are the cook's placement-independent
-# tuning knobs (the per-food ones are on the foods above).
+# The charcoal grill base: a dynamic body that radiates heat from its grate. Its lid is
+# not furniture -- it is a carryable ([tool.lid] above) that rests on this base and
+# can be lifted off. `heat_offset` lifts the hot centre up off the feet. These three are
+# the cook's placement-independent tuning knobs (the per-food ones are on the foods above).
 [prop.charcoal_grill]
 model = "charcoal-grill-base.glb"
 dynamic = true
@@ -130,13 +141,6 @@ sound = "grill_base"
 heat = 425.0
 heat_reach = 1.0
 heat_offset = [0.0, 0.62, 0.0]
-
-[prop.charcoal_grill_lid]
-model = "charcoal-grill-lid.glb"
-dynamic = true
-mass = 3.0
-knock = 4.0
-sound = "grill_lid"
 
 [prop.cooler]
 model = "cooler-basic.glb"
