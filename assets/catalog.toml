@@ -25,6 +25,9 @@
 #       knock              -- 1..10, how hard it is to shove around.
 #       sound              -- clip on a hard landing ("meat", "metal", ...).
 #       hold               -- how it sits in hand ("flat" default, or "tongs").
+#       ability            -- what the primary action (left mouse) does with it in hand.
+#                             Defaults "none" (no behaviour yet); each carryable can name
+#                             its own as abilities are added in code.
 #
 #   [tool.<name>]  -- a carryable that does not cook (the tongs, the serving tray). Same
 #       fields as a food minus the cook profile, plus:

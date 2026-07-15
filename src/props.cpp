@@ -131,7 +131,8 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
         // The base (raw) model cuts the physics box; the whole stage list rides along
         // so the item can swap look as it cooks.
         Add(spawn.models, pool[spawn.models.front().model], spawn.name, spawn.pos, spawn.yaw,
-            HoldFor(spawn.hold), spawn.knock_rating, spawn.impact_sound, spawn.cook, spawn.serve);
+            HoldFor(spawn.hold), spawn.knock_rating, spawn.impact_sound, spawn.cook, spawn.serve,
+            spawn.ability);
     }
 }
 
@@ -210,10 +211,11 @@ std::uint32_t Props::CurrentModel(const Item& item) {
 void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::string name,
                 XMFLOAT3 position, float yaw_degrees, FXMMATRIX held_local, float knock_rating,
                 ImpactSound impact_sound, std::optional<CookProfile> cook,
-                std::optional<ServeDef> serve) {
+                std::optional<ServeDef> serve, Ability ability) {
     Item item{};
     item.stages = std::move(stages);
     item.name = std::move(name);
+    item.ability = ability;
     XMStoreFloat4x4(&item.held_local, held_local);
     if (cook) {
         item.cook.emplace(*cook);
@@ -306,6 +308,14 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
                 carried_ = target;
             }
         }
+    }
+
+    // The primary action fires the held item's ability -- what left mouse does depends
+    // on what is in hand. Edge-triggered like the grab, and gated on carrying, so an
+    // empty hand does nothing and a held button fires once. Separate from Interact, so
+    // acting on an item and dropping it are distinct presses.
+    if (actions.WasPressed(Action::PrimaryAction) && carried_ >= 0) {
+        TriggerAbility(carried_, camera_to_world);
     }
 
     // What the prompt reports this frame: nothing to pick while carrying, else
@@ -524,6 +534,17 @@ void Props::Drop(FXMMATRIX camera_to_world) {
     RebuildTransform(item);
 
     carried_ = -1;
+}
+
+void Props::TriggerAbility(int item, FXMMATRIX camera_to_world) {
+    // Dispatch on the carried item's catalog-declared ability. Each carryable type
+    // gets its own case as behaviours are added; the camera basis is on hand for one
+    // that needs to act along the gaze. None is the placeholder every item starts at.
+    (void)camera_to_world;
+    switch (items_[item].ability) {
+    case Ability::None:
+        break; // No behaviour yet -- new abilities dispatch here.
+    }
 }
 
 bool Props::Serve(int meat, int tray, Objectives& objectives) {

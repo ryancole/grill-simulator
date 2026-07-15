@@ -17,6 +17,13 @@
 // object.
 enum class HoldStyle { Flat, Tongs, Tray };
 
+// The action a carryable performs when the player presses the primary action (left
+// mouse button) while holding it. Named by the catalog so a carryable declares its
+// ability without Props knowing the object; Props dispatches on it (see
+// Props::TriggerAbility). `None` is an item that simply does nothing yet -- the
+// starting point every carryable has until a real behaviour is filled in here.
+enum class Ability { None };
+
 // The serving surface a carryable provides, as pure data: how close (metres, measured
 // in the ground plane) a carried meat must be brought to deliver it, and where the
 // surface sits in the model's own space (its top face). Present only on a serving tray;
@@ -64,6 +71,9 @@ struct CarryableDef {
     float knock_rating = 4.0f;
     ImpactSound impact_sound = ImpactSound::Meat;
     HoldStyle hold = HoldStyle::Flat;
+    // What pressing the primary action does with this item in hand. Defaults to None
+    // (no behaviour yet); a level author names another in the catalog once one exists.
+    Ability ability = Ability::None;
 };
 
 // A placeable prop type -- furniture or scenery -- as the catalog spells it. `dynamic`

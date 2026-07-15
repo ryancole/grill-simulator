@@ -43,6 +43,7 @@ constexpr ActionSpec kSpecs[] = {
     {Action::Jump, "jump", "Space", "Jump", true},
     {Action::Sprint, "sprint", "Shift", "Sprint", true},
     {Action::Interact, "interact", "E", "Interact", true},
+    {Action::PrimaryAction, "primary_action", "Mouse1", "Primary Action", true},
     {Action::ReloadLevel, "reload_level", "R", "Reload Level", false},
     {Action::SelectLevel1, "select_level_1", "1", "Select Level 1", false},
     {Action::SelectLevel2, "select_level_2", "2", "Select Level 2", false},
@@ -84,6 +85,11 @@ std::optional<int> KeyFromName(std::string name) {
         {"BACKSPACE", VK_BACK},    {"UP", VK_UP},
         {"DOWN", VK_DOWN},         {"LEFT", VK_LEFT},
         {"RIGHT", VK_RIGHT},
+        // The mouse buttons, so a config (or the default primary_action) can bind them
+        // by name. Mouse1/2/3 are the canonical spellings; LMB/RMB/MMB are accepted too.
+        {"MOUSE1", VK_LBUTTON},     {"LMB", VK_LBUTTON},
+        {"MOUSE2", VK_RBUTTON},     {"RMB", VK_RBUTTON},
+        {"MOUSE3", VK_MBUTTON},     {"MMB", VK_MBUTTON},
         // The key left of 1 / above Tab. Its several common names all land on the same
         // VK, so a config can spell it whichever way reads best.
         {"`", VK_OEM_3},           {"BACKTICK", VK_OEM_3},
@@ -118,6 +124,7 @@ std::optional<std::string> NameFromKey(int vk) {
         {VK_MENU, "Alt"},      {VK_RETURN, "Enter"},  {VK_TAB, "Tab"},
         {VK_ESCAPE, "Esc"},    {VK_BACK, "Backspace"},{VK_UP, "Up"},
         {VK_DOWN, "Down"},     {VK_LEFT, "Left"},     {VK_RIGHT, "Right"},
+        {VK_LBUTTON, "Mouse1"},{VK_RBUTTON, "Mouse2"},{VK_MBUTTON, "Mouse3"},
         {VK_OEM_3, "Backtick"},
         {VK_F1, "F1"},         {VK_F2, "F2"},         {VK_F3, "F3"},
         {VK_F4, "F4"},         {VK_F5, "F5"},         {VK_F6, "F6"},

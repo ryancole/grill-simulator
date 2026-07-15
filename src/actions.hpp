@@ -25,6 +25,10 @@ enum class Action {
     Jump,
     Sprint,
     Interact,
+    // The main action, on the left mouse button by default. Triggers the ability of
+    // whatever carryable the player is holding -- different per item, defined by the
+    // item's catalog type -- and does nothing empty-handed. Rebindable like the rest.
+    PrimaryAction,
     // Developer shortcuts: reload the current level, jump straight to one of the
     // levels, and toggle the top-left debug overlay. Bound in controls.toml alongside
     // the gameplay actions so no raw key code is left hardcoded in the game loop.

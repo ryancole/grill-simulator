@@ -6,6 +6,7 @@
 #   * a single letter A-Z or digit 0-9   ("W", "e", "1")
 #   * a named key: Space, Shift, Ctrl, Alt, Enter, Tab, Esc, Backspace,
 #     Up, Down, Left, Right, Backtick (the ` key, also Grave/Tilde), or F1-F12
+#   * a mouse button: Mouse1 (left, also LMB), Mouse2 (right, RMB), Mouse3 (middle, MMB)
 #
 # An action may bind several keys at once -- write a list and any of them triggers
 # it: `move_forward = ["W", "Up"]`. An empty list unbinds the action entirely.
@@ -27,6 +28,9 @@ move_right   = "D"
 jump         = "Space"
 sprint       = "Shift"
 interact     = "E"
+# The main action, on left mouse. Triggers the ability of the held item (see the
+# per-carryable `ability` in catalog.toml); does nothing empty-handed.
+primary_action = "Mouse1"
 
 # Developer shortcuts.
 reload_level   = "R"

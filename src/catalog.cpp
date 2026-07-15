@@ -85,6 +85,22 @@ HoldStyle HoldOr(const toml::node_view<const toml::node>& view, HoldStyle fallba
     Fail(path, "unknown hold '" + *name + "' (want flat, tongs or tray)");
 }
 
+// An optional ability named by string, falling back when absent. An unrecognised name
+// is a catalog error, not a silent default. The vocabulary grows as abilities are added
+// in code; for now "none" (the default) is the only behaviour there is.
+Ability AbilityOr(const toml::node_view<const toml::node>& view, Ability fallback,
+                  const std::filesystem::path& path) {
+    if (!view) {
+        return fallback;
+    }
+    const auto name = view.value<std::string>();
+    if (!name) {
+        Fail(path, "ability must be a string");
+    }
+    if (*name == "none") return Ability::None;
+    Fail(path, "unknown ability '" + *name + "' (want none)");
+}
+
 // The model name a type must name, or a catalog error.
 std::string ModelOf(const toml::table& entry, const std::string& name,
                     const std::filesystem::path& path) {
@@ -209,6 +225,7 @@ void ReadCarryables(const toml::table& root, const char* section, bool is_food,
         def.knock_rating = NumberOr((*entry)["knock"], def.knock_rating, path, "knock");
         def.impact_sound = SoundOr((*entry)["sound"], def.impact_sound, path);
         def.hold = HoldOr((*entry)["hold"], def.hold, path);
+        def.ability = AbilityOr((*entry)["ability"], def.ability, path);
         out.emplace(name, std::move(def));
     }
 }

@@ -119,6 +119,10 @@ private:
         std::vector<CookStage> stages;
         std::string name; // As it reads in the pick-up prompt.
 
+        // What the primary action does with this item in hand, from its catalog type.
+        // Dispatched by TriggerAbility while it is the carried item; None does nothing.
+        Ability ability = Ability::None;
+
         // Box shape, in the model's own space. `half_extents` are half the box's
         // side lengths; `com_offset` is the centre of the box measured from the
         // model origin, which sits on the object's underside -- so com_offset.y is
@@ -167,7 +171,7 @@ private:
     void Add(std::vector<CookStage> stages, const Model& base_model, std::string name,
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
              float knock_rating, ImpactSound impact_sound, std::optional<CookProfile> cook,
-             std::optional<ServeDef> serve);
+             std::optional<ServeDef> serve, Ability ability);
     // Fills an item's box shape (half_extents, com_offset) from the union of its
     // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);
@@ -194,6 +198,12 @@ private:
     // exact pose it was held, takes a gentle toss along the gaze, and falls from
     // there.
     void Drop(DirectX::FXMMATRIX camera_to_world);
+    // Fires the carried item's primary-action ability. Dispatches on the item's
+    // Ability (from its catalog type); the one no-op case today is where new
+    // behaviours are added. `camera_to_world` is passed so an ability can act along
+    // the gaze (aim a throw, find what is looked at) once one needs it. Only ever
+    // called with a valid carried index.
+    void TriggerAbility(int item, DirectX::FXMMATRIX camera_to_world);
     // Attempts to deliver the carried meat `meat` onto tray item `tray`, asking
     // `objectives` whether its current doneness fills an open order. On acceptance the
     // meat is marked served, stuck to the tray (its pose stored in the tray's frame) and

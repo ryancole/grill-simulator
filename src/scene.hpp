@@ -53,6 +53,8 @@ struct CarryableSpawn {
     DirectX::XMFLOAT3 pos{0.0f, 0.0f, 0.0f};
     float yaw = 0.0f;
     HoldStyle hold = HoldStyle::Flat;
+    // What the primary action does with this item in hand (see catalog's Ability).
+    Ability ability = Ability::None;
     float knock_rating = 4.0f;
     ImpactSound impact_sound = ImpactSound::Meat;
     std::optional<CookProfile> cook;
