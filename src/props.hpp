@@ -69,19 +69,12 @@ public:
     // or empty when E would do nothing. Recomputed each Update.
     std::string PromptText() const;
 
-    // One line per meat in the yard for the debug overlay: "steak: medium rare
-    // (139F)" -- its name, current doneness band, and internal temperature. A meat
-    // is any item carrying cooking state; the tongs and other non-food carryables
-    // have none and are skipped, so this is exactly the cookable objects, resting or
-    // carried. Empty on a level that placed no food.
-    std::vector<std::string> MeatDebugLines() const;
-
-    // One entry per meat in the yard for the on-screen "meats" panel -- the polished,
-    // always-on twin of MeatDebugLines. `name` is the food's type (the string Objectives
-    // keys on, uppercased for display by the caller), `band` its current doneness band
-    // index, `temp_f` its internal temperature in whole degrees Fahrenheit, and `served`
-    // whether it has already been handed off. A meat is any item carrying cooking state;
-    // non-food carryables are skipped. Empty on a level that placed no food.
+    // One entry per meat in the yard for the on-screen "meats" panel. `name` is the food's
+    // type (the string Objectives keys on, uppercased for display by the caller), `band`
+    // its current doneness band index, `temp_f` its internal temperature in whole degrees
+    // Fahrenheit, and `served` whether it has already been handed off. A meat is any item
+    // carrying cooking state; non-food carryables are skipped. Empty on a level that placed
+    // no food.
     struct MeatStatus {
         std::string name;
         int band = 0;

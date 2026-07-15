@@ -558,26 +558,18 @@ int Run(HINSTANCE instance, int show_command) {
         const std::span<const FoodGoal> goals = objectives.Goals();
 
         // The debug overlay, anchored bottom-left and toggled by backtick (ToggleDebug):
-        // every meat's doneness, then each heat source's emitting temperature, then the
-        // raw order ticket -- each goal, how many are filled, and its accepted band range
-        // -- and a completion line once they are all met (the win condition, legible
-        // until there is a proper level-complete screen). Left empty while hidden, which
-        // draws no overlay.
+        // each heat source's emitting temperature -- the one cook input the polished HUD
+        // does not surface -- and a completion line once every order is met (the win
+        // condition, legible until there is a proper level-complete screen). Meat doneness,
+        // temperature and the order ticket now live on the meats panel and orders list, so
+        // they are gone from here. Left empty while hidden, which draws no overlay.
         std::vector<std::string> debug_lines;
         if (show_debug) {
-            debug_lines = props.MeatDebugLines();
             const std::span<const HeatSource> heat_sources = game.world->furniture().HeatSources();
             for (std::size_t i = 0; i < heat_sources.size(); ++i) {
                 debug_lines.push_back(
                     "heat " + std::to_string(i) + ": " +
                     std::to_string(static_cast<int>(heat_sources[i].EmitterTempF())) + "F");
-            }
-            for (std::size_t i = 0; i < goals.size(); ++i) {
-                const FoodGoal& goal = goals[i];
-                debug_lines.push_back(
-                    "order " + goal.type + ": " + std::to_string(objectives.Filled(i)) + "/" +
-                    std::to_string(goal.count) + " " + std::string(DonenessName(goal.min)) + "-" +
-                    std::string(DonenessName(goal.max)));
             }
             if (!goals.empty() && objectives.Complete()) {
                 debug_lines.push_back("LEVEL COMPLETE! (R to replay)");
