@@ -26,6 +26,26 @@ public:
     // target and descriptor heaps, sized in the .cpp, can account for them.
     static constexpr UINT kBloomLevels = 6;
 
+    // One order on the top-right objective rail: the polished, non-debug readout of a
+    // level's win condition. `name` is the loud header ("STEAK"), `band` the quiet
+    // caption naming the accepted doneness window ("medium rare to medium"). `filled`
+    // of `count` are done, shown as pips. The gauge draws `band_count` segments and
+    // brightens the inclusive window [band_min, band_max]. Built by the caller from
+    // Objectives, so the renderer stays free of the cook/level types.
+    struct OrderCard {
+        std::string name;
+        std::string band;
+        int filled = 0;
+        int count = 1;
+        int band_min = 0;
+        int band_max = 0;
+        int band_count = 1;
+        // The band the meat the player is acting on currently sits at, drawn as a live
+        // playhead over this card's gauge so the target can be lined up by eye. -1 draws
+        // no marker: nothing of this order's type is held or looked at.
+        int marker_band = -1;
+    };
+
     // Brings up the device, swapchain and every pipeline -- everything that lives
     // for the whole session, independent of which level is loaded. No scene geometry
     // is uploaded here; call LoadScene once the first level's Scene exists.
@@ -59,12 +79,16 @@ public:
     // are never sliced open by the wall they are standing against. `hud_prompt`
     // is the one centred line of HUD text laid over the finished frame; empty draws
     // nothing. `debug_lines` are the read-only debug overlay -- one line each,
-    // anchored down the top-left corner; empty draws no overlay.
+    // anchored down the top-left corner; empty draws no overlay. `orders` are the
+    // polished objective cards on the top-right rail; empty draws no rail.
+    // `rejected_order` is the index into `orders` of a card whose serve was just refused,
+    // shaken once for feedback, or -1 for none.
     void Render(const Scene& scene, std::span<const MeshInstance> props,
                 std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                 std::span<const MeshInstance> held_props,
                 const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
-                std::string_view hud_prompt, std::span<const std::string> debug_lines);
+                std::string_view hud_prompt, std::span<const std::string> debug_lines,
+                std::span<const OrderCard> orders, int rejected_order);
     // Draws the launch/pause menu as its own complete frame: a solid backdrop, a
     // `title`, and the vertical list of `entries` with the one at `selected` picked
     // out. Owns the swapchain buffer from clear to present, so the game loop calls
@@ -222,8 +246,32 @@ private:
     // bottom, and the `debug_lines` overlay anchored down the top-left corner. Both
     // are packed into this frame's text region back-to-back before either is drawn,
     // so they never alias in the shared buffer the way two DrawText calls would (see
-    // DrawMenu). A no-op when both are empty. Assumes the render target is bound.
-    void DrawHud(std::string_view prompt, std::span<const std::string> debug_lines);
+    // DrawMenu). A no-op when all are empty. Assumes the render target is bound. The
+    // `orders` rail, when non-empty, is packed into the same region and drawn as a
+    // stack of cards down the top-right corner (see DrawObjectivesRail).
+    void DrawHud(std::string_view prompt, std::span<const std::string> debug_lines,
+                 std::span<const OrderCard> orders, float seconds, int rejected_order);
+    // One packed run of the HUD buffer: a vertex range that is either a solid fill (a
+    // panel, a gauge segment, a pip) or a line of glyphs from `face`, tinted `color`.
+    // DrawHud and DrawObjectivesRail pack a list of these into the shared region and
+    // then draw them in order, so nothing aliases and panels sit behind their text.
+    struct HudRun {
+        UINT first;
+        UINT count;
+        DirectX::XMFLOAT4 color;
+        bool solid;     // A flat fill (panel/gauge/pip) rather than glyphs.
+        FontFace face;  // Which atlas the glyphs draw from (ignored when solid).
+    };
+    // Packs the top-right objective rail into the shared text region, appending its
+    // panel/gauge/pip/label runs to `runs` and advancing `cursor`. Split out of DrawHud
+    // for legibility only; it must pack into the same cursor so its quads never alias
+    // the prompt's or the debug overlay's in this frame's buffer.
+    void DrawObjectivesRail(std::span<const OrderCard> orders, float seconds, int rejected_order,
+                            std::vector<HudRun>& runs, UINT& cursor);
+    // The pixel advance of `text` set from `face` at glyph height `pixel` -- the same
+    // sum LayoutLine walks -- so a caller can right-anchor a line (left_px = right edge
+    // minus this) or size a box to its text. Unknown glyphs contribute nothing.
+    float TextWidth(const FontFace& face, std::string_view text, float pixel) const;
     // Draws the menu overlay -- the title and the highlighted list of entries --
     // into the current frame, over whatever backdrop the caller has cleared. All
     // lines are packed into this frame's text vertex region back-to-back and only
@@ -247,6 +295,12 @@ private:
     // pipeline's solid mode, it backs the debug overlay with a translucent panel.
     // Stops without writing if the region is full.
     UINT LayoutSolidQuad(float x0, float y0, float x1, float y1, UINT first);
+    // Writes one solid quad from four explicit corners (pixel space, origin top-left),
+    // wound a,b,c,d, so a rotated shape -- the checkmark's angled strokes on a completed
+    // order card -- can be drawn where the axis-aligned LayoutSolidQuad cannot. Stops
+    // without writing if the region is full.
+    UINT LayoutSolidQuadPts(DirectX::XMFLOAT2 a, DirectX::XMFLOAT2 b, DirectX::XMFLOAT2 c,
+                            DirectX::XMFLOAT2 d, UINT first);
     // Binds the text pipeline, its root signature, a default atlas table and this
     // frame's text vertex buffer, ready for one or more DrawTextRun calls (each of
     // which rebinds the atlas to its own face).
@@ -457,6 +511,22 @@ private:
     // When the renderer came up, so the outline's glow can pulse against a
     // wall-clock rather than needing a delta threaded through Render.
     std::chrono::steady_clock::time_point start_time_ = std::chrono::steady_clock::now();
+
+    // Per-card animation state for the objective rail, carried across frames so the
+    // cards can slide in, flash as an order is filled, and shake when a serve bounces --
+    // none of which the per-frame OrderCards, rebuilt each frame, can remember on their
+    // own. Index-parallel to the current level's orders; reset when the order set changes.
+    struct RailAnim {
+        int last_filled = 0;         // to catch the frame an order's count rises.
+        float fill_flash = -1000.0f; // seconds of the last fill, for the completion flash.
+        float shake_start = -1000.0f;// seconds of the last refused serve, for the shake.
+    };
+    std::vector<RailAnim> rail_anim_;
+    // Identity of the order set the rail_anim_ was built for -- the types and counts
+    // joined -- so a different level (or a reload) rebuilds the state and replays the
+    // slide-in. rail_intro_ is the wall-clock second that set first appeared.
+    std::string rail_signature_;
+    float rail_intro_ = -1000.0f;
 
     D3D12_VIEWPORT viewport_{};
     D3D12_RECT scissor_{};

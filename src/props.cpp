@@ -252,6 +252,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     serve_tray_ = -1;
     serve_ok_ = false;
     serve_need_.clear();
+    serve_rejected_type_.clear();
     if (carried_ >= 0 && items_[carried_].cook) {
         const XMVECTOR held = (XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world).r[3];
         for (int t = 0; t < static_cast<int>(items_.size()); ++t) {
@@ -287,7 +288,12 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
                 // meat only if its cook fills an open order; a rejected cook stays in
                 // hand (a no-op, not a drop) -- "reject and keep" -- so a mis-timed press
                 // never fumbles food onto the tray. To drop over a tray, step off first.
-                Serve(carried_, serve_tray_, objectives);
+                // A refusal latches the meat's type for one frame so the HUD can shake
+                // the card; the meat's name is read before Serve, which leaves it carried.
+                const std::string type = items_[carried_].name;
+                if (!Serve(carried_, serve_tray_, objectives)) {
+                    serve_rejected_type_ = type;
+                }
             } else {
                 Drop(camera_to_world);
             }
@@ -437,6 +443,29 @@ std::vector<std::string> Props::MeatDebugLines() const {
                         (item.served ? " [served]" : ""));
     }
     return lines;
+}
+
+std::optional<Props::MeatReadout> Props::ActiveMeat() const {
+    // Prefer the carried item -- what the player is committing to -- and fall back to
+    // the one merely looked at while empty-handed. Either way it counts only if it is
+    // a meat: a cooking item carries a CookInformation the band is read from, while the
+    // tongs and the tray do not and so surface no readout.
+    const int index = carried_ >= 0 ? carried_ : hovered_;
+    if (index < 0) {
+        return std::nullopt;
+    }
+    const Item& item = items_[static_cast<std::size_t>(index)];
+    if (!item.cook) {
+        return std::nullopt;
+    }
+    return MeatReadout{item.name, static_cast<int>(item.cook->DonenessBand())};
+}
+
+std::optional<std::string> Props::RejectedServeType() const {
+    if (serve_rejected_type_.empty()) {
+        return std::nullopt;
+    }
+    return serve_rejected_type_;
 }
 
 int Props::PickTarget(FXMVECTOR eye, FXMVECTOR forward) const {
