@@ -349,6 +349,19 @@ constexpr float kMenuTitleBaselineFraction = 0.32f;  // Title baseline, from the
 constexpr float kMenuFirstEntryBaselineFraction = 0.52f; // First entry's baseline.
 constexpr float kMenuEntrySpacingFactor = 1.8f; // Line pitch, in entry glyph heights.
 
+// The results screen: a title, a block of order-breakdown lines in the middle, then the
+// action list anchored low. The breakdown lines are smaller and tighter than menu
+// entries so several orders fit; the actions sit at a fixed baseline (independent of how
+// many breakdown lines there are) so their hit-test needs only the action count.
+constexpr float kResultsTitleFraction = 0.09f;        // Title glyph height / back buffer.
+constexpr float kResultsTitleBaselineFraction = 0.24f; // Title baseline, from the top.
+constexpr float kResultsLineFraction = 0.038f;         // Breakdown glyph height / buffer.
+constexpr float kResultsFirstLineBaselineFraction = 0.40f; // First breakdown baseline.
+constexpr float kResultsLineSpacingFactor = 1.5f;      // Breakdown line pitch, in heights.
+constexpr float kResultsActionFraction = 0.05f;        // Action glyph height / back buffer.
+constexpr float kResultsFirstActionBaselineFraction = 0.78f; // First action's baseline.
+constexpr float kResultsActionSpacingFactor = 1.8f;    // Action line pitch, in heights.
+
 // The keybinds screen carries more rows than the launch menu (every gameplay action
 // plus Reset and Back), so its title sits higher and its rows are smaller and tighter
 // to fit them all. The two columns anchor at fractions of the width: the label's left
@@ -2705,6 +2718,76 @@ void Renderer::DrawMenu(std::string_view title, std::span<const std::string> ent
     }
 }
 
+void Renderer::DrawResults(std::string_view title, bool passed,
+                           std::span<const ResultLine> lines,
+                           std::span<const std::string> actions, int selected) {
+    if (width_ == 0 || height_ == 0) {
+        return;
+    }
+
+    const float h = static_cast<float>(height_);
+    const float title_pixel = h * kResultsTitleFraction;
+    const float line_pixel = h * kResultsLineFraction;
+    const float line_spacing = line_pixel * kResultsLineSpacingFactor;
+    const float action_pixel = h * kResultsActionFraction;
+    const float action_spacing = action_pixel * kResultsActionSpacingFactor;
+
+    // A green title on a clear, a red one on a miss; met orders green and missed ones red;
+    // the selected action the same warm amber the launch menu picks with, the rest grey.
+    const XMFLOAT4 pass_color{0.55f, 0.85f, 0.45f, 1.0f};
+    const XMFLOAT4 fail_color{0.92f, 0.42f, 0.38f, 1.0f};
+    const XMFLOAT4 met_color{0.60f, 0.82f, 0.52f, 1.0f};
+    const XMFLOAT4 missed_color{0.90f, 0.48f, 0.44f, 1.0f};
+    const XMFLOAT4 selected_color{1.0f, 0.78f, 0.35f, 1.0f};
+    const XMFLOAT4 action_color{0.72f, 0.72f, 0.75f, 1.0f};
+
+    struct Run {
+        UINT first;
+        UINT count;
+        XMFLOAT4 color;
+    };
+    std::vector<Run> runs;
+    runs.reserve(lines.size() + actions.size() + 1);
+
+    const FontFace face = HudFace();
+    UINT cursor = 0;
+    const auto emit = [&](std::string_view text, float baseline, float pixel, XMFLOAT4 color) {
+        const UINT first = cursor;
+        cursor = LayoutLine(face, text, baseline, pixel, cursor); // centred (default left)
+        if (cursor > first) {
+            runs.push_back({first, cursor - first, color});
+        }
+    };
+
+    // Title, then the order breakdown, then the actions -- each block at its own baseline.
+    emit(title, h * kResultsTitleBaselineFraction, title_pixel, passed ? pass_color : fail_color);
+
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        const float baseline =
+            h * kResultsFirstLineBaselineFraction + static_cast<float>(i) * line_spacing;
+        emit(lines[i].text, baseline, line_pixel, lines[i].met ? met_color : missed_color);
+    }
+
+    for (std::size_t i = 0; i < actions.size(); ++i) {
+        const bool is_selected = static_cast<int>(i) == selected;
+        // Carets flank the selected action so the highlight reads in a still screenshot,
+        // not by colour alone -- the same treatment DrawMenu gives its entries.
+        const std::string line = is_selected ? "> " + actions[i] + " <" : actions[i];
+        const float baseline =
+            h * kResultsFirstActionBaselineFraction + static_cast<float>(i) * action_spacing;
+        emit(line, baseline, action_pixel, is_selected ? selected_color : action_color);
+    }
+
+    if (cursor == 0) {
+        return;
+    }
+
+    BindTextPipeline();
+    for (const Run& run : runs) {
+        DrawTextRun(face, run.first, run.count, run.color);
+    }
+}
+
 void Renderer::DrawKeybinds(std::string_view title, std::span<const std::string> labels,
                             std::span<const std::string> values, int selected, bool capturing) {
     if (width_ == 0 || height_ == 0) {
@@ -3227,6 +3310,48 @@ void Renderer::RenderMenu(std::string_view title, std::span<const std::string> e
     MoveToNextFrame();
 }
 
+void Renderer::RenderResults(std::string_view title, bool passed,
+                             std::span<const ResultLine> lines,
+                             std::span<const std::string> actions, int selected) {
+    ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
+    ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
+    ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
+
+    // Same setup as RenderMenu: the font atlas rides the per-level texture heap, so bind
+    // it, then own the swapchain buffer from clear to present over the menu backdrop.
+    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
+
+    command_list_->RSSetViewports(1, &viewport_);
+    command_list_->RSSetScissorRects(1, &scissor_);
+
+    TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
+                   D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_ACCESS_NO_ACCESS,
+                   D3D12_BARRIER_LAYOUT_UNDEFINED, D3D12_BARRIER_SYNC_RENDER_TARGET,
+                   D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET);
+
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                            static_cast<INT>(frame_index_), rtv_size_);
+    command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    command_list_->ClearRenderTargetView(rtv, kMenuClearColor, 0, nullptr);
+
+    DrawResults(title, passed, lines, actions, selected);
+
+    TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
+                   D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                   D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_SYNC_NONE,
+                   D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_LAYOUT_PRESENT);
+
+    ThrowIfFailed(command_list_->Close(), "CommandList::Close");
+
+    ID3D12CommandList* lists[] = {command_list_.Get()};
+    queue_->ExecuteCommandLists(_countof(lists), lists);
+
+    ThrowIfFailed(swap_chain_->Present(1, 0), "SwapChain::Present");
+
+    MoveToNextFrame();
+}
+
 void Renderer::RenderKeybinds(std::string_view title, std::span<const std::string> labels,
                               std::span<const std::string> values, int selected, bool capturing) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
@@ -3286,6 +3411,30 @@ int Renderer::MenuEntryAt(int x, int y, int entry_count) const {
         // the glyphs' feet) and is one line-pitch tall, so consecutive rows tile
         // with no gaps between them.
         const float center = baseline - entry_pixel * 0.3f;
+        if (fy >= center - spacing * 0.5f && fy < center + spacing * 0.5f) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int Renderer::ResultsActionAt(int x, int y, int action_count) const {
+    if (height_ == 0 || action_count <= 0) {
+        return -1;
+    }
+    (void)x; // Rows span the full width, so only the vertical position matters.
+
+    const float h = static_cast<float>(height_);
+    const float action_pixel = h * kResultsActionFraction;
+    const float spacing = action_pixel * kResultsActionSpacingFactor;
+    const float fy = static_cast<float>(y);
+
+    for (int i = 0; i < action_count; ++i) {
+        const float baseline =
+            h * kResultsFirstActionBaselineFraction + static_cast<float>(i) * spacing;
+        // Same tiling as MenuEntryAt: a line-pitch-tall band centred on each action's
+        // visual middle, so consecutive actions tile with no gaps.
+        const float center = baseline - action_pixel * 0.3f;
         if (fy >= center - spacing * 0.5f && fy < center + spacing * 0.5f) {
             return i;
         }

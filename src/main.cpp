@@ -278,6 +278,11 @@ int Run(HINSTANCE instance, int show_command) {
     enum class MenuScreen { Main, Options, Keybinds };
     MenuScreen screen = MenuScreen::Main;
 
+    // The highlighted action on the level-complete results screen: 0 Replay, 1 Back to
+    // Menu. Reset to Replay each time that screen is raised. A loop local like `screen`,
+    // since only the loop navigates it.
+    int results_selected = 0;
+
     // The main menu: one entry per level, in level_files order, then Options, then Exit.
     // So a chosen index is a level to load, or Options to open that screen, or Exit to
     // close the game.
@@ -504,6 +509,91 @@ int Run(HINSTANCE instance, int show_command) {
             continue;
         }
 
+        // The results screen owns the frame once the tray has been turned in: navigate its
+        // two actions, act on a confirm or a back, and draw the pass/fail breakdown read
+        // live from the level's Objectives (the world stays loaded behind it). Like the
+        // menu, nothing below runs while it is up.
+        if (game.state == GameState::LevelComplete) {
+            const Objectives& objectives = game.world->objectives();
+            const std::span<const FoodGoal> goals = objectives.Goals();
+            // A clear needs a real ticket met: an empty-goal (sandbox) level cannot pass.
+            const bool passed = !goals.empty() && objectives.Complete();
+
+            // One breakdown line per order -- its name, band range and how many the
+            // turned-in tray filled of the wanted count -- coloured met/missed by the row.
+            std::vector<Renderer::ResultLine> lines;
+            lines.reserve(goals.size());
+            for (std::size_t i = 0; i < goals.size(); ++i) {
+                const FoodGoal& goal = goals[i];
+                std::string name = goal.type;
+                for (char& c : name) {
+                    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                }
+                std::string band(DonenessName(goal.min));
+                if (goal.max != goal.min) {
+                    band += " to ";
+                    band += DonenessName(goal.max);
+                }
+                const int filled = objectives.Filled(i);
+                std::string text = name + " (" + band + ")   " + std::to_string(filled) + "/" +
+                                   std::to_string(goal.count);
+                lines.push_back(Renderer::ResultLine{std::move(text), filled >= goal.count});
+            }
+
+            const std::vector<std::string> actions = {"Replay", "Back to Menu"};
+            const int action_count = static_cast<int>(actions.size());
+
+            // Mouse hover re-selects only on real movement, so a resting mouse never fights
+            // the keyboard -- the same rule the launch menu follows.
+            POINT cursor{};
+            const bool have_cursor = GetCursorPos(&cursor) && ScreenToClient(hwnd, &cursor);
+            const bool cursor_moved =
+                have_cursor && (cursor.x != last_cursor.x || cursor.y != last_cursor.y);
+            if (have_cursor) {
+                last_cursor = cursor;
+            }
+
+            bool confirm = false;
+            int hovered = -1;
+            if (have_cursor) {
+                hovered = game.renderer.ResultsActionAt(cursor.x, cursor.y, action_count);
+                if (hovered >= 0 && cursor_moved) {
+                    results_selected = hovered;
+                }
+            }
+            if (game.input.ConsumeLeftClick() && hovered >= 0) {
+                results_selected = hovered;
+                confirm = true;
+            }
+            if (game.actions.WasPressed(Action::MenuUp)) {
+                results_selected = (results_selected + action_count - 1) % action_count;
+            }
+            if (game.actions.WasPressed(Action::MenuDown)) {
+                results_selected = (results_selected + 1) % action_count;
+            }
+            if (game.actions.WasPressed(Action::MenuConfirm)) {
+                confirm = true;
+            }
+
+            // Escape backs out to the launch menu, exactly like choosing Back to Menu.
+            if (game.input.ConsumeEscape()) {
+                game.state = GameState::Menu;
+                screen = MenuScreen::Main;
+            } else if (confirm) {
+                if (results_selected == 0) { // Replay: reload the same level and drop in.
+                    load_level(current_level);
+                    game.state = GameState::Playing;
+                } else { // Back to Menu.
+                    game.state = GameState::Menu;
+                    screen = MenuScreen::Main;
+                }
+            }
+
+            const char* title = passed ? "ORDERS UP!" : "SERVICE FAILED";
+            game.renderer.RenderResults(title, passed, lines, actions, results_selected);
+            continue;
+        }
+
         // The level controls are edge-triggered so a held key fires once: 1 selects the
         // backyard, R reloads whatever is current (restoring a level knocked about in
         // play). Read every frame so each stays current, then act on at most one. Swapping
@@ -546,23 +636,33 @@ int Run(HINSTANCE instance, int show_command) {
         // update, so the meats cook against this frame's grate position.
         game.world->furniture().Update();
         game.world->props().Update(camera_to_world, game.actions, dt,
-                                   game.world->furniture().HeatSources(), game.world->objectives());
+                                   game.world->furniture().HeatSources(),
+                                   game.world->turn_in_zone(), game.world->objectives());
+
+        // Turning the loaded tray in at the delivery zone ends the level: Props latches it
+        // during the Update above. Drop the mouse look and raise the results screen, whose
+        // block runs next frame; the world stays loaded behind it so the breakdown reads
+        // live from its Objectives. Skip the rest of this frame's world draw.
+        if (game.world->props().TurnedIn()) {
+            game.input.SetMouseLook(hwnd, false);
+            game.state = GameState::LevelComplete;
+            results_selected = 0;
+            continue;
+        }
 
         const XMMATRIX view_projection =
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
         Props& props = game.world->props();
 
-        // The order ticket data, read once and shared by the debug overlay below and the
-        // polished rail further down.
+        // The order ticket data, read once for the polished orders rail further down.
         const Objectives& objectives = game.world->objectives();
         const std::span<const FoodGoal> goals = objectives.Goals();
 
         // The debug overlay, anchored bottom-left and toggled by backtick (ToggleDebug):
         // each heat source's emitting temperature -- the one cook input the polished HUD
-        // does not surface -- and a completion line once every order is met (the win
-        // condition, legible until there is a proper level-complete screen). Meat doneness,
-        // temperature and the order ticket now live on the meats panel and orders list, so
-        // they are gone from here. Left empty while hidden, which draws no overlay.
+        // does not surface. Meat doneness, temperature and the order ticket now live on the
+        // meats panel and orders list, and the win condition on the level-complete screen,
+        // so they are gone from here. Left empty while hidden, which draws no overlay.
         std::vector<std::string> debug_lines;
         if (show_debug) {
             const std::span<const HeatSource> heat_sources = game.world->furniture().HeatSources();
@@ -570,9 +670,6 @@ int Run(HINSTANCE instance, int show_command) {
                 debug_lines.push_back(
                     "heat " + std::to_string(i) + ": " +
                     std::to_string(static_cast<int>(heat_sources[i].EmitterTempF())) + "F");
-            }
-            if (!goals.empty() && objectives.Complete()) {
-                debug_lines.push_back("LEVEL COMPLETE! (R to replay)");
             }
         }
 

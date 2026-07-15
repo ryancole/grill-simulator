@@ -111,6 +111,27 @@ public:
     // over no entry. Uses the same metrics RenderMenu draws with, so hover and click
     // line up with what is on screen. Rows span the full width, so only y matters.
     int MenuEntryAt(int x, int y, int entry_count) const;
+
+    // One line of the level-complete breakdown: an order's readout (e.g. "STEAK -- medium
+    // rare to medium") and whether the turned-in tray met it. `met` colours the line so a
+    // filled order and a missed one read apart at a glance. Built by the caller from
+    // Objectives, keeping the renderer free of the level types.
+    struct ResultLine {
+        std::string text;
+        bool met = false;
+    };
+    // Draws the level-complete results screen as its own complete frame, like RenderMenu:
+    // a backdrop, a `title`, the order-by-order `lines` breakdown (green for met, red for
+    // missed), and the selectable `actions` (Replay / Back to Menu) with the one at
+    // `selected` picked out. `passed` tints the title -- amber-green on a clear, red on a
+    // miss. Owns the swapchain from clear to present; the loop calls it instead of Render
+    // while the results are up.
+    void RenderResults(std::string_view title, bool passed, std::span<const ResultLine> lines,
+                       std::span<const std::string> actions, int selected);
+    // Hit-tests the results actions: the action index the client-space point (x, y) falls
+    // in for `action_count` actions, or -1 when over none. Shares RenderResults's metrics
+    // so hover and click line up. Rows span the full width, so only y matters.
+    int ResultsActionAt(int x, int y, int action_count) const;
     // Draws the keybinds screen as its own complete frame, like RenderMenu: a backdrop,
     // a `title`, then one row per entry laid out in two columns -- `labels[i]` left,
     // `values[i]` right (the action's current key). The row at `selected` is picked out
@@ -313,6 +334,11 @@ private:
     // for the arguments; called by it once the render target is cleared and bound.
     void DrawKeybinds(std::string_view title, std::span<const std::string> labels,
                       std::span<const std::string> values, int selected, bool capturing);
+    // Packs the results screen -- title, the coloured order breakdown, then the action
+    // list -- into this frame's text region and draws it, the way DrawMenu does. See
+    // RenderResults for the arguments; called by it once the target is cleared and bound.
+    void DrawResults(std::string_view title, bool passed, std::span<const ResultLine> lines,
+                     std::span<const std::string> actions, int selected);
 
     // Writes the glyph quads for one line into this frame's text vertex region,
     // beginning at vertex index `first`, and returns the new running vertex count.

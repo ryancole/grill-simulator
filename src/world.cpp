@@ -23,6 +23,12 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
     renderer.SetEnvironment(level.environment);
     renderer.LoadScene(scene_);
     physics.AddStaticWorld(scene_.Colliders());
+
+    // Build the turn-in zone from the level's `turn_in`, if it set one. A static column
+    // like a ServeZone, it never moves, so it is made once here from the placed position.
+    if (level.turn_in) {
+        turn_in_.emplace(DirectX::XMLoadFloat3(&level.turn_in->pos), level.turn_in->radius);
+    }
 }
 
 World::~World() {

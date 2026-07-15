@@ -33,10 +33,15 @@
 #   carryable -- a catalog food or tool by `type`: pos, with optional yaw. The starting
 #                objects the player can pick up and grill; the type (in catalog.toml)
 #                supplies the model, how it cooks and how it is held.
-#   goal      -- one required delivery: a food `type`, how many (`count`, default 1), and
-#                the doneness band range it must be served in (`min`/`max`, default rare..
-#                well_done). The level is won once every goal is filled by carrying a meat
-#                cooked into range onto a serving_table (see the prop). Omit for a sandbox.
+#   goal      -- one required order: a food `type`, how many (`count`, default 1), and the
+#                doneness band range it must be cooked into (`min`/`max`, default rare..
+#                well_done). Orders are filled all at once when the loaded tray is turned in
+#                at the turn_in spot; the level is won if every order is met. Omit for a
+#                sandbox with nothing to win.
+#   turn_in   -- where the loaded tray is delivered to end the level: {pos = [x,y,z],
+#                radius = r} (metres, a ground-plane circle; height is ignored). Carry the
+#                tray inside it and press Interact to turn it in -- every meat on the tray is
+#                then judged against the goals. Omit for a sandbox with no delivery point.
 
 name = "Backyard"
 spawn = [0.0, 0.0, -7.0]
@@ -61,6 +66,8 @@ prop = [
   # carryable, placed below with the tongs -- lift it off the grate to cook.
   {type = "charcoal_grill",     pos = [0.0, 0.0, 5.0]},
   {type = "bench",  pos = [-4.5, 0.0, 1.5]},
+  # The pass: carry the loaded tray here and press E to turn it in (see turn_in below).
+  {type = "bench",  pos = [4.5, 0.0, 1.5]},
   {type = "cooler", pos = [3.6, 0.0, 6.5]},
 
   # Two crates, the upper one knocked askew and standing on the lower.
@@ -101,3 +108,8 @@ goal = [
   {type = "chicken", min = "medium",      max = "well_done"},
   {type = "patty",   count = 2, min = "medium_well", max = "well_done"},
 ]
+
+# The turn-in spot: a ground-plane circle over the pass bench (the second bench above).
+# Carry the loaded tray inside it and press Interact to hand the whole tray in and end the
+# level. The radius is generous so standing at the bench with the tray out front counts.
+turn_in = {pos = [4.5, 0.0, 1.5], radius = 1.3}
