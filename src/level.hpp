@@ -65,6 +65,22 @@ struct TurnInDef {
     float radius = 1.0f;
 };
 
+// The level's grass field: a flat rectangle of GPU-grown blades over the ground.
+// `center` is its middle (y the ground height the blades stand on) and `size` its
+// extent in metres (x by z). The rest tune the look: `color` the base blade colour
+// (sRGB), `blade_height`/`blade_width` a blade's dimensions before per-blade variation,
+// and `wind` the breeze direction and strength the blades sway in. Present only on a
+// level with a `grass` table; a level without one grows none. Drawn only where the
+// device supports mesh shaders, so on older hardware the field is simply absent.
+struct GrassDef {
+    DirectX::XMFLOAT3 center{0.0f, 0.0f, 0.0f};
+    DirectX::XMFLOAT2 size{20.0f, 20.0f};
+    DirectX::XMFLOAT3 color{0.33f, 0.5f, 0.18f};
+    float blade_height = 0.35f;
+    float blade_width = 0.03f;
+    DirectX::XMFLOAT2 wind{0.15f, 0.05f};
+};
+
 // Everything that makes one level its own place: a name, where the player starts,
 // which way the sun falls, and the things standing in it. Plain data, parsed from a
 // level's TOML file by LoadFromFile -- this struct is that format's schema, so a
@@ -103,6 +119,10 @@ struct LevelDef {
     // Where the player turns the loaded tray in to end the level. Unset on a level with
     // no `turn_in` table, which then has no delivery point (a sandbox).
     std::optional<TurnInDef> turn_in;
+
+    // The level's grass field, if it set a `grass` table. Unset on a level with none,
+    // which grows no grass.
+    std::optional<GrassDef> grass;
 };
 
 namespace levels {

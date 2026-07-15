@@ -81,6 +81,29 @@ public:
     // effect on the next Render. Call before LoadScene so the reflection probe bakes
     // the level's sky, exactly as SetSunDirection is called for its sun.
     void SetEnvironment(const Environment& environment);
+    // A level's grass field: a flat rectangle of procedurally grown blades. `center`
+    // is its middle on the ground (y the height the blades stand on), `size` its extent
+    // in metres (x by z), `color` the base blade colour (sRGB), and `wind` the world-
+    // space breeze the blades sway in. Plain data a level fills, mirrored from the
+    // toml's `grass` table.
+    struct GrassPatch {
+        DirectX::XMFLOAT3 center{0.0f, 0.0f, 0.0f};
+        DirectX::XMFLOAT2 size{20.0f, 20.0f};
+        DirectX::XMFLOAT3 color{0.33f, 0.5f, 0.18f};
+        float blade_height = 0.35f;
+        float blade_width = 0.03f;
+        DirectX::XMFLOAT2 wind{0.15f, 0.05f};
+    };
+    // Sets the level's grass, grown by the grass pass each frame; call on level load
+    // like SetEnvironment. `obstacles` are the world's collider boxes (from the Scene):
+    // the grass keeps clear of any that rise into the sward, so blades do not poke up
+    // through the patio, benches or props. The renderer filters them by height itself --
+    // the ground plane and high tree canopies are ignored -- so the caller can just hand
+    // over every static collider and dynamic body it has. ClearGrass drops the field, so
+    // a level with no grass leaves none of the previous level's lingering. Both are no-ops
+    // in effect where the device has no mesh-shader support, since the pass never runs.
+    void SetGrass(const GrassPatch& grass, std::span<const OrientedBox> obstacles);
+    void ClearGrass();
     void Resize(UINT width, UINT height);
     // `props` are the loose objects resting in the yard, drawn with the scene.
     // `highlight` is the one the player is aiming at, ringed with a glowing
@@ -149,6 +172,11 @@ public:
 
     float AspectRatio() const;
 
+    // True when the device reports mesh-shader tier 1 or better (D3D12 OPTIONS7).
+    // Feature-level 12.0 hardware may or may not have this, so anything that wants
+    // to take the mesh-shader path must check here and fall back otherwise.
+    bool MeshShadersSupported() const { return mesh_shaders_supported_; }
+
 private:
     // One draw: a slice of its model's index buffer, the base colour the glTF
     // material asked for, the descriptor of the texture that modulates it, and the
@@ -215,6 +243,10 @@ private:
     // SetSunDirection re-aims the sun for a new level.
     void UpdateShadowProjection();
     void CreatePipeline();
+    // The grass pass's mesh-shader pipeline and root signature. Built at startup only
+    // where the device reports mesh-shader tier 1; on hardware without it the pass is
+    // never created and RenderGrass never runs.
+    void CreateGrassPipeline();
     // The gradient-sky background: a fullscreen pass whose pixel shader turns each
     // pixel into a world-space view ray and samples the same analytic sky the
     // scene reflects. Its own tiny root signature (just the inverse view-projection
@@ -405,7 +437,20 @@ private:
     // The shadow pass: draws every caster depth-only into the shadow map from the
     // sun's point of view, wrapped in the barriers that flip the map between
     // depth target and shader resource.
-    void RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props);
+    void RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props, float time);
+    // Grows the level's grass field into the currently bound HDR target: dispatches the
+    // mesh shader over the field's grid of cells, each group generating a pack of
+    // blades, writing colour and depth. A no-op with no grass loaded or no mesh-shader
+    // support. Binds its own pipeline and root signature; the caller restores the
+    // scene's for whatever follows.
+    void RenderGrass(const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
+                     float time);
+    // Casts the grass into the sun's shadow map: runs the amplification and mesh shaders
+    // from the light's point of view with no pixel shader, writing the field's depth so
+    // it shadows the ground and the props. Called from RenderShadowMap while the map is a
+    // depth target. `time` drives the same wind sway, so the shadows match the blades. A
+    // no-op with no grass or no mesh-shader support.
+    void RenderGrassShadow(float time);
     // One depth-only draw per primitive, under the shadow pipeline's lone root
     // constant: the caster's model-to-light-clip matrix.
     void DrawShadowCasters(std::span<const MeshInstance> instances);
@@ -501,6 +546,27 @@ private:
     ComPtr<ID3D12RootSignature> outline_root_signature_;
     ComPtr<ID3D12PipelineState> outline_pipeline_state_;
 
+    // The grass pass: a mesh-shader pipeline (no vertex buffer -- the blades are grown
+    // on the GPU) and its root signature, both null on hardware without mesh shaders,
+    // where the pass never runs. grass_ is the field the current level set; grass_active_
+    // stays false until a level with a `grass` table loads.
+    ComPtr<ID3D12RootSignature> grass_root_signature_;
+    ComPtr<ID3D12PipelineState> grass_pipeline_state_;
+    // The depth-only variant of the grass pipeline: the same amplification and mesh
+    // shaders with no pixel shader, run from the sun's point of view to write the
+    // field's depth into the shadow map, so the grass casts onto the ground and props.
+    ComPtr<ID3D12PipelineState> grass_shadow_pipeline_state_;
+    GrassPatch grass_{};
+    bool grass_active_ = false;
+    // The world footprints the grass keeps clear of -- the patio, benches and props --
+    // packed as XZ rectangles into an upload-heap constant buffer the amplification and
+    // mesh shaders read (b2). Filled by SetGrass; grass_obstacle_count_ is how many of
+    // the fixed array are live. Bound as a root CBV, so it needs no descriptor heap slot.
+    ComPtr<ID3D12Resource> grass_obstacles_;
+    std::byte* grass_obstacles_mapped_ = nullptr;
+    D3D12_GPU_VIRTUAL_ADDRESS grass_obstacles_address_ = 0;
+    UINT grass_obstacle_count_ = 0;
+
     // The shadow pass. The map lives in dsv_heap_ slot 1 as a depth view and in
     // texture_heap_ at shadow_descriptor_ as an SRV; the light view-projection is
     // fixed (the sun does not move) and rides to the scene pass in frame_constants_.
@@ -572,5 +638,6 @@ private:
     UINT width_ = 0;
     UINT height_ = 0;
     bool allow_tearing_ = false;
+    bool mesh_shaders_supported_ = false;
     bool initialized_ = false;
 };

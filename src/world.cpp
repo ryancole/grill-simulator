@@ -21,6 +21,37 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
     // with.
     renderer.SetSunDirection(level.sun_direction);
     renderer.SetEnvironment(level.environment);
+    // Hand over the level's grass field, or clear any the last level left, so the grass
+    // pass grows this level's -- and only this level's. A no-op in effect where the
+    // device has no mesh shaders.
+    if (level.grass) {
+        const GrassDef& g = *level.grass;
+        // The footprints the grass must skip so it does not poke up through anything: the
+        // static world's colliders (the patio, fence, benches, crates and tree trunks are
+        // all here) plus the knock-over bodies at their spawn pose (the grill and cooler).
+        // The renderer filters these by height -- the ground plane and the tree canopies
+        // fall out -- so hand it everything and let it keep what reaches into the sward.
+        std::vector<OrientedBox> obstacles = scene_.Colliders();
+        for (const DynamicBody& body : scene_.DynamicBodies()) {
+            const DirectX::XMMATRIX pose = DirectX::XMLoadFloat4x4(&body.initial_transform);
+            for (const OrientedBox& shape : body.shapes) {
+                // The body's collider shapes are in its own space; carry each to where the
+                // body spawns. They are authored axis-aligned, so its model-space bound is
+                // its centre +/- half-extents, which TransformBox turns into a world box.
+                const Aabb local{{shape.center.x - shape.half_extents.x,
+                                  shape.center.y - shape.half_extents.y,
+                                  shape.center.z - shape.half_extents.z},
+                                 {shape.center.x + shape.half_extents.x,
+                                  shape.center.y + shape.half_extents.y,
+                                  shape.center.z + shape.half_extents.z}};
+                obstacles.push_back(TransformBox(local, pose));
+            }
+        }
+        renderer.SetGrass({g.center, g.size, g.color, g.blade_height, g.blade_width, g.wind},
+                          obstacles);
+    } else {
+        renderer.ClearGrass();
+    }
     renderer.LoadScene(scene_);
     physics.AddStaticWorld(scene_.Colliders());
 
