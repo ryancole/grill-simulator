@@ -25,6 +25,9 @@
 #       knock              -- 1..10, how hard it is to shove around.
 #       sound              -- clip on a hard landing ("meat", "metal", ...).
 #       hold               -- how it sits in hand ("flat" default, or "tongs").
+#       ability            -- what the primary action (left mouse) does with it in hand.
+#                             "none" (default, no behaviour) or "grip_meat" (the tongs:
+#                             clamp a meat to carry it, press again to release).
 #
 #   [tool.<name>]  -- a carryable that does not cook (the tongs, the serving tray). Same
 #       fields as a food minus the cook profile, plus:
@@ -102,6 +105,9 @@ model = "tongs-metal.glb"
 knock = 2.0
 sound = "metal"
 hold = "tongs"
+# The primary action (left mouse) clamps a meat in the jaws to carry it, and releases
+# it on a second press -- only a meat is grippable, never another tool or the tray.
+ability = "grip_meat"
 
 # The serving tray: a carryable delivery surface. `serve` is the ground-plane radius a
 # meat must be brought within; `serve_offset` is its top face in model space, where

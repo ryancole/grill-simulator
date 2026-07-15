@@ -119,6 +119,10 @@ private:
         std::vector<CookStage> stages;
         std::string name; // As it reads in the pick-up prompt.
 
+        // What the primary action does with this item in hand, from its catalog type.
+        // Dispatched by TriggerAbility while it is the carried item; None does nothing.
+        Ability ability = Ability::None;
+
         // Box shape, in the model's own space. `half_extents` are half the box's
         // side lengths; `com_offset` is the centre of the box measured from the
         // model origin, which sits on the object's underside -- so com_offset.y is
@@ -167,7 +171,7 @@ private:
     void Add(std::vector<CookStage> stages, const Model& base_model, std::string name,
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
              float knock_rating, ImpactSound impact_sound, std::optional<CookProfile> cook,
-             std::optional<ServeDef> serve);
+             std::optional<ServeDef> serve, Ability ability);
     // Fills an item's box shape (half_extents, com_offset) from the union of its
     // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);
@@ -194,6 +198,19 @@ private:
     // exact pose it was held, takes a gentle toss along the gaze, and falls from
     // there.
     void Drop(DirectX::FXMMATRIX camera_to_world);
+    // Re-enters body `index` into the simulation at `pose_world` (a model-to-world
+    // transform) and reads its pose back. With `toss` it leaves the hand along the gaze
+    // with a forward tumble (a thrown drop); without it, it is placed in situ with no
+    // velocity and simply falls from there -- how the tongs set a meat down exactly where
+    // the jaws held it, precise where the hand's throw is not. The shared tail of dropping
+    // the carried item and releasing a gripped one; the caller clears whichever slot held it.
+    void ReleaseBody(int index, DirectX::FXMMATRIX pose_world, DirectX::FXMMATRIX camera_to_world,
+                     bool toss);
+    // Fires the carried item's primary-action ability. Dispatches on the item's
+    // Ability (from its catalog type): the tongs (GripMeat) clamp or release a meat,
+    // None does nothing. `camera_to_world` places a gripped meat and aims a release.
+    // Only ever called with a valid carried index.
+    void TriggerAbility(int item, DirectX::FXMMATRIX camera_to_world);
     // Attempts to deliver the carried meat `meat` onto tray item `tray`, asking
     // `objectives` whether its current doneness fills an open order. On acceptance the
     // meat is marked served, stuck to the tray (its pose stored in the tray's frame) and
@@ -209,6 +226,18 @@ private:
     std::vector<Item> items_;
     int carried_ = -1; // index into items_, or -1
     int hovered_ = -1; // item in reach and looked at this frame, or -1
+    // The meat clamped in the carried tongs' jaws, or -1. Carried alongside the tongs
+    // (both out of the simulation): it rides a grip pose in front of the eye, cooks
+    // there, and is let go by the tongs' primary action or when the tongs are dropped.
+    int gripped_ = -1;
+    // The meat the carried tongs would grip this frame -- a meat in reach and looked at
+    // while the jaws are empty -- or -1. Cached in Update so the (const) prompt and the
+    // highlight can read it, and so the primary action grips the same one the outline
+    // ringed. Only set while carrying the tongs with nothing yet gripped.
+    int grip_target_ = -1;
+    // The primary action's current key name ("Mouse1"), cached each Update so the const
+    // prompt can name the real binding for the tongs' grab/release hint.
+    std::string primary_label_;
     // The tray item the carried meat is held over this frame (its serve zone contains
     // the meat), or -1. Cached in Update so the (const) prompt can read it -- it drives
     // the "[E] Serve" hint and is what the Interact press serves onto.

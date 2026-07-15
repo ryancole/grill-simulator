@@ -25,6 +25,10 @@ enum class Action {
     Jump,
     Sprint,
     Interact,
+    // The main action, on the left mouse button by default. Triggers the ability of
+    // whatever carryable the player is holding -- different per item, defined by the
+    // item's catalog type -- and does nothing empty-handed. Rebindable like the rest.
+    PrimaryAction,
     // Developer shortcuts: reload the current level, jump straight to one of the
     // levels, and toggle the top-left debug overlay. Bound in controls.toml alongside
     // the gameplay actions so no raw key code is left hardcoded in the game loop.
@@ -97,6 +101,12 @@ public:
     // rebind survives a relaunch. Silently does nothing if the file cannot be written --
     // a failed save must not crash the game mid-menu.
     void SaveUserOverrides(const std::filesystem::path& path) const;
+
+    // The display name of the action's primary (first) key -- "E", "Mouse1" -- for a HUD
+    // prompt that names the real binding rather than a hardcoded key. Empty when the
+    // action is unbound, "?" for a key with no writable name (only a hand-edited config
+    // can produce one). Reflects the current bindings, so it tracks a rebind.
+    std::string KeyName(Action action) const;
 
     // Held this frame: any key bound to the action is down.
     bool IsActive(Action action) const;

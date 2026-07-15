@@ -59,6 +59,15 @@ XMMATRIX TrayInHand() {
     return XMMatrixRotationX(-0.4f) * XMMatrixTranslation(0.0f, -0.38f, 0.85f);
 }
 
+// Where a meat clamped in the tongs rides: just past the jaws, out along the gaze and
+// tipped up so a face reads, a touch ahead of where TongsInHand puts the tips. Shared by
+// the draw, the cook sample and the release, so the meat is drawn, cooked and let go at
+// one consistent spot. Tuned by eye like the hand poses above; nudge if the meat floats
+// off the tips.
+XMMATRIX TongsGripPose() {
+    return XMMatrixRotationX(-0.5f) * XMMatrixTranslation(0.17f, -0.32f, 0.78f);
+}
+
 // The in-hand pose a carryable's catalog hold style asks for. Props owns the two
 // poses; the catalog just names which one.
 XMMATRIX HoldFor(HoldStyle hold) {
@@ -131,7 +140,8 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
         // The base (raw) model cuts the physics box; the whole stage list rides along
         // so the item can swap look as it cooks.
         Add(spawn.models, pool[spawn.models.front().model], spawn.name, spawn.pos, spawn.yaw,
-            HoldFor(spawn.hold), spawn.knock_rating, spawn.impact_sound, spawn.cook, spawn.serve);
+            HoldFor(spawn.hold), spawn.knock_rating, spawn.impact_sound, spawn.cook, spawn.serve,
+            spawn.ability);
     }
 }
 
@@ -210,10 +220,11 @@ std::uint32_t Props::CurrentModel(const Item& item) {
 void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::string name,
                 XMFLOAT3 position, float yaw_degrees, FXMMATRIX held_local, float knock_rating,
                 ImpactSound impact_sound, std::optional<CookProfile> cook,
-                std::optional<ServeDef> serve) {
+                std::optional<ServeDef> serve, Ability ability) {
     Item item{};
     item.stages = std::move(stages);
     item.name = std::move(name);
+    item.ability = ability;
     XMStoreFloat4x4(&item.held_local, held_local);
     if (cook) {
         item.cook.emplace(*cook);
@@ -278,6 +289,22 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     }
 
+    // The meat the tongs would grip this frame: with the tongs in hand and their jaws
+    // empty, the meat in reach and looked at. Only a meat qualifies -- a served one, the
+    // tray or another tool is skipped -- so the primary action clamps food and nothing
+    // else. Computed before the press so the same read drives the grip, the prompt and
+    // the outline. The gaze sweep already excludes the disabled carried/gripped bodies.
+    grip_target_ = -1;
+    if (carried_ >= 0 && items_[carried_].ability == Ability::GripMeat && gripped_ < 0) {
+        const int target = PickTarget(eye, forward);
+        if (target >= 0 && target != carried_ && items_[target].cook && !items_[target].served) {
+            grip_target_ = target;
+        }
+    }
+    // The primary action's key name, cached for the (const) prompt so its grab/release
+    // hint names the real binding rather than a hardcoded key.
+    primary_label_ = actions.KeyName(Action::PrimaryAction);
+
     // Edge-triggered: one grab per press, so holding Interact does not pick up and
     // drop on alternate frames. Actions latches the press for us, so this is a
     // single event even while the key is held down.
@@ -308,6 +335,14 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     }
 
+    // The primary action fires the held item's ability -- what left mouse does depends
+    // on what is in hand. Edge-triggered like the grab, and gated on carrying, so an
+    // empty hand does nothing and a held button fires once. Separate from Interact, so
+    // acting on an item and dropping it are distinct presses.
+    if (actions.WasPressed(Action::PrimaryAction) && carried_ >= 0) {
+        TriggerAbility(carried_, camera_to_world);
+    }
+
     // What the prompt reports this frame: nothing to pick while carrying, else
     // whatever is in reach and looked at. Cheap enough to recompute outright for
     // a handful of items.
@@ -318,9 +353,17 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     // served item is skipped: its body is out of the simulation and its resting pose
     // was set to the counter when it was delivered, so there is nothing to read back.
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-        if (i != carried_ && !items_[i].served) {
+        if (i != carried_ && i != gripped_ && !items_[i].served) {
             RebuildTransform(items_[i]);
         }
+    }
+
+    // The meat clamped in the tongs rides the grip pose in front of the eye. Keep its
+    // resting current from there (its body is out of the simulation, so nothing else
+    // moves it), so the cook samples heat where the jaws hold it and any pose read is
+    // right. Done alongside the served-rides-tray step below, before the cook loop.
+    if (gripped_ >= 0) {
+        XMStoreFloat4x4(&items_[gripped_].resting, TongsGripPose() * camera_to_world);
     }
 
     // Served meat rides the tray it was delivered onto: its world pose is its stored
@@ -364,8 +407,8 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     held_.clear();
     highlight_.clear();
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-        if (i == carried_) {
-            continue; // drawn in the held pass below
+        if (i == carried_ || i == gripped_) {
+            continue; // drawn in the held pass below (the tongs, and the meat in them)
         }
         // A meat served onto the carried tray travels in the hand with it, so it draws
         // in the held pass alongside the tray rather than out in the world.
@@ -388,6 +431,12 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
             }
         }
     }
+    // The meat clamped in the tongs draws in the hand at the grip pose, over the cleared
+    // depth like the tongs themselves, so a wall never slices it.
+    if (gripped_ >= 0) {
+        held_.push_back(MakeInstance(CurrentModel(items_[gripped_]),
+                                     TongsGripPose() * camera_to_world, ItemTint(items_[gripped_])));
+    }
     // The outline draws the hovered item a second time at its resting pose, so
     // it lines up exactly with the world copy above. The outline shader ignores
     // tint, so the browning does not matter here, but pass it for consistency.
@@ -396,10 +445,35 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
                                           XMLoadFloat4x4(&items_[hovered_].resting),
                                           ItemTint(items_[hovered_])));
     }
+    // While the tongs are held with empty jaws, ring the meat they would grip -- the
+    // same outline the E-pick uses, so the mouse grab reads the same way. hovered_ is
+    // always -1 while carrying, so this never double-rings with the block above.
+    if (grip_target_ >= 0) {
+        highlight_.push_back(MakeInstance(CurrentModel(items_[grip_target_]),
+                                          XMLoadFloat4x4(&items_[grip_target_].resting),
+                                          ItemTint(items_[grip_target_])));
+    }
 }
 
 std::string Props::PromptText() const {
     if (carried_ >= 0) {
+        // The tongs grip meat on the primary action. Offer grab (a meat looked at) or
+        // release (one already in the jaws) before the generic drop, so the mouse action
+        // is discoverable; the label names the real binding. Off both, it falls through
+        // to "[E] Drop", which lets go of the tongs (and any meat) together.
+        if (items_[carried_].ability == Ability::GripMeat) {
+            if (gripped_ >= 0) {
+                const Item& meat = items_[gripped_];
+                return "[" + primary_label_ + "] Release " + meat.name + " (" +
+                       std::string(meat.cook->DonenessLabel()) + ")";
+            }
+            if (grip_target_ >= 0) {
+                const Item& meat = items_[grip_target_];
+                return "[" + primary_label_ + "] Grab " + meat.name + " (" +
+                       std::string(meat.cook->DonenessLabel()) + ")";
+            }
+            return "[E] Drop";
+        }
         // Over a tray, the carried meat can be delivered. Only offer "[E] Serve" when
         // this cook would actually be taken; otherwise say why nothing happens -- the
         // band it needs, or that no order wants this food -- so a rejected press reads as
@@ -446,11 +520,12 @@ std::vector<std::string> Props::MeatDebugLines() const {
 }
 
 std::optional<Props::MeatReadout> Props::ActiveMeat() const {
-    // Prefer the carried item -- what the player is committing to -- and fall back to
-    // the one merely looked at while empty-handed. Either way it counts only if it is
-    // a meat: a cooking item carries a CookInformation the band is read from, while the
-    // tongs and the tray do not and so surface no readout.
-    const int index = carried_ >= 0 ? carried_ : hovered_;
+    // Prefer a meat clamped in the tongs, then the carried item, then the one merely
+    // looked at while empty-handed -- so a steak carried in the jaws (the tongs
+    // themselves have no cook) still marks the "you are here" on its order's gauge.
+    // Either way it counts only if it is a meat: a cooking item carries a CookInformation
+    // the band is read from, while the tongs and the tray do not and so surface nothing.
+    const int index = gripped_ >= 0 ? gripped_ : (carried_ >= 0 ? carried_ : hovered_);
     if (index < 0) {
         return std::nullopt;
     }
@@ -495,35 +570,72 @@ int Props::PickTarget(FXMVECTOR eye, FXMVECTOR forward) const {
     return static_cast<const BodyTag*>(hit.block.actor->userData)->prop_index;
 }
 
-void Props::Drop(FXMMATRIX camera_to_world) {
-    Item& item = items_[carried_];
+void Props::ReleaseBody(int index, FXMMATRIX pose_world, FXMMATRIX camera_to_world, bool toss) {
+    Item& item = items_[index];
 
-    // Let go at the exact pose the object was carried, so it falls out of the
-    // hand rather than teleporting to a tidy spot. The held instance is drawn
-    // under held_local * camera_to_world, and the body frame is the model frame,
-    // so that same matrix is the body's pose.
-    const XMMATRIX held_world = XMLoadFloat4x4(&item.held_local) * camera_to_world;
-    const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
-    const XMVECTOR right = XMVector3Normalize(camera_to_world.r[0]);
+    // A thrown drop leaves the hand with a gentle underarm toss down the gaze and a
+    // forward pitch about the player's right, so it tumbles over instead of gliding down
+    // flat. A placed drop (the tongs) gets neither: zeroed velocity means it falls
+    // straight from the pose it was held at, landing exactly where the jaws were.
+    XMFLOAT3 linear{0.0f, 0.0f, 0.0f};
+    XMFLOAT3 spin{0.0f, 0.0f, 0.0f};
+    if (toss) {
+        const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
+        const XMVECTOR right = XMVector3Normalize(camera_to_world.r[0]);
+        XMStoreFloat3(&linear, XMVectorAdd(XMVectorScale(forward, kThrowSpeed),
+                                           XMVectorSet(0.0f, -kThrowDrop, 0.0f, 0.0f)));
+        XMStoreFloat3(&spin, XMVectorScale(right, kThrowSpin));
+    }
 
-    XMFLOAT3 toss;
-    XMStoreFloat3(&toss, XMVectorAdd(XMVectorScale(forward, kThrowSpeed),
-                                     XMVectorSet(0.0f, -kThrowDrop, 0.0f, 0.0f)));
-    XMFLOAT3 spin;
-    XMStoreFloat3(&spin, XMVectorScale(right, kThrowSpin));
-
-    // Back into the simulation at the hand pose, with a gentle underarm toss down
-    // the gaze and a forward pitch about the player's right so it tumbles over
-    // instead of gliding down flat.
     PxRigidDynamic* body = item.rigid.actor();
     body->setActorFlag(PxActorFlag::eDISABLE_SIMULATION, false);
-    body->setGlobalPose(ToPxTransform(held_world));
-    body->setLinearVelocity(PxVec3(toss.x, toss.y, toss.z));
+    body->setGlobalPose(ToPxTransform(pose_world));
+    body->setLinearVelocity(PxVec3(linear.x, linear.y, linear.z));
     body->setAngularVelocity(PxVec3(spin.x, spin.y, spin.z));
     body->wakeUp();
     RebuildTransform(item);
+}
 
+void Props::Drop(FXMMATRIX camera_to_world) {
+    // If the tongs are gripping a meat, set it down first -- placed in the jaws' spot
+    // with no toss, so it drops straight rather than being flung as the tongs let go.
+    if (gripped_ >= 0) {
+        ReleaseBody(gripped_, TongsGripPose() * camera_to_world, camera_to_world, /*toss=*/false);
+        gripped_ = -1;
+    }
+
+    // Let go at the exact pose the object was carried, so it falls out of the hand
+    // rather than teleporting to a tidy spot. The held instance is drawn under
+    // held_local * camera_to_world, and the body frame is the model frame, so that same
+    // matrix is the body's pose. The hand throws -- tongs are the precise placer.
+    ReleaseBody(carried_, XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world,
+                camera_to_world, /*toss=*/true);
     carried_ = -1;
+}
+
+void Props::TriggerAbility(int item, FXMMATRIX camera_to_world) {
+    // Dispatch on the carried item's catalog-declared ability. None is the placeholder
+    // every item starts at; new behaviours get their own case here.
+    switch (items_[item].ability) {
+    case Ability::None:
+        break; // No behaviour yet.
+    case Ability::GripMeat:
+        // The tongs. With a meat in the jaws, set it down exactly where they hold it --
+        // placed with no toss, so it drops straight onto whatever is below (the grate),
+        // more precise than the hand's throw. Otherwise clamp the meat looked at --
+        // grip_target_, already filtered to a meat in reach -- out of the simulation.
+        if (gripped_ >= 0) {
+            ReleaseBody(gripped_, TongsGripPose() * camera_to_world, camera_to_world,
+                        /*toss=*/false);
+            gripped_ = -1;
+        } else if (grip_target_ >= 0) {
+            items_[grip_target_].rigid.actor()->setActorFlag(PxActorFlag::eDISABLE_SIMULATION,
+                                                             true);
+            gripped_ = grip_target_;
+            grip_target_ = -1;
+        }
+        break;
+    }
 }
 
 bool Props::Serve(int meat, int tray, Objectives& objectives) {

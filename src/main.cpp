@@ -126,13 +126,45 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
     }
     case WM_LBUTTONDOWN:
         if (game->state == GameState::Playing) {
-            // In play a click captures the cursor for mouse-look.
-            game->input.SetMouseLook(hwnd, true);
+            if (game->input.mouse_look()) {
+                // Already looking: the click is a gameplay button. Record it as
+                // VK_LBUTTON so the action layer sees the primary-action press (the
+                // held item's ability). WM_LBUTTONUP below clears it.
+                game->input.OnKey(VK_LBUTTON, true);
+            } else {
+                // The first click after dropping into play (or returning from the
+                // menu) recaptures the cursor for mouse-look. It must not also fire
+                // the primary action, so it is deliberately not recorded as a press.
+                game->input.SetMouseLook(hwnd, true);
+            }
         } else {
             // On the menu the cursor stays free; the click confirms whatever entry
             // it lands on, which the menu loop resolves and acts on.
             game->input.OnLeftButtonDown();
         }
+        return 0;
+    case WM_LBUTTONUP:
+        // Always release, even in the menu, so a button held across an Esc-to-menu
+        // cannot stick down. A release with no matching recorded press is a no-op.
+        game->input.OnKey(VK_LBUTTON, false);
+        return 0;
+    case WM_RBUTTONDOWN:
+        // The other mouse buttons are gameplay buttons too (bindable as Mouse2 /
+        // Mouse3), recorded only in play so a menu click never drives an action.
+        if (game->state == GameState::Playing) {
+            game->input.OnKey(VK_RBUTTON, true);
+        }
+        return 0;
+    case WM_RBUTTONUP:
+        game->input.OnKey(VK_RBUTTON, false);
+        return 0;
+    case WM_MBUTTONDOWN:
+        if (game->state == GameState::Playing) {
+            game->input.OnKey(VK_MBUTTON, true);
+        }
+        return 0;
+    case WM_MBUTTONUP:
+        game->input.OnKey(VK_MBUTTON, false);
         return 0;
     case WM_KEYDOWN:
         if (wparam == VK_ESCAPE) {
