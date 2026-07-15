@@ -205,9 +205,9 @@ struct GrassConstants {
 
 static_assert(sizeof(GrassConstants) % sizeof(UINT) == 0);
 constexpr UINT kGrassConstantDwords = sizeof(GrassConstants) / sizeof(UINT);
-// The root constants plus the frame constant buffer (a root CBV, two DWORDs) and the
-// shadow-map table (one DWORD).
-static_assert(kGrassConstantDwords + 3 <= 64, "A root signature holds at most 64 DWORDs in total");
+// The root constants plus the frame constant buffer and the obstacle buffer (two root
+// CBVs, two DWORDs each) and the shadow-map table (one DWORD).
+static_assert(kGrassConstantDwords + 5 <= 64, "A root signature holds at most 64 DWORDs in total");
 
 // The world size of one grass cell -- one mesh-shader group's patch of ground. A
 // group grows up to BLADES_PER_GROUP blades (see grass.hlsl), so this sets the peak
@@ -216,6 +216,21 @@ constexpr float kGrassCellSize = 0.5f;
 // How many cells one amplification group culls, one thread each. Must match AS_GROUP
 // in grass.hlsl, which sizes the payload the group hands to its mesh groups.
 constexpr UINT kGrassAsGroup = 32;
+
+// The most world footprints the grass keeps clear of at once. Must match
+// MAX_GRASS_OBSTACLES in grass.hlsl.
+constexpr UINT kMaxGrassObstacles = 64;
+
+// Mirrors the GrassObstacles cbuffer in grass.hlsl: the count of live footprints,
+// then a fixed array of XZ rectangles (min.x, min.z, max.x, max.z) the grass avoids.
+// A constant buffer bound as a root CBV, so it needs no descriptor heap slot.
+struct GrassObstaclesCB {
+    UINT count;
+    XMFLOAT3 pad;
+    XMFLOAT4 boxes[kMaxGrassObstacles];
+};
+
+static_assert(sizeof(GrassObstaclesCB) % 16 == 0, "cbuffer must be a whole 16-byte multiple");
 
 // Stamp one Environment into each pass's constant buffer. Each pass reads only the
 // slice it needs -- the scene the whole lighting environment, the sky just the
@@ -1011,10 +1026,13 @@ void Renderer::CreateGrassPipeline() {
     // and the sun's shadow map (t0), so a blade knows whether the sun reaches it. No
     // input layout: the blades are generated on the GPU, not fetched from a buffer.
     const CD3DX12_DESCRIPTOR_RANGE shadow_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-    CD3DX12_ROOT_PARAMETER parameters[3];
+    CD3DX12_ROOT_PARAMETER parameters[4];
     parameters[0].InitAsConstants(kGrassConstantDwords, 0);
     parameters[1].InitAsConstantBufferView(1);
     parameters[2].InitAsDescriptorTable(1, &shadow_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    // b2: the obstacle rectangles. Read by the amplification shader (whole-cell cull) and
+    // the mesh shader (per-blade), so it stays visible to all stages.
+    parameters[3].InitAsConstantBufferView(2);
 
     // The shadow comparison sampler, same as the scene's: linear comparison for 2x2 PCF
     // within a tap, white border so a blade sampling off the map's edge reads lit.
@@ -1107,6 +1125,25 @@ void Renderer::CreateGrassPipeline() {
     ThrowIfFailed(
         device_->CreatePipelineState(&shadow_stream_desc, IID_PPV_ARGS(&grass_shadow_pipeline_state_)),
         "CreatePipelineState(grass shadow)");
+
+    // The obstacle constant buffer the shaders read to keep clear of the world's
+    // footprints. One upload-heap region kept mapped and rewritten by SetGrass on each
+    // level load -- the footprints are static within a level, so unlike the frame
+    // constants it is not buffered per frame in flight.
+    const CD3DX12_HEAP_PROPERTIES upload_heap(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RESOURCE_DESC ob_desc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(GrassObstaclesCB));
+    ThrowIfFailed(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &ob_desc,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&grass_obstacles_)),
+                  "CreateCommittedResource(grass obstacles)");
+    const CD3DX12_RANGE no_read(0, 0);
+    void* mapped = nullptr;
+    ThrowIfFailed(grass_obstacles_->Map(0, &no_read, &mapped), "GrassObstacles::Map");
+    grass_obstacles_mapped_ = static_cast<std::byte*>(mapped);
+    grass_obstacles_address_ = grass_obstacles_->GetGPUVirtualAddress();
+    // Start empty until a level's SetGrass fills it.
+    GrassObstaclesCB empty{};
+    std::memcpy(grass_obstacles_mapped_, &empty, sizeof(empty));
 }
 
 void Renderer::CreateSkyPipeline() {
@@ -1654,11 +1691,74 @@ void Renderer::SetEnvironment(const Environment& environment) {
     environment_ = environment;
 }
 
-void Renderer::SetGrass(const GrassPatch& grass) {
-    // Just record the field; RenderGrass grows it each frame from grass_. On hardware
-    // without mesh shaders the pass never runs, so this is remembered but never drawn.
+void Renderer::SetGrass(const GrassPatch& grass, std::span<const OrientedBox> obstacles) {
+    // Record the field; RenderGrass grows it each frame from grass_. On hardware without
+    // mesh shaders the pass never runs, so this is remembered but never drawn.
     grass_ = grass;
     grass_active_ = true;
+
+    // Nothing to pack where the pass will not run (the obstacle buffer was never built).
+    if (grass_obstacles_mapped_ == nullptr) {
+        return;
+    }
+
+    // The grass grows on the plane at grass_.center.y and rises about a blade's height.
+    // A collider is an obstacle -- a footprint the grass must skip -- only if it rises
+    // above that plane and reaches down into the sward: this drops the ground box itself
+    // (its top sits at the plane) and high tree canopies (their underside floats above
+    // the blades), while keeping the patio, benches, crates, trunks, grill and cooler.
+    const float base = grass.center.y;
+    const float lift = 0.03f;                              // above the plane to count
+    const float layer_top = base + grass.blade_height * 1.4f; // the top of the sward
+    const float margin = 0.06f;                           // clear the footprint edges a little
+
+    // The field's own XZ rectangle, so a footprint entirely outside it can be dropped.
+    const float half_x = grass.size.x * 0.5f;
+    const float half_z = grass.size.y * 0.5f;
+    const float field_min_x = grass.center.x - half_x;
+    const float field_max_x = grass.center.x + half_x;
+    const float field_min_z = grass.center.z - half_z;
+    const float field_max_z = grass.center.z + half_z;
+
+    GrassObstaclesCB packed{};
+    UINT count = 0;
+    for (const OrientedBox& box : obstacles) {
+        if (count >= kMaxGrassObstacles) {
+            break;
+        }
+        const float top = box.center.y + box.half_extents.y;
+        const float bottom = box.center.y - box.half_extents.y;
+        if (top <= base + lift || bottom >= layer_top) {
+            continue; // the ground plane, or something floating clear above the blades
+        }
+
+        // The world XZ bound of the oriented box: its half-extents projected onto X and Z
+        // through the rotation, so a yawed crate clears the true span it turns to cover.
+        const XMMATRIX rot = XMMatrixRotationQuaternion(XMLoadFloat4(&box.orientation));
+        const XMFLOAT3 h = box.half_extents;
+        const float ext_x = std::abs(XMVectorGetX(rot.r[0])) * h.x +
+                            std::abs(XMVectorGetX(rot.r[1])) * h.y +
+                            std::abs(XMVectorGetX(rot.r[2])) * h.z;
+        const float ext_z = std::abs(XMVectorGetZ(rot.r[0])) * h.x +
+                            std::abs(XMVectorGetZ(rot.r[1])) * h.y +
+                            std::abs(XMVectorGetZ(rot.r[2])) * h.z;
+        const float min_x = box.center.x - ext_x - margin;
+        const float max_x = box.center.x + ext_x + margin;
+        const float min_z = box.center.z - ext_z - margin;
+        const float max_z = box.center.z + ext_z + margin;
+
+        // Skip anything that does not touch the field at all.
+        if (max_x < field_min_x || min_x > field_max_x || max_z < field_min_z ||
+            min_z > field_max_z) {
+            continue;
+        }
+
+        packed.boxes[count] = {min_x, min_z, max_x, max_z};
+        ++count;
+    }
+    packed.count = count;
+    grass_obstacle_count_ = count;
+    std::memcpy(grass_obstacles_mapped_, &packed, sizeof(packed));
 }
 
 void Renderer::ClearGrass() {
@@ -3210,6 +3310,8 @@ void Renderer::RenderGrass(const XMMATRIX& view_projection, XMFLOAT3 camera_posi
     // The sun's shadow map (bound from the texture heap, live as a shader resource by
     // now), so a blade can tell whether the sun reaches it.
     command_list_->SetGraphicsRootDescriptorTable(2, TextureHandle(shadow_descriptor_));
+    // The obstacle footprints, so the field keeps clear of the patio, benches and props.
+    command_list_->SetGraphicsRootConstantBufferView(3, grass_obstacles_address_);
 
     // One amplification group per pack of kGrassAsGroup cells; each culls its cells and
     // launches a mesh group for every survivor.
@@ -3254,6 +3356,9 @@ void Renderer::RenderGrassShadow(float time) {
     command_list_->SetGraphicsRootSignature(grass_root_signature_.Get());
     command_list_->SetPipelineState(grass_shadow_pipeline_state_.Get());
     command_list_->SetGraphicsRoot32BitConstants(0, kGrassConstantDwords, &constants, 0);
+    // The amplification shader reads the obstacle footprints to skip cells under models;
+    // the depth-only pass has no pixel shader, so it binds no shadow map or frame buffer.
+    command_list_->SetGraphicsRootConstantBufferView(3, grass_obstacles_address_);
 
     const UINT as_groups = (cells_x * cells_z + kGrassAsGroup - 1) / kGrassAsGroup;
     command_list_->DispatchMesh(as_groups, 1, 1);

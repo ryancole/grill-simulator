@@ -34,6 +34,10 @@
 // which sizes the DispatchMesh grid.
 #define AS_GROUP 32
 
+// The most world footprints the grass will keep clear of at once. Must match
+// kMaxGrassObstacles in renderer.cpp, which sizes the constant buffer.
+#define MAX_GRASS_OBSTACLES 64
+
 // Everything the field needs that is not per-frame lighting. Root constants, so it
 // costs no buffer: the C++ mirror is GrassConstants in renderer.cpp -- keep the two
 // layouts in step.
@@ -80,6 +84,16 @@ cbuffer FrameConstants : register(b1) {
     float g_frame_pad;
 };
 
+// The world footprints the grass keeps clear of, as XZ rectangles (min.x, min.z,
+// max.x, max.z) already margined -- the patio, benches and props. Only the first
+// g_obstacle_count entries are live. The amplification shader drops a cell wholly
+// inside one; the mesh shader collapses any single blade that lands inside one.
+cbuffer GrassObstacles : register(b2) {
+    uint g_obstacle_count;
+    float3 g_obstacle_pad;
+    float4 g_obstacles[MAX_GRASS_OBSTACLES];
+};
+
 // The sun's depth buffer from the shadow pass, sampled so a blade knows whether the
 // sun reaches it. Only the on-screen pixel shader reads it; the shadow-cast pass has
 // no pixel shader. Bound at the same fixed slot the scene pass uses.
@@ -115,6 +129,31 @@ uint LodBlades(float dist) {
         return BLADES_PER_GROUP / 2;
     }
     return BLADES_PER_GROUP / 4;
+}
+
+// True if the ground point p (xz) falls inside any obstacle rectangle -- where a model
+// stands, so no blade should grow there.
+bool PointBlocked(float2 p) {
+    for (uint i = 0; i < g_obstacle_count; ++i) {
+        const float4 o = g_obstacles[i];
+        if (p.x >= o.x && p.x <= o.z && p.y >= o.y && p.y <= o.w) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// True if a whole cell [cell_min, cell_min + size] lies inside one obstacle, so the
+// amplification shader can drop it without launching a mesh group at all.
+bool CellBlocked(float2 cell_min, float size) {
+    const float2 cell_max = cell_min + size;
+    for (uint i = 0; i < g_obstacle_count; ++i) {
+        const float4 o = g_obstacles[i];
+        if (cell_min.x >= o.x && cell_max.x <= o.z && cell_min.y >= o.y && cell_max.y <= o.w) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The payload the amplification shader fills and hands to the mesh groups it spawns:
@@ -175,7 +214,9 @@ void ASMain(uint gtid : SV_GroupThreadID, uint gid : SV_GroupID) {
         const float radius = g_cell_size * 0.70711f + g_blade_height;
         const float dist = distance(center, g_grass_camera);
         blades = LodBlades(dist);
-        keep = blades > 0 && SphereInFrustum(center, radius);
+        // Drop the cell if it is off-screen, too far, or sits wholly under a model.
+        keep = blades > 0 && SphereInFrustum(center, radius) &&
+               !CellBlocked(cell_min, g_cell_size);
     }
 
     // Compact the survivors so the mesh groups are launched back-to-back with no gaps.
@@ -236,6 +277,12 @@ void MSMain(uint gtid : SV_GroupThreadID, uint3 gid : SV_GroupID, in payload Pay
     const float2 pos2 = cell_min + float2(r0, r1) * g_cell_size;
     const float3 base = float3(pos2.x, g_patch_origin.y, pos2.y);
 
+    // A blade that lands inside a model's footprint is collapsed to a point at its base,
+    // so its triangles are degenerate and draw nothing -- the cell-level cull above skips
+    // the interior of a large obstacle like the patio, and this catches the blades in the
+    // cells that only partly overlap one.
+    const bool blocked = PointBlocked(pos2);
+
     // Per-blade variation, so the sward is not a lawn of clones.
     const float height = g_blade_height * (0.7f + 0.6f * r2);
     const float width = g_blade_width * (0.75f + 0.5f * r3);
@@ -277,7 +324,8 @@ void MSMain(uint gtid : SV_GroupThreadID, uint3 gid : SV_GroupID, in payload Pay
 
         [unroll]
         for (uint side = 0; side < 2; ++side) {
-            const float3 world = centre + w * (half_width * (side == 0 ? -1.0f : 1.0f));
+            const float3 world =
+                blocked ? base : centre + w * (half_width * (side == 0 ? -1.0f : 1.0f));
             MSOut o;
             o.position = mul(float4(world, 1.0f), g_view_projection);
             o.world = world;

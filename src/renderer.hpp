@@ -95,10 +95,14 @@ public:
         DirectX::XMFLOAT2 wind{0.15f, 0.05f};
     };
     // Sets the level's grass, grown by the grass pass each frame; call on level load
-    // like SetEnvironment. ClearGrass drops it, so a level with no grass leaves none of
-    // the previous level's lingering. Both are no-ops in effect where the device has no
-    // mesh-shader support, since the pass never runs there.
-    void SetGrass(const GrassPatch& grass);
+    // like SetEnvironment. `obstacles` are the world's collider boxes (from the Scene):
+    // the grass keeps clear of any that rise into the sward, so blades do not poke up
+    // through the patio, benches or props. The renderer filters them by height itself --
+    // the ground plane and high tree canopies are ignored -- so the caller can just hand
+    // over every static collider and dynamic body it has. ClearGrass drops the field, so
+    // a level with no grass leaves none of the previous level's lingering. Both are no-ops
+    // in effect where the device has no mesh-shader support, since the pass never runs.
+    void SetGrass(const GrassPatch& grass, std::span<const OrientedBox> obstacles);
     void ClearGrass();
     void Resize(UINT width, UINT height);
     // `props` are the loose objects resting in the yard, drawn with the scene.
@@ -554,6 +558,14 @@ private:
     ComPtr<ID3D12PipelineState> grass_shadow_pipeline_state_;
     GrassPatch grass_{};
     bool grass_active_ = false;
+    // The world footprints the grass keeps clear of -- the patio, benches and props --
+    // packed as XZ rectangles into an upload-heap constant buffer the amplification and
+    // mesh shaders read (b2). Filled by SetGrass; grass_obstacle_count_ is how many of
+    // the fixed array are live. Bound as a root CBV, so it needs no descriptor heap slot.
+    ComPtr<ID3D12Resource> grass_obstacles_;
+    std::byte* grass_obstacles_mapped_ = nullptr;
+    D3D12_GPU_VIRTUAL_ADDRESS grass_obstacles_address_ = 0;
+    UINT grass_obstacle_count_ = 0;
 
     // The shadow pass. The map lives in dsv_heap_ slot 1 as a depth view and in
     // texture_heap_ at shadow_descriptor_ as an SRV; the light view-projection is
