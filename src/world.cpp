@@ -21,6 +21,15 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
     // with.
     renderer.SetSunDirection(level.sun_direction);
     renderer.SetEnvironment(level.environment);
+    // Hand over the level's grass field, or clear any the last level left, so the grass
+    // pass grows this level's -- and only this level's. A no-op in effect where the
+    // device has no mesh shaders.
+    if (level.grass) {
+        const GrassDef& g = *level.grass;
+        renderer.SetGrass({g.center, g.size, g.color, g.blade_height, g.blade_width, g.wind});
+    } else {
+        renderer.ClearGrass();
+    }
     renderer.LoadScene(scene_);
     physics.AddStaticWorld(scene_.Colliders());
 

@@ -180,6 +180,43 @@ constexpr UINT kLightShaftConstantDwords = sizeof(LightShaftConstants) / sizeof(
 static_assert(kLightShaftConstantDwords + 1 <= 64,
               "A root signature holds at most 64 DWORDs in total");
 
+// Mirrors the GrassConstants cbuffer in shaders/grass.hlsl: the field's placement
+// and per-blade parameters the mesh shader grows the grass from, plus the view-
+// projection and the eye. Each float3 opens a fresh cbuffer row and is followed by
+// the scalar that shares it, so the C++ rows match the HLSL with no straddle. The
+// lighting the grass needs (sun colour, sky, fog) rides in the shared FrameConstants
+// buffer, bound alongside, not here.
+struct GrassConstants {
+    XMFLOAT4X4 view_projection;
+    XMFLOAT3 patch_origin;
+    float cell_size;
+    XMFLOAT3 camera_position;
+    float time;
+    XMFLOAT3 blade_color;
+    float blade_height;
+    XMFLOAT3 sun_direction;
+    float blade_width;
+    XMFLOAT2 wind;
+    XMUINT2 grid;
+    // Level-of-detail distances from the eye, in metres: (full within x, half within
+    // y, quarter beyond, cull past z). Mirrors g_lod in grass.hlsl; w is padding.
+    XMFLOAT4 lod;
+};
+
+static_assert(sizeof(GrassConstants) % sizeof(UINT) == 0);
+constexpr UINT kGrassConstantDwords = sizeof(GrassConstants) / sizeof(UINT);
+// The root constants plus the frame constant buffer (a root CBV, two DWORDs) and the
+// shadow-map table (one DWORD).
+static_assert(kGrassConstantDwords + 3 <= 64, "A root signature holds at most 64 DWORDs in total");
+
+// The world size of one grass cell -- one mesh-shader group's patch of ground. A
+// group grows up to BLADES_PER_GROUP blades (see grass.hlsl), so this sets the peak
+// density: a 0.5 m cell with 16 blades is 64 blades per square metre up close.
+constexpr float kGrassCellSize = 0.5f;
+// How many cells one amplification group culls, one thread each. Must match AS_GROUP
+// in grass.hlsl, which sizes the payload the group hands to its mesh groups.
+constexpr UINT kGrassAsGroup = 32;
+
 // Stamp one Environment into each pass's constant buffer. Each pass reads only the
 // slice it needs -- the scene the whole lighting environment, the sky just the
 // gradient and clouds, the shafts just their own three fields -- so a single source
@@ -472,6 +509,12 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     CreateTonemapPipeline();
     CreateLightShaftPipeline();
     CreateBloomPipeline();
+    // The grass pass only exists where the device grows blades in a mesh shader; on
+    // hardware without the tier the pipeline is never built and RenderGrass returns
+    // early. CreateDevice set the flag before any of this ran.
+    if (mesh_shaders_supported_) {
+        CreateGrassPipeline();
+    }
 
     // Everything above is the session's, not the level's. The scene geometry, the
     // font atlas and the reflection probe come up in LoadScene, so a level can be
@@ -552,6 +595,16 @@ void Renderer::CreateDevice() {
                                             sizeof(options12))) ||
         !options12.EnhancedBarriersSupported) {
         throw std::runtime_error("This GPU or driver does not support D3D12 enhanced barriers");
+    }
+
+    // Mesh shaders are optional: unlike enhanced barriers they are not assumed present
+    // on this FL 12.0 target, so record the tier as a capability rather than requiring
+    // it. Grass and anything else that wants the amplification/mesh path checks
+    // MeshShadersSupported() and falls back to instanced draws where it is absent.
+    D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7{};
+    if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &options7,
+                                               sizeof(options7)))) {
+        mesh_shaders_supported_ = options7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1;
     }
 
     BOOL tearing = FALSE;
@@ -948,6 +1001,112 @@ void Renderer::CreatePipeline() {
     ThrowIfFailed(
         device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&scene_capture_pipeline_state_)),
         "CreateGraphicsPipelineState(capture)");
+}
+
+void Renderer::CreateGrassPipeline() {
+    // Three root parameters: the field and per-blade constants the amplification and
+    // mesh shaders grow the grass from (b0), the shared frame constant buffer (b1) the
+    // pixel shader lights against -- the very buffer the scene pass reads, so the grass
+    // takes the level's sun, sky, fog and shadow matrix with no plumbing of its own --
+    // and the sun's shadow map (t0), so a blade knows whether the sun reaches it. No
+    // input layout: the blades are generated on the GPU, not fetched from a buffer.
+    const CD3DX12_DESCRIPTOR_RANGE shadow_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+    CD3DX12_ROOT_PARAMETER parameters[3];
+    parameters[0].InitAsConstants(kGrassConstantDwords, 0);
+    parameters[1].InitAsConstantBufferView(1);
+    parameters[2].InitAsDescriptorTable(1, &shadow_range, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    // The shadow comparison sampler, same as the scene's: linear comparison for 2x2 PCF
+    // within a tap, white border so a blade sampling off the map's edge reads lit.
+    CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR,
+                                        D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+                                        D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+                                        D3D12_TEXTURE_ADDRESS_MODE_BORDER);
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // No input assembler -- a mesh shader has none -- so unlike the scene signature this
+    // omits ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT. Deny the fixed-function geometry stages
+    // the pass never uses; the amplification, mesh and pixel stages read the root
+    // arguments, so none of them is denied.
+    CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    root_desc.Init(_countof(parameters), parameters, 1, &sampler,
+                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr =
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr)) {
+        std::string message = error
+                                  ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                                error->GetBufferSize())
+                                  : "unknown error";
+        throw std::runtime_error("D3D12SerializeRootSignature failed: " + message);
+    }
+    ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                               signature->GetBufferSize(),
+                                               IID_PPV_ARGS(&grass_root_signature_)),
+                  "CreateRootSignature(grass)");
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    const std::vector<std::byte> as = ReadBinaryFile(shader_dir / "grass.as.cso");
+    const std::vector<std::byte> ms = ReadBinaryFile(shader_dir / "grass.ms.cso");
+    const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "grass.ps.cso");
+
+    // A mesh-shader PSO is built from a pipeline state stream, not the classic graphics
+    // description: the amplification and mesh stages replace the input assembler and
+    // vertex shader that description assumes, so it has no slot for them. The stream
+    // wrapper packs the desc below into the tokenised blob CreatePipelineState wants.
+    D3DX12_MESH_SHADER_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = grass_root_signature_.Get();
+    pso.AS = {as.data(), as.size()};
+    pso.MS = {ms.data(), ms.size()};
+    pso.PS = {ps.data(), ps.size()};
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    // A blade is a thin ribbon: cull neither side, so it never drops out edge-on and
+    // both faces light. The mesh shader already turns each normal toward the eye, so the
+    // lit side is correct whichever way the triangle happens to wind.
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    // Default depth: test and write, so the grass occludes and is occluded like the rest
+    // of the world, and the shafts and fog that read the depth buffer include it.
+    pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pso.DSVFormat = kDepthFormat;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    // Into the linear HDR scene buffer, like everything else the world draws.
+    pso.RTVFormats[0] = kHdrFormat;
+    pso.SampleMask = UINT_MAX;
+    pso.SampleDesc.Count = 1;
+
+    CD3DX12_PIPELINE_MESH_STATE_STREAM stream(pso);
+    const D3D12_PIPELINE_STATE_STREAM_DESC stream_desc{sizeof(stream), &stream};
+    ThrowIfFailed(device_->CreatePipelineState(&stream_desc, IID_PPV_ARGS(&grass_pipeline_state_)),
+                  "CreatePipelineState(grass)");
+
+    // The shadow-cast variant: the same amplification and mesh shaders with no pixel
+    // shader, targeting the shadow map's depth format and no colour, so the field writes
+    // its depth from the sun's point of view. The rasterizer carries the same bias the
+    // shadow pipeline uses (see CreateShadowPipeline), pushing casters a hair deeper to
+    // fight the acne a depth-only pass leaves.
+    pso.PS = {};
+    pso.RasterizerState.DepthBias = 4000;
+    pso.RasterizerState.SlopeScaledDepthBias = 2.0f;
+    pso.RasterizerState.DepthBiasClamp = 0.0f;
+    pso.DSVFormat = kShadowDepthFormat;
+    pso.NumRenderTargets = 0;
+    pso.RTVFormats[0] = DXGI_FORMAT_UNKNOWN;
+
+    CD3DX12_PIPELINE_MESH_STATE_STREAM shadow_stream(pso);
+    const D3D12_PIPELINE_STATE_STREAM_DESC shadow_stream_desc{sizeof(shadow_stream), &shadow_stream};
+    ThrowIfFailed(
+        device_->CreatePipelineState(&shadow_stream_desc, IID_PPV_ARGS(&grass_shadow_pipeline_state_)),
+        "CreatePipelineState(grass shadow)");
 }
 
 void Renderer::CreateSkyPipeline() {
@@ -1493,6 +1652,17 @@ void Renderer::SetEnvironment(const Environment& environment) {
     // nothing to re-upload here. Called before LoadScene, it also decides the sky
     // the reflection-probe capture bakes, since that capture reads the same paths.
     environment_ = environment;
+}
+
+void Renderer::SetGrass(const GrassPatch& grass) {
+    // Just record the field; RenderGrass grows it each frame from grass_. On hardware
+    // without mesh shaders the pass never runs, so this is remembered but never drawn.
+    grass_ = grass;
+    grass_active_ = true;
+}
+
+void Renderer::ClearGrass() {
+    grass_active_ = false;
 }
 
 void Renderer::CreateShadowPipeline() {
@@ -2954,7 +3124,8 @@ void Renderer::DrawShadowCasters(std::span<const MeshInstance> instances) {
     }
 }
 
-void Renderer::RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props) {
+void Renderer::RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props,
+                               float time) {
     // Flip the map from the shader resource the scene pass left it as into a depth
     // target to write: the pixel-shader reads of last frame must drain, and it
     // becomes a depth-stencil write.
@@ -2980,12 +3151,112 @@ void Renderer::RenderShadowMap(const Scene& scene, std::span<const MeshInstance>
     DrawShadowCasters(scene.Instances());
     DrawShadowCasters(props);
 
+    // The grass casts too: run the mesh-shader field from the sun's view into the same
+    // depth map, so the blades shadow the ground and one another. It binds its own
+    // pipeline and root signature, both replaced by the scene pass that follows. A no-op
+    // without grass or mesh-shader support.
+    RenderGrassShadow(time);
+
     // And back to a shader resource for the scene pass to sample: the depth writes
     // must drain before the pixel-shader reads that follow.
     TextureBarrier(command_list_.Get(), shadow_map_.Get(), D3D12_BARRIER_SYNC_DEPTH_STENCIL,
                    D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_SYNC_PIXEL_SHADING,
                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+}
+
+void Renderer::RenderGrass(const XMMATRIX& view_projection, XMFLOAT3 camera_position, float time) {
+    // No pipeline where the device lacks mesh shaders (it was never built), and nothing
+    // to grow until a level sets a field.
+    if (!mesh_shaders_supported_ || !grass_active_) {
+        return;
+    }
+
+    // The field is a rectangle centred on grass_.center, laid over a grid of
+    // kGrassCellSize cells -- one mesh-shader group each. Round the cell counts so the
+    // grown field lands as close to the authored size as a whole number of cells allows.
+    const UINT cells_x =
+        std::max(1u, static_cast<UINT>(std::lround(grass_.size.x / kGrassCellSize)));
+    const UINT cells_z =
+        std::max(1u, static_cast<UINT>(std::lround(grass_.size.y / kGrassCellSize)));
+
+    GrassConstants constants{};
+    XMStoreFloat4x4(&constants.view_projection, view_projection);
+    // The near corner of the field, on the ground: the mesh shader offsets each cell
+    // from here, so the blades stay put in the world as the camera moves.
+    constants.patch_origin = {grass_.center.x - cells_x * kGrassCellSize * 0.5f, grass_.center.y,
+                              grass_.center.z - cells_z * kGrassCellSize * 0.5f};
+    constants.cell_size = kGrassCellSize;
+    constants.camera_position = camera_position;
+    constants.time = time;
+    constants.blade_color = grass_.color;
+    constants.blade_height = grass_.blade_height;
+    // The same sun the world is lit by, so the grass shades in step with the ground.
+    constants.sun_direction = sun_direction_;
+    constants.blade_width = grass_.blade_width;
+    constants.wind = grass_.wind;
+    constants.grid = {cells_x, cells_z};
+    // Full blades close in, thinning to a quarter by 28 m and culled past 60 -- where
+    // the fog has all but swallowed the field anyway. The amplification shader reads
+    // these to pick each cell's blade count and to drop the far ones.
+    constants.lod = {10.0f, 28.0f, 60.0f, 0.0f};
+
+    command_list_->SetGraphicsRootSignature(grass_root_signature_.Get());
+    command_list_->SetPipelineState(grass_pipeline_state_.Get());
+    command_list_->SetGraphicsRoot32BitConstants(0, kGrassConstantDwords, &constants, 0);
+    // The same per-frame lighting buffer the scene pass binds, for the pixel shader's
+    // sun, sky, fog and shadow matrix.
+    command_list_->SetGraphicsRootConstantBufferView(1, frame_constants_address_);
+    // The sun's shadow map (bound from the texture heap, live as a shader resource by
+    // now), so a blade can tell whether the sun reaches it.
+    command_list_->SetGraphicsRootDescriptorTable(2, TextureHandle(shadow_descriptor_));
+
+    // One amplification group per pack of kGrassAsGroup cells; each culls its cells and
+    // launches a mesh group for every survivor.
+    const UINT as_groups = (cells_x * cells_z + kGrassAsGroup - 1) / kGrassAsGroup;
+    command_list_->DispatchMesh(as_groups, 1, 1);
+}
+
+void Renderer::RenderGrassShadow(float time) {
+    if (!mesh_shaders_supported_ || !grass_active_) {
+        return;
+    }
+
+    const UINT cells_x =
+        std::max(1u, static_cast<UINT>(std::lround(grass_.size.x / kGrassCellSize)));
+    const UINT cells_z =
+        std::max(1u, static_cast<UINT>(std::lround(grass_.size.y / kGrassCellSize)));
+
+    GrassConstants constants{};
+    // From the sun's point of view: the same shaders project by g_view_projection, so
+    // handing them the light matrix fills the shadow map instead of the screen. The
+    // amplification shader also extracts its cull frustum from this, so it keeps only the
+    // grass inside the sun's orthographic box.
+    XMStoreFloat4x4(&constants.view_projection, XMLoadFloat4x4(&light_view_projection_));
+    constants.patch_origin = {grass_.center.x - cells_x * kGrassCellSize * 0.5f, grass_.center.y,
+                              grass_.center.z - cells_z * kGrassCellSize * 0.5f};
+    constants.cell_size = kGrassCellSize;
+    // Unused for a depth-only pass (it only faces the blade normals and drives the LOD,
+    // and the LOD is forced full below); the wind sway keys off time and world position,
+    // not the eye, so the shadow's blades bend exactly like the on-screen ones.
+    constants.camera_position = grass_.center;
+    constants.time = time;
+    constants.blade_color = grass_.color;
+    constants.blade_height = grass_.blade_height;
+    constants.sun_direction = sun_direction_;
+    constants.blade_width = grass_.blade_width;
+    constants.wind = grass_.wind;
+    constants.grid = {cells_x, cells_z};
+    // All distances huge: every cell keeps its full blade count and none is distance-
+    // culled, so the shadow is complete regardless of where the camera stands.
+    constants.lod = {1.0e9f, 1.0e9f, 1.0e9f, 0.0f};
+
+    command_list_->SetGraphicsRootSignature(grass_root_signature_.Get());
+    command_list_->SetPipelineState(grass_shadow_pipeline_state_.Get());
+    command_list_->SetGraphicsRoot32BitConstants(0, kGrassConstantDwords, &constants, 0);
+
+    const UINT as_groups = (cells_x * cells_z + kGrassAsGroup - 1) / kGrassAsGroup;
+    command_list_->DispatchMesh(as_groups, 1, 1);
 }
 
 void Renderer::DrawOutlines(std::span<const MeshInstance> instances,
@@ -3086,7 +3357,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // The shadow map comes first: the scene pass samples it, so every caster has
     // to be drawn into it before a single lit pixel is shaded. It binds its own
     // pipeline, root signature and viewport, all replaced below for the main pass.
-    RenderShadowMap(scene, props);
+    RenderShadowMap(scene, props, seconds);
 
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
@@ -3133,6 +3404,15 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // The resting props take the yard's sun too: they are part of the world, and
     // only pass into the near pass once the player lifts them.
     DrawInstances(props, view_projection, sun, 1.0f, true);
+
+    // The grass grows over the ground, into the same HDR buffer and depth, so it
+    // occludes and fogs with the world and the shafts below march through it. It binds
+    // its own mesh-shader pipeline and root signature; restore the scene's, since the
+    // outline pass early-returns with nothing highlighted and the viewmodel draw that
+    // follows assumes the scene's are still in force. A no-op without mesh-shader support.
+    RenderGrass(view_projection, camera_position, seconds);
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    command_list_->SetPipelineState(pipeline_state_.Get());
 
     // Paint the glowing halo around the object the player is aiming at. It runs
     // with depth off, so it washes across the object as well as the ground around

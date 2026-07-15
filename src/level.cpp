@@ -264,6 +264,21 @@ LevelDef LoadFromFile(const std::filesystem::path& path) {
         level.turn_in = t;
     }
 
+    // The grass field: an optional `grass = {center = [x,y,z], size = [x,z], ...}` table.
+    // `center` and `size` place the rectangle; the rest read over the struct defaults, so
+    // a terse `grass` is just a centre and a size. Omit the table for a level with no
+    // grass. The blades are grown by a mesh shader, so a device without one draws none.
+    if (const toml::table* grass = root["grass"].as_table()) {
+        GrassDef g;
+        g.center = Vec3((*grass)["center"], path, "grass center");
+        g.size = Vec2Or((*grass)["size"], g.size, path, "grass size");
+        g.color = Vec3Or((*grass)["color"], g.color, path, "grass color");
+        g.blade_height = NumberOr((*grass)["blade_height"], g.blade_height, path, "grass blade_height");
+        g.blade_width = NumberOr((*grass)["blade_width"], g.blade_width, path, "grass blade_width");
+        g.wind = Vec2Or((*grass)["wind"], g.wind, path, "grass wind");
+        level.grass = g;
+    }
+
     return level;
 }
 

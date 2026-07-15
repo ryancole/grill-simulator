@@ -110,6 +110,12 @@ add_hlsl_shader(grill SOURCE shaders/outline.hlsl ENTRY VSMain PROFILE vs_6_6 OU
 add_hlsl_shader(grill SOURCE shaders/outline.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT outline.ps.cso)
 # Depth only, so the shadow pass has a vertex shader and no pixel shader.
 add_hlsl_shader(grill SOURCE shaders/shadow.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT shadow.vs.cso)
+# Volumetric grass: an amplification shader culls cells and picks a level of detail, a
+# mesh shader grows the surviving blades on the GPU (no vertex buffer), a pixel shader
+# shades them. Only loaded where the device reports mesh-shader tier 1.
+add_hlsl_shader(grill SOURCE shaders/grass.hlsl ENTRY ASMain PROFILE as_6_6 OUTPUT grass.as.cso)
+add_hlsl_shader(grill SOURCE shaders/grass.hlsl ENTRY MSMain PROFILE ms_6_6 OUTPUT grass.ms.cso)
+add_hlsl_shader(grill SOURCE shaders/grass.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT grass.ps.cso)
 
 stage_assets(grill DIRECTORY assets/models
   FILES charcoal-grill-base.glb charcoal-grill-lid.glb tree.glb bench-basic.glb crate.glb cooler-basic.glb tray.glb tongs-metal.glb burger-raw.glb steak-cooked.glb chicken-raw.glb chicken-cooked.glb)

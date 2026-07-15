@@ -48,6 +48,12 @@ spawn = [0.0, 0.0, -7.0]
 facing = 0.0
 sun = [0.35, 0.78, -0.5]
 
+# The grass field: a rectangle of GPU-grown blades over the ground (top at y = 0),
+# filling the yard inside the fence. center/size place it; the rest tune the look --
+# the blade colour (sRGB), a blade's height and base width in metres, and the wind the
+# blades sway in. Only drawn where the device supports mesh shaders.
+grass = {center = [0.0, 0.0, 0.0], size = [22.0, 22.0], color = [0.27, 0.42, 0.15], blade_height = 0.26, blade_width = 0.028, wind = [0.12, 0.05]}
+
 box = [
   # Ground, then the patio slab; the checker gives the flat ground a texture to move against.
   {center = [0.0, -0.15, 0.0], size = [60.0, 0.3, 60.0], color = [0.24, 0.36, 0.18], checker = 2.0},
