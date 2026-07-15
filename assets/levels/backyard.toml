@@ -56,12 +56,10 @@ box = [
 ]
 
 prop = [
-  # The charcoal grill is two catalog types -- a base and a lid resting on it -- so the
-  # lid can be knocked off on its own. Both topple; the cooler is heavier and low, so it
-  # mostly slides. The lid's y rests it on the base's bowl rim; nudge it if it floats or
-  # sinks in-game. The grill's heat lives on the "charcoal_grill" type in catalog.toml.
+  # The charcoal grill base topples; the cooler is heavier and low, so it mostly slides.
+  # The base's heat lives on the "charcoal_grill" type in catalog.toml. Its lid is a
+  # carryable, placed below with the tongs -- lift it off the grate to cook.
   {type = "charcoal_grill",     pos = [0.0, 0.0, 5.0]},
-  {type = "charcoal_grill_lid", pos = [0.0, 0.72, 5.0]},
   {type = "bench",  pos = [-4.5, 0.0, 1.5]},
   {type = "cooler", pos = [3.6, 0.0, 6.5]},
 
@@ -83,6 +81,9 @@ carryable = [
   # physics drops them onto it. They are not served, so they merely rest there -- lift the
   # tray and they slide off. All in view from the spawn.
   {type = "tongs", pos = [1.15, 0.05, 4.45], yaw = 25.0},
+  # The grill lid starts resting on the base's bowl rim; lift it off to expose the grate.
+  # Its y rests it on the rim -- nudge it if it floats or sinks in-game.
+  {type = "lid", pos = [0.0, 0.72, 5.0]},
   {type = "tray",  pos = [-4.50, 0.80, 1.50]},
   {type = "steak", pos = [-4.35, 0.87, 1.73], yaw = 18.0},
   {type = "chicken", pos = [-4.65, 0.87, 1.37], yaw = -8.0},
