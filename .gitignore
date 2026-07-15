@@ -15,6 +15,11 @@ compile_commands.json
 CMakeUserPresets.json
 *.user
 
+# Per-user control overrides written by the in-game keybinds editor. It normally
+# lives next to the exe under build/ (already ignored), but never belongs in the
+# repo wherever it lands -- the committed controls.toml holds the shipped defaults.
+controls.user.toml
+
 # tools/gen_models.py is a script, not a package, but importing it to poke at a
 # texture leaves this behind.
 __pycache__/

@@ -12,6 +12,11 @@
 #
 # Any action left out below keeps its built-in default (shown here), so deleting a
 # line is the same as leaving it at stock.
+#
+# The gameplay actions can also be rebound in-game from Options > Keybinds. Those
+# edits are written to a separate controls.user.toml next to the game, layered over
+# this file at startup -- so this file stays the shipped defaults and an in-game
+# rebind survives a relaunch without editing anything here.
 
 [bindings]
 # Movement and gameplay.

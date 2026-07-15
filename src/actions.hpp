@@ -4,6 +4,7 @@
 #include <bitset>
 #include <cstddef>
 #include <filesystem>
+#include <string>
 #include <vector>
 
 class Input;
@@ -64,6 +65,38 @@ public:
     // after the message pump has updated `input` and before any consumer reads an
     // action, so the held- and edge-queries below all see the same snapshot.
     void Update(const Input& input);
+
+    // One rebindable action as the keybinds screen sees it: the action itself, the
+    // human label to show ("Move Forward"), and the name of its current primary key
+    // ("W", or "Unbound" when nothing is bound). Only the gameplay actions are
+    // rebindable; the developer shortcuts and menu navigation are omitted.
+    struct Binding {
+        Action action;
+        std::string display;
+        std::string key;
+    };
+
+    // The rebindable actions in menu order, each with its label and current primary
+    // key name. Rebuilt on demand -- cheap, a handful of entries -- so it always
+    // reflects the latest Rebind/ResetToDefaults.
+    std::vector<Binding> RebindableBindings() const;
+
+    // Makes `key` (a Win32 virtual-key code) the sole binding for `action`. First
+    // strips `key` from any other rebindable action that held it, so no two gameplay
+    // actions answer to the same key -- the last one to claim it wins, the other is
+    // left unbound. A no-op if `action` is not rebindable.
+    void Rebind(Action action, int key);
+
+    // Restores every action to its built-in default binding, discarding any file or
+    // in-game overrides currently in effect.
+    void ResetToDefaults();
+
+    // Writes the current primary key of each rebindable action to a controls.toml-shaped
+    // [bindings] table at `path` (an "unbound" action is written as an empty list). This
+    // is the per-user override file the game loads over the committed defaults, so a
+    // rebind survives a relaunch. Silently does nothing if the file cannot be written --
+    // a failed save must not crash the game mid-menu.
+    void SaveUserOverrides(const std::filesystem::path& path) const;
 
     // Held this frame: any key bound to the action is down.
     bool IsActive(Action action) const;

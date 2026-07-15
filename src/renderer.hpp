@@ -101,6 +101,19 @@ public:
     // over no entry. Uses the same metrics RenderMenu draws with, so hover and click
     // line up with what is on screen. Rows span the full width, so only y matters.
     int MenuEntryAt(int x, int y, int entry_count) const;
+    // Draws the keybinds screen as its own complete frame, like RenderMenu: a backdrop,
+    // a `title`, then one row per entry laid out in two columns -- `labels[i]` left,
+    // `values[i]` right (the action's current key). The row at `selected` is picked out
+    // in amber; while `capturing` is set, that row's value is replaced with a "press a
+    // key" prompt. `labels` and `values` are parallel and equal length; a value may be
+    // empty for a plain full-width row (the Reset / Back actions carry no key).
+    void RenderKeybinds(std::string_view title, std::span<const std::string> labels,
+                        std::span<const std::string> values, int selected, bool capturing);
+    // Hit-tests the keybinds layout: the row index the client-space point (x, y) falls
+    // in for `row_count` rows, or -1 when over none. Shares RenderKeybinds's metrics so
+    // hover and click line up with what is drawn. Rows span the full width, so only y
+    // matters.
+    int KeybindRowAt(int x, int y, int row_count) const;
     void Shutdown();
 
     float AspectRatio() const;
@@ -278,6 +291,11 @@ private:
     // then drawn, so they never alias one another in the shared buffer the way
     // repeated DrawText calls would.
     void DrawMenu(std::string_view title, std::span<const std::string> entries, int selected);
+    // Packs the keybinds screen -- title plus two-column rows -- into this frame's text
+    // region and draws it, the way DrawMenu does for the plain list. See RenderKeybinds
+    // for the arguments; called by it once the render target is cleared and bound.
+    void DrawKeybinds(std::string_view title, std::span<const std::string> labels,
+                      std::span<const std::string> values, int selected, bool capturing);
 
     // Writes the glyph quads for one line into this frame's text vertex region,
     // beginning at vertex index `first`, and returns the new running vertex count.

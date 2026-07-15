@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <bitset>
+#include <optional>
 
 // Keyboard state plus accumulated raw mouse motion. The window procedure feeds
 // it; the game loop drains the mouse delta once per frame.
@@ -25,6 +26,39 @@ public:
         const bool clicked = left_click_pending_;
         left_click_pending_ = false;
         return clicked;
+    }
+
+    // An Escape awaiting a reader, mirroring the left-click latch. WindowProc records
+    // it (OnEscape) while the menu is up rather than closing the game itself, so the
+    // menu loop can decide what "back" means for whichever screen is showing -- cancel
+    // a rebind, step back a submenu, or quit from the top level. Play keeps its own raw
+    // Escape handling in WindowProc; this is only for the menu.
+    void OnEscape() { escape_pending_ = true; }
+    // Whether an Escape has arrived since the last call; clears it.
+    bool ConsumeEscape() {
+        const bool pressed = escape_pending_;
+        escape_pending_ = false;
+        return pressed;
+    }
+
+    // Arms key capture for a rebind: the next key press (see OnKey) is latched instead
+    // of being recorded as held, and capture disarms itself. ConsumeCapturedKey returns
+    // that key -- once -- to the keybinds screen. Escape never reaches OnKey (WindowProc
+    // intercepts it), so it can never be captured as a binding; it cancels via OnEscape.
+    void BeginKeyCapture() {
+        capturing_ = true;
+        captured_key_ = std::nullopt;
+    }
+    // Disarms capture without binding anything -- the player cancelled (Escape).
+    void CancelKeyCapture() {
+        capturing_ = false;
+        captured_key_ = std::nullopt;
+    }
+    bool IsCapturingKey() const { return capturing_; }
+    std::optional<int> ConsumeCapturedKey() {
+        const std::optional<int> key = captured_key_;
+        captured_key_ = std::nullopt;
+        return key;
     }
 
     bool IsKeyDown(int virtual_key) const;
@@ -59,4 +93,11 @@ private:
 
     // Set on a left-button press, cleared when the menu consumes it.
     bool left_click_pending_ = false;
+    // Set on an Escape while the menu is up, cleared when the menu consumes it.
+    bool escape_pending_ = false;
+
+    // While armed, the next key press is diverted here (a rebind's target) rather than
+    // recorded as held. Cleared when consumed by the keybinds screen.
+    bool capturing_ = false;
+    std::optional<int> captured_key_;
 };
