@@ -275,7 +275,7 @@ int Run(HINSTANCE instance, int show_command) {
     // Which menu screen is showing while game.state is Menu. Main is the launch list;
     // Options and Keybinds are reached from it and back out with Escape. A refinement of
     // the Menu state, kept as a loop local because only the loop navigates it.
-    enum class MenuScreen { Main, Options, Keybinds };
+    enum class MenuScreen { Main, LevelSelect, Options, Keybinds };
     MenuScreen screen = MenuScreen::Main;
 
     // The highlighted action on the level-complete results screen: 0 Replay, 1 Back to
@@ -283,18 +283,22 @@ int Run(HINSTANCE instance, int show_command) {
     // since only the loop navigates it.
     int results_selected = 0;
 
-    // The main menu: one entry per level, in level_files order, then Options, then Exit.
-    // So a chosen index is a level to load, or Options to open that screen, or Exit to
-    // close the game.
-    std::vector<std::string> menu_entries;
+    // The main menu: Select Level opens the level list, Options opens that screen, Exit
+    // closes the game. A fixed three entries, so their indices are constants.
+    Menu menu({"Select Level", "Options", "Exit"});
+    constexpr int kMainSelectLevel = 0;
+    constexpr int kMainOptions = 1;
+    constexpr int kMainExit = 2;
+
+    // The level-select screen: one entry per level in level_files order, then Back. So a
+    // chosen index below the back row is a level to load; the back row returns to Main.
+    std::vector<std::string> level_entries;
     for (const char* name : level_names) {
-        menu_entries.emplace_back(name);
+        level_entries.emplace_back(name);
     }
-    menu_entries.emplace_back("Options");
-    menu_entries.emplace_back("Exit");
-    const int options_entry = static_cast<int>(level_names.size());
-    const int exit_entry = options_entry + 1;
-    Menu menu(std::move(menu_entries));
+    level_entries.emplace_back("Back");
+    const int level_back_entry = static_cast<int>(level_names.size());
+    Menu level_menu(std::move(level_entries));
 
     // The Options screen: for now just the keybinds editor and a way back.
     Menu options_menu({"Keybinds", "Back"});
@@ -361,11 +365,18 @@ int Run(HINSTANCE instance, int show_command) {
                 last_cursor = cursor;
             }
 
-            // The Main and Options screens are both plain vertical lists, so they share
-            // one block: the same Menu navigation, drawn with RenderMenu, differing only
-            // in what a confirm and a back do.
-            if (screen == MenuScreen::Main || screen == MenuScreen::Options) {
-                Menu& active = screen == MenuScreen::Main ? menu : options_menu;
+            // The Main, Select Level and Options screens are all plain vertical lists, so
+            // they share one block: the same Menu navigation, drawn with RenderMenu,
+            // differing only in what a confirm and a back do. `active_screen` is the screen
+            // this frame acts on and draws -- captured up front so that a confirm which
+            // switches `screen` (e.g. into play) still renders a self-consistent hand-off
+            // frame with the title and entries that belong together.
+            if (screen == MenuScreen::Main || screen == MenuScreen::LevelSelect ||
+                screen == MenuScreen::Options) {
+                const MenuScreen active_screen = screen;
+                Menu& active = active_screen == MenuScreen::Main         ? menu
+                               : active_screen == MenuScreen::LevelSelect ? level_menu
+                                                                          : options_menu;
                 const int entry_count = static_cast<int>(active.entries().size());
                 bool confirm = false;
 
@@ -391,25 +402,33 @@ int Run(HINSTANCE instance, int show_command) {
                     confirm = true;
                 }
 
-                // Escape steps Options back to Main; on Main -- the top level -- it quits.
+                // Escape steps a sub-screen back to Main; on Main -- the top level -- it quits.
                 if (game.input.ConsumeEscape()) {
-                    if (screen == MenuScreen::Options) {
-                        screen = MenuScreen::Main;
-                    } else {
+                    if (screen == MenuScreen::Main) {
                         PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    } else {
+                        screen = MenuScreen::Main;
                     }
                 } else if (confirm && screen == MenuScreen::Main) {
                     const int choice = active.selected();
-                    if (choice == exit_entry) {
+                    if (choice == kMainExit) {
                         PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                    } else if (choice == options_entry) {
+                    } else if (choice == kMainOptions) {
                         screen = MenuScreen::Options;
+                    } else if (choice == kMainSelectLevel) {
+                        screen = MenuScreen::LevelSelect;
+                    }
+                } else if (confirm && screen == MenuScreen::LevelSelect) {
+                    if (active.selected() == level_back_entry) {
+                        screen = MenuScreen::Main;
                     } else {
                         // Load the chosen level (re-reading its file) and drop into play.
                         // The switch takes effect next frame; this one still draws the
-                        // menu, which is identical, so the hand-off is invisible.
-                        load_level(choice);
+                        // menu, which is identical, so the hand-off is invisible. Reset the
+                        // screen to Main so a later Escape out of play lands on the top menu.
+                        load_level(active.selected());
                         game.state = GameState::Playing;
+                        screen = MenuScreen::Main;
                     }
                 } else if (confirm) { // Options
                     if (active.selected() == kOptionsKeybinds) {
@@ -421,7 +440,9 @@ int Run(HINSTANCE instance, int show_command) {
                     }
                 }
 
-                const char* title = screen == MenuScreen::Main ? "GRILL SIMULATOR" : "OPTIONS";
+                const char* title = active_screen == MenuScreen::Main ? "GRILL SIMULATOR"
+                                    : active_screen == MenuScreen::LevelSelect ? "SELECT LEVEL"
+                                                                              : "OPTIONS";
                 game.renderer.RenderMenu(title, active.entries(), active.selected());
                 continue;
             }
