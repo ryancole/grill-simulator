@@ -38,6 +38,7 @@ constexpr ActionSpec kSpecs[] = {
     {Action::ReloadLevel, "reload_level", "R"},
     {Action::SelectLevel1, "select_level_1", "1"},
     {Action::SelectLevel2, "select_level_2", "2"},
+    {Action::ToggleDebug, "toggle_debug", "Backtick"},
     {Action::MenuUp, "menu_up", "Up"},
     {Action::MenuDown, "menu_down", "Down"},
     {Action::MenuConfirm, "menu_confirm", "Enter"},
@@ -74,7 +75,12 @@ std::optional<int> KeyFromName(std::string name) {
         {"ESC", VK_ESCAPE},        {"ESCAPE", VK_ESCAPE},
         {"BACKSPACE", VK_BACK},    {"UP", VK_UP},
         {"DOWN", VK_DOWN},         {"LEFT", VK_LEFT},
-        {"RIGHT", VK_RIGHT},       {"F1", VK_F1},
+        {"RIGHT", VK_RIGHT},
+        // The key left of 1 / above Tab. Its several common names all land on the same
+        // VK, so a config can spell it whichever way reads best.
+        {"`", VK_OEM_3},           {"BACKTICK", VK_OEM_3},
+        {"GRAVE", VK_OEM_3},       {"TILDE", VK_OEM_3},
+        {"F1", VK_F1},
         {"F2", VK_F2},             {"F3", VK_F3},
         {"F4", VK_F4},             {"F5", VK_F5},
         {"F6", VK_F6},             {"F7", VK_F7},

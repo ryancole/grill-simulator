@@ -205,6 +205,9 @@ int Run(HINSTANCE instance, int show_command) {
     const std::array<const char*, 2> level_names = {"Backyard", "Rooftop"};
     const std::filesystem::path levels_dir = ExecutableDirectory() / "assets" / "levels";
     int current_level = 0;
+    // Whether the top-left debug overlay is drawn. Toggled by the ToggleDebug action
+    // (backtick); starts on, the way it always has.
+    bool show_debug = true;
 
     // The control bindings for the whole session. Read once, over the built-in
     // defaults, so a missing or partial controls.toml still plays; a syntax error or
@@ -339,6 +342,10 @@ int Run(HINSTANCE instance, int show_command) {
         const bool pick_backyard = game.actions.WasPressed(Action::SelectLevel1);
         const bool pick_rooftop = game.actions.WasPressed(Action::SelectLevel2);
         const bool reload = game.actions.WasPressed(Action::ReloadLevel);
+        // Backtick flips the debug overlay on the rising edge, so a single tap toggles.
+        if (game.actions.WasPressed(Action::ToggleDebug)) {
+            show_debug = !show_debug;
+        }
         if (pick_backyard) {
             load_level(0);
         } else if (pick_rooftop) {
@@ -378,31 +385,36 @@ int Run(HINSTANCE instance, int show_command) {
             game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
         Props& props = game.world->props();
 
-        // The debug overlay, anchored top-left: every meat's doneness, then every
-        // heat source's emitting temperature.
-        std::vector<std::string> debug_lines = props.MeatDebugLines();
-        const std::span<const HeatSource> heat_sources = game.world->furniture().HeatSources();
-        for (std::size_t i = 0; i < heat_sources.size(); ++i) {
-            debug_lines.push_back(
-                "heat " + std::to_string(i) + ": " +
-                std::to_string(static_cast<int>(heat_sources[i].EmitterTempF())) + "F");
-        }
-
-        // The order ticket: each goal, how many are filled, and its accepted band range.
-        // A level with no goals shows nothing here; one whose orders are all filled adds
-        // a completion line -- the win condition, made legible until there is a proper
-        // level-complete screen to raise.
+        // The order ticket data, read once and shared by the debug overlay below and the
+        // polished rail further down.
         const Objectives& objectives = game.world->objectives();
         const std::span<const FoodGoal> goals = objectives.Goals();
-        for (std::size_t i = 0; i < goals.size(); ++i) {
-            const FoodGoal& goal = goals[i];
-            debug_lines.push_back(
-                "order " + goal.type + ": " + std::to_string(objectives.Filled(i)) + "/" +
-                std::to_string(goal.count) + " " + std::string(DonenessName(goal.min)) + "-" +
-                std::string(DonenessName(goal.max)));
-        }
-        if (!goals.empty() && objectives.Complete()) {
-            debug_lines.push_back("LEVEL COMPLETE! (R to replay)");
+
+        // The debug overlay, anchored top-left and toggled by backtick (ToggleDebug):
+        // every meat's doneness, then each heat source's emitting temperature, then the
+        // raw order ticket -- each goal, how many are filled, and its accepted band range
+        // -- and a completion line once they are all met (the win condition, legible
+        // until there is a proper level-complete screen). Left empty while hidden, which
+        // draws no overlay.
+        std::vector<std::string> debug_lines;
+        if (show_debug) {
+            debug_lines = props.MeatDebugLines();
+            const std::span<const HeatSource> heat_sources = game.world->furniture().HeatSources();
+            for (std::size_t i = 0; i < heat_sources.size(); ++i) {
+                debug_lines.push_back(
+                    "heat " + std::to_string(i) + ": " +
+                    std::to_string(static_cast<int>(heat_sources[i].EmitterTempF())) + "F");
+            }
+            for (std::size_t i = 0; i < goals.size(); ++i) {
+                const FoodGoal& goal = goals[i];
+                debug_lines.push_back(
+                    "order " + goal.type + ": " + std::to_string(objectives.Filled(i)) + "/" +
+                    std::to_string(goal.count) + " " + std::string(DonenessName(goal.min)) + "-" +
+                    std::string(DonenessName(goal.max)));
+            }
+            if (!goals.empty() && objectives.Complete()) {
+                debug_lines.push_back("LEVEL COMPLETE! (R to replay)");
+            }
         }
 
         // The same order ticket, presented for the player rather than the debugger:

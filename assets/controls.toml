@@ -5,7 +5,7 @@
 # Key names are case-insensitive and may be:
 #   * a single letter A-Z or digit 0-9   ("W", "e", "1")
 #   * a named key: Space, Shift, Ctrl, Alt, Enter, Tab, Esc, Backspace,
-#     Up, Down, Left, Right, or F1-F12
+#     Up, Down, Left, Right, Backtick (the ` key, also Grave/Tilde), or F1-F12
 #
 # An action may bind several keys at once -- write a list and any of them triggers
 # it: `move_forward = ["W", "Up"]`. An empty list unbinds the action entirely.
@@ -27,6 +27,7 @@ interact     = "E"
 reload_level   = "R"
 select_level_1 = "1"
 select_level_2 = "2"
+toggle_debug   = "Backtick"
 
 # Menu navigation (the launch screen, and later the pause menu). Bound to both the
 # arrow keys and the movement keys so either hand can drive the list.
