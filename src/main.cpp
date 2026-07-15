@@ -219,7 +219,7 @@ int Run(HINSTANCE instance, int show_command) {
     AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
 
     HWND hwnd = CreateWindowExW(0, kWindowClass,
-                                L"Grill Simulator - WASD walk, E grab, 1/2 levels, R reload",
+                                L"Grill Simulator - WASD walk, E grab, R reload",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                 bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr,
                                 nullptr, instance, &game);
@@ -231,15 +231,15 @@ int Run(HINSTANCE instance, int show_command) {
     // The device and pipelines first -- the session's, independent of any level.
     game.renderer.Initialize(hwnd, kDefaultWidth, kDefaultHeight);
 
-    // The levels the player switches between, as the .toml files staged under
-    // assets/levels, in the order the number keys select them. Loading is by file so
-    // a level is a text edit, not a rebuild.
-    const std::array<const char*, 2> level_files = {"backyard.toml", "rooftop.toml"};
+    // The levels the player can load, as the .toml files staged under assets/levels, in
+    // the order the number keys select them. Loading is by file so a level is a text
+    // edit, not a rebuild. An array of one for now; add a file and a name to grow it.
+    const std::array<const char*, 1> level_files = {"backyard.toml"};
     // The names the menu shows for each level, parallel to level_files.
-    const std::array<const char*, 2> level_names = {"Backyard", "Rooftop"};
+    const std::array<const char*, 1> level_names = {"Backyard"};
     const std::filesystem::path levels_dir = ExecutableDirectory() / "assets" / "levels";
     int current_level = 0;
-    // Whether the top-left debug overlay is drawn. Toggled by the ToggleDebug action
+    // Whether the bottom-left debug overlay is drawn. Toggled by the ToggleDebug action
     // (backtick); starts hidden, so the polished HUD is what shows by default.
     bool show_debug = false;
 
@@ -504,14 +504,12 @@ int Run(HINSTANCE instance, int show_command) {
             continue;
         }
 
-        // The level controls are all edge-triggered so a held key fires once: 1 and 2
-        // switch to the backyard and the rooftop, R reloads whatever is current
-        // (restoring a level knocked about in play). Read every frame so each stays
-        // current, then act on at most one. Swapping here, before anything reads the
-        // world this frame, means the step and draw below run entirely on the freshly
-        // loaded level.
+        // The level controls are edge-triggered so a held key fires once: 1 selects the
+        // backyard, R reloads whatever is current (restoring a level knocked about in
+        // play). Read every frame so each stays current, then act on at most one. Swapping
+        // here, before anything reads the world this frame, means the step and draw below
+        // run entirely on the freshly loaded level.
         const bool pick_backyard = game.actions.WasPressed(Action::SelectLevel1);
-        const bool pick_rooftop = game.actions.WasPressed(Action::SelectLevel2);
         const bool reload = game.actions.WasPressed(Action::ReloadLevel);
         // Backtick flips the debug overlay on the rising edge, so a single tap toggles.
         if (game.actions.WasPressed(Action::ToggleDebug)) {
@@ -519,8 +517,6 @@ int Run(HINSTANCE instance, int show_command) {
         }
         if (pick_backyard) {
             load_level(0);
-        } else if (pick_rooftop) {
-            load_level(1);
         } else if (reload) {
             load_level(current_level);
         }
@@ -561,56 +557,33 @@ int Run(HINSTANCE instance, int show_command) {
         const Objectives& objectives = game.world->objectives();
         const std::span<const FoodGoal> goals = objectives.Goals();
 
-        // The debug overlay, anchored top-left and toggled by backtick (ToggleDebug):
-        // every meat's doneness, then each heat source's emitting temperature, then the
-        // raw order ticket -- each goal, how many are filled, and its accepted band range
-        // -- and a completion line once they are all met (the win condition, legible
-        // until there is a proper level-complete screen). Left empty while hidden, which
-        // draws no overlay.
+        // The debug overlay, anchored bottom-left and toggled by backtick (ToggleDebug):
+        // each heat source's emitting temperature -- the one cook input the polished HUD
+        // does not surface -- and a completion line once every order is met (the win
+        // condition, legible until there is a proper level-complete screen). Meat doneness,
+        // temperature and the order ticket now live on the meats panel and orders list, so
+        // they are gone from here. Left empty while hidden, which draws no overlay.
         std::vector<std::string> debug_lines;
         if (show_debug) {
-            debug_lines = props.MeatDebugLines();
             const std::span<const HeatSource> heat_sources = game.world->furniture().HeatSources();
             for (std::size_t i = 0; i < heat_sources.size(); ++i) {
                 debug_lines.push_back(
                     "heat " + std::to_string(i) + ": " +
                     std::to_string(static_cast<int>(heat_sources[i].EmitterTempF())) + "F");
             }
-            for (std::size_t i = 0; i < goals.size(); ++i) {
-                const FoodGoal& goal = goals[i];
-                debug_lines.push_back(
-                    "order " + goal.type + ": " + std::to_string(objectives.Filled(i)) + "/" +
-                    std::to_string(goal.count) + " " + std::string(DonenessName(goal.min)) + "-" +
-                    std::string(DonenessName(goal.max)));
-            }
             if (!goals.empty() && objectives.Complete()) {
                 debug_lines.push_back("LEVEL COMPLETE! (R to replay)");
             }
         }
 
-        // The same order ticket, presented for the player rather than the debugger:
-        // one card per goal on the top-right rail. The renderer draws pips and a
-        // doneness gauge from these fields, so here we only shape the two strings --
-        // a loud uppercased name and a quiet band caption -- and hand across the raw
-        // counts and band indices. Built fresh each frame; it is a handful of goals.
-        const int band_count = static_cast<int>(CookInformation::Doneness::Burnt) + 1;
-        // The meat the player is acting on, so its live doneness can be marked on the
-        // matching order's gauge -- matched on the raw type below, before the name is
-        // uppercased for display.
-        const std::optional<Props::MeatReadout> active_meat = props.ActiveMeat();
-        // A serve refused this frame shakes its order's card: resolve the rejected type to
-        // the first card of that type. -1 when no serve bounced.
-        const std::optional<std::string> rejected_type = props.RejectedServeType();
-        int rejected_order = -1;
+        // The same order ticket, presented for the player rather than the debugger: one
+        // bulleted line per goal on the top-right list. Just the standing orders -- no
+        // progress or pass/fail -- so here we only shape the loud uppercased name and the
+        // quiet doneness caption, and hand across the wanted count. Built fresh each frame;
+        // it is a handful of goals.
         std::vector<Renderer::OrderCard> order_cards;
         order_cards.reserve(goals.size());
-        for (std::size_t i = 0; i < goals.size(); ++i) {
-            const FoodGoal& goal = goals[i];
-            if (rejected_order < 0 && rejected_type && *rejected_type == goal.type) {
-                rejected_order = static_cast<int>(i);
-            }
-            const int marker =
-                (active_meat && active_meat->type == goal.type) ? active_meat->band : -1;
+        for (const FoodGoal& goal : goals) {
             std::string name = goal.type;
             for (char& c : name) {
                 c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -620,16 +593,33 @@ int Run(HINSTANCE instance, int show_command) {
                 band += " to ";
                 band += DonenessName(goal.max);
             }
-            order_cards.push_back(Renderer::OrderCard{
-                std::move(name), std::move(band), objectives.Filled(i), goal.count,
-                static_cast<int>(goal.min), static_cast<int>(goal.max), band_count, marker});
+            order_cards.push_back(Renderer::OrderCard{std::move(name), std::move(band), goal.count});
+        }
+
+        // The polished, always-on meats panel on the top-left: one card per cooking meat
+        // in the yard, showing its doneness and live temperature -- the player-facing twin
+        // of the debug overlay's meat lines. The renderer draws a gauge from the band
+        // index, so here we only shape the loud uppercased name, the quiet band caption and
+        // the temperature string. Built fresh each frame; it is a handful of meats.
+        const int meat_band_count = static_cast<int>(CookInformation::Doneness::Burnt) + 1;
+        std::vector<Renderer::MeatCard> meat_cards;
+        for (const Props::MeatStatus& meat : props.MeatStatuses()) {
+            std::string name = meat.name;
+            for (char& c : name) {
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            }
+            std::string band(DonenessName(static_cast<CookInformation::Doneness>(meat.band)));
+            std::string temp = std::to_string(meat.temp_f) + "F";
+            meat_cards.push_back(Renderer::MeatCard{std::move(name), std::move(band),
+                                                    std::move(temp), meat.band, meat_band_count,
+                                                    meat.served});
         }
 
         game.renderer.Render(game.world->scene(), props.WorldInstances(),
                              props.HighlightInstances(),
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
                              view_projection, game.camera.Position(), props.PromptText(),
-                             debug_lines, order_cards, rejected_order);
+                             debug_lines, order_cards, meat_cards);
     }
 
     game.renderer.Shutdown();

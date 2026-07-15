@@ -69,32 +69,19 @@ public:
     // or empty when E would do nothing. Recomputed each Update.
     std::string PromptText() const;
 
-    // The meat the player is acting on this frame and where its cook sits: its order
-    // type (the same string Objectives keys on) and current doneness band index. The
-    // carried meat when carrying, otherwise the one in reach and looked at -- so the
-    // rail can mark a live "you are here" on the matching order's gauge whether the
-    // player is carrying a steak to the tray or eyeing one on the grate. Empty when
-    // that item is not a meat (the tongs, the tray) or nothing is held or hovered.
-    struct MeatReadout {
-        std::string type;
+    // One entry per meat in the yard for the on-screen "meats" panel. `name` is the food's
+    // type (the string Objectives keys on, uppercased for display by the caller), `band`
+    // its current doneness band index, `temp_f` its internal temperature in whole degrees
+    // Fahrenheit, and `served` whether it has already been handed off. A meat is any item
+    // carrying cooking state; non-food carryables are skipped. Empty on a level that placed
+    // no food.
+    struct MeatStatus {
+        std::string name;
         int band = 0;
+        int temp_f = 0;
+        bool served = false;
     };
-    std::optional<MeatReadout> ActiveMeat() const;
-
-    // The order type of a serve that was attempted and refused this frame -- a meat
-    // carried onto a tray whose cook filled no open order -- or empty when the last
-    // Update saw no such rejection. Latched for exactly the frame the bad serve press
-    // lands and cleared at the next Update, so the HUD can shake the rejecting card
-    // once. An accepted serve is not reported here; it announces itself by advancing an
-    // order's filled count.
-    std::optional<std::string> RejectedServeType() const;
-
-    // One line per meat in the yard for the debug overlay: "steak: medium rare
-    // (139F)" -- its name, current doneness band, and internal temperature. A meat
-    // is any item carrying cooking state; the tongs and other non-food carryables
-    // have none and are skipped, so this is exactly the cookable objects, resting or
-    // carried. Empty on a level that placed no food.
-    std::vector<std::string> MeatDebugLines() const;
+    std::vector<MeatStatus> MeatStatuses() const;
 
 private:
     // One loose object, modelled as a single oriented box (an approximation --
@@ -249,10 +236,6 @@ private:
     // an about-to-be-rejected serve rather than silently doing nothing.
     bool serve_ok_ = false;
     std::string serve_need_;
-    // Latched for the one frame a serve press is refused: the rejected meat's order type,
-    // or empty. Set in Update when Serve() bounces a delivery, cleared at the top of the
-    // next Update. Read by RejectedServeType so the HUD can shake that order's card once.
-    std::string serve_rejected_type_;
 
     // Rebuilt each Update: every resting item, the carried one, and the one the
     // outline glows around.

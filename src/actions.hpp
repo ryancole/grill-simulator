@@ -29,12 +29,11 @@ enum class Action {
     // whatever carryable the player is holding -- different per item, defined by the
     // item's catalog type -- and does nothing empty-handed. Rebindable like the rest.
     PrimaryAction,
-    // Developer shortcuts: reload the current level, jump straight to one of the
-    // levels, and toggle the top-left debug overlay. Bound in controls.toml alongside
-    // the gameplay actions so no raw key code is left hardcoded in the game loop.
+    // Developer shortcuts: reload the current level, jump straight to a level by number,
+    // and toggle the bottom-left debug overlay. Bound in controls.toml alongside the
+    // gameplay actions so no raw key code is left hardcoded in the game loop.
     ReloadLevel,
     SelectLevel1,
-    SelectLevel2,
     ToggleDebug,
     // Menu navigation, read only while the launch/pause menu is up. They share
     // keys with movement (Up/W, Down/S, Enter/Space) with no conflict, since the
