@@ -206,8 +206,8 @@ int Run(HINSTANCE instance, int show_command) {
     const std::filesystem::path levels_dir = ExecutableDirectory() / "assets" / "levels";
     int current_level = 0;
     // Whether the top-left debug overlay is drawn. Toggled by the ToggleDebug action
-    // (backtick); starts on, the way it always has.
-    bool show_debug = true;
+    // (backtick); starts hidden, so the polished HUD is what shows by default.
+    bool show_debug = false;
 
     // The control bindings for the whole session. Read once, over the built-in
     // defaults, so a missing or partial controls.toml still plays; a syntax error or
