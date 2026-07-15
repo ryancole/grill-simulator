@@ -249,20 +249,19 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
 }
 
 void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt,
-                   std::span<const HeatSource> heat_sources, Objectives& objectives) {
+                   std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
+                   Objectives& objectives) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
 
     // Which tray the carried meat hangs over this frame, if any. Each tray's serve zone
     // rides its current pose, so it is rebuilt from the tray each frame -- a tray set
-    // down on the bench takes deliveries where it sits. Computed before the Interact
-    // press so the same read drives both the serve and the prompt; alongside it, whether
-    // this cook would be taken and, if not, what the order still wants, so the prompt can
-    // explain a serve about to bounce. Only a meat serves; the tongs carry no cook.
+    // down on the bench takes food where it sits. Computed before the Interact press so
+    // the same read drives both the load and the prompt. Any meat loads (the cook is not
+    // judged here, only at turn-in), so no acceptance is precomputed. Only a meat loads;
+    // the tongs carry no cook.
     serve_tray_ = -1;
-    serve_ok_ = false;
-    serve_need_.clear();
     if (carried_ >= 0 && items_[carried_].cook) {
         const XMVECTOR held = (XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world).r[3];
         for (int t = 0; t < static_cast<int>(items_.size()); ++t) {
@@ -276,16 +275,16 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
                 break;
             }
         }
-        if (serve_tray_ >= 0) {
-            const CookInformation::Doneness band = items_[carried_].cook->DonenessBand();
-            serve_ok_ = objectives.WouldAccept(items_[carried_].name, band);
-            if (!serve_ok_) {
-                if (const FoodGoal* order = objectives.NextOrderFor(items_[carried_].name)) {
-                    serve_need_ = std::string(DonenessName(order->min)) + " to " +
-                                  std::string(DonenessName(order->max));
-                }
-            }
-        }
+    }
+
+    // Whether the carried item is the tray and it sits inside the level's static turn-in
+    // zone this frame -- the delivery point. Tested at the tray's own origin (the zone is
+    // a horizontal column, so its height is irrelevant), and only when a turn-in zone
+    // exists. Cached so the same read drives the "[E] Turn in" prompt and the press below.
+    in_turn_in_ = false;
+    if (turn_in != nullptr && carried_ >= 0 && items_[carried_].serve) {
+        const XMVECTOR tray_origin = CurrentPose(carried_, camera_to_world).r[3];
+        in_turn_in_ = turn_in->Contains(tray_origin);
     }
 
     // The meat the tongs would grip this frame: with the tongs in hand and their jaws
@@ -310,11 +309,15 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     if (actions.WasPressed(Action::Interact)) {
         if (carried_ >= 0) {
             if (serve_tray_ >= 0) {
-                // Over a tray, Interact delivers rather than drops. Serve() accepts the
-                // meat only if its cook fills an open order; a rejected cook stays in
-                // hand (a no-op, not a drop) -- "reject and keep" -- so a mis-timed press
-                // never fumbles food onto the tray. To drop over a tray, step off first.
-                Serve(carried_, serve_tray_, objectives);
+                // Holding a meat over a tray, Interact loads rather than drops. Any meat
+                // is accepted, unjudged; it sticks to the tray and the hand empties. To
+                // drop a meat over a tray, step off the tray first.
+                Load(carried_, serve_tray_);
+            } else if (in_turn_in_) {
+                // Carrying the loaded tray inside the turn-in zone, Interact hands it in:
+                // every stuck meat is matched against the orders and the level ends. To
+                // set the tray down here without turning in, step out of the zone first.
+                TurnIn(carried_, objectives);
             } else {
                 Drop(camera_to_world);
             }
@@ -468,20 +471,16 @@ std::string Props::PromptText() const {
             }
             return "[E] Drop";
         }
-        // Over a tray, the carried meat can be delivered. Only offer "[E] Serve" when
-        // this cook would actually be taken; otherwise say why nothing happens -- the
-        // band it needs, or that no order wants this food -- so a rejected press reads as
-        // "not yet", not as broken. Off a tray, Interact is the drop.
+        // Holding a meat over a tray, Interact loads it -- any meat, unjudged, so the hint
+        // just names the food and its current cook. Carrying the loaded tray in the
+        // turn-in zone, Interact hands it in. Off both, Interact is the drop.
         if (serve_tray_ >= 0 && items_[carried_].cook) {
             const Item& meat = items_[carried_];
-            const std::string band(meat.cook->DonenessLabel());
-            if (serve_ok_) {
-                return "[E] Serve " + meat.name + " (" + band + ")";
-            }
-            if (!serve_need_.empty()) {
-                return meat.name + " (" + band + ") -- needs " + serve_need_;
-            }
-            return meat.name + " (" + band + ") -- no order needs this";
+            return "[E] Place " + meat.name + " (" +
+                   std::string(meat.cook->DonenessLabel()) + ") on tray";
+        }
+        if (in_turn_in_) {
+            return "[E] Turn in";
         }
         return "[E] Drop";
     }
@@ -607,20 +606,15 @@ void Props::TriggerAbility(int item, FXMMATRIX camera_to_world) {
     }
 }
 
-bool Props::Serve(int meat, int tray, Objectives& objectives) {
+void Props::Load(int meat, int tray) {
     Item& item = items_[meat];
 
-    // The order decides. A cook it will not take -- undercooked, overcooked, or a type
-    // it does not want -- leaves everything untouched and the meat in hand.
-    if (!objectives.Serve(item.name, item.cook->DonenessBand())) {
-        return false;
-    }
-
-    // Accepted. Stick it to the tray: mark it served (so it no longer cooks, is picked
-    // up, or is highlighted) and store its pose in the tray's own frame, so it rides the
-    // tray wherever it goes. Rest it on the tray's serve surface, nudged into one of a
-    // few scatter slots so several delivered meats spread across the face instead of
-    // sharing one point.
+    // Any meat loads, unjudged -- the orders are not consulted here (turn-in decides).
+    // Stick it to the tray: mark it served (so it no longer cooks, is picked up, or is
+    // highlighted) and store its pose in the tray's own frame, so it rides the tray
+    // wherever it goes. Rest it on the tray's serve surface, nudged into one of a few
+    // scatter slots so several loaded meats spread across the face instead of sharing one
+    // point.
     item.served = true;
     item.stuck_to = tray;
     int placed = 0;
@@ -636,10 +630,24 @@ bool Props::Serve(int meat, int tray, Objectives& objectives) {
     XMStoreFloat4x4(&item.stuck_local,
                     XMMatrixTranslation(surface.x + sx, surface.y, surface.z + sz));
 
-    // Its body was disabled on pick-up and stays out of the simulation -- stuck food
+    // Its body was disabled on pick-up and stays out of the simulation -- loaded food
     // neither falls nor is knocked; it follows the tray's pose from here (see Update).
     carried_ = -1;
-    return true;
+}
+
+void Props::TurnIn(int tray, Objectives& objectives) {
+    // Hand every meat loaded on this tray to the orders at once. Objectives::Serve fills
+    // the first open order the type and band fit and rejects the rest, so a tray that
+    // matches the ticket completes it and a wrong or short one leaves orders unfilled --
+    // the results screen reads Objectives to show which. A meat that fits no order is
+    // simply not counted; nothing is undone. Filled counts start at zero (this is the
+    // only caller), so the order the meats are visited in does not change the tally.
+    for (const Item& item : items_) {
+        if (item.served && item.stuck_to == tray && item.cook) {
+            objectives.Serve(item.name, item.cook->DonenessBand());
+        }
+    }
+    turned_in_ = true;
 }
 
 XMMATRIX Props::CurrentPose(int index, FXMMATRIX camera_to_world) const {

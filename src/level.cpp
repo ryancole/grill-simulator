@@ -253,6 +253,17 @@ LevelDef LoadFromFile(const std::filesystem::path& path) {
         }
     }
 
+    // The turn-in spot: an optional `turn_in = {pos = [x,y,z], radius = r}` table naming
+    // where the loaded tray is delivered to end the level. `pos` is required when the
+    // table is present; `radius` defaults to the struct's 1 m. Omit the table for a
+    // sandbox with no delivery point.
+    if (const toml::table* turn_in = root["turn_in"].as_table()) {
+        TurnInDef t;
+        t.pos = Vec3((*turn_in)["pos"], path, "turn_in pos");
+        t.radius = NumberOr((*turn_in)["radius"], t.radius, path, "turn_in radius");
+        level.turn_in = t;
+    }
+
     return level;
 }
 

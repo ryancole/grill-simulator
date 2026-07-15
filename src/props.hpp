@@ -44,12 +44,16 @@ public:
     // frame time in seconds, which the cookable meats advance their cook on.
     // `heat_sources` are the yard's hot objects this frame (the grill's grate): each
     // meat cooks against the hottest air any of them imposes at where it sits, or room
-    // air when none reaches it. Delivery is against the serving tray, which is itself a
+    // air when none reaches it. Loading is against the serving tray, which is itself a
     // carryable Props owns: pressing Interact while holding a meat over the tray's live
-    // serve zone delivers it -- `objectives` decides whether that cook fills an open
-    // order, an accepted meat sticks to the tray, and a rejected one stays in hand.
+    // serve zone places it -- any meat is accepted and sticks to the tray, unjudged, its
+    // cook frozen at that band. The judging happens later: `turn_in` is the level's
+    // static delivery zone (null on a sandbox level), and pressing Interact while
+    // carrying the loaded tray inside it hands every stuck meat to `objectives` at once
+    // and ends the level -- see TurnedIn.
     void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt,
-                std::span<const HeatSource> heat_sources, Objectives& objectives);
+                std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
+                Objectives& objectives);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -68,6 +72,13 @@ public:
     // when a loose object is in reach and looked at, "[E] Drop" while carrying,
     // or empty when E would do nothing. Recomputed each Update.
     std::string PromptText() const;
+
+    // Whether the loaded tray has been turned in at the level's delivery zone -- the one
+    // discrete event that ends the level. Set once, when the player presses Interact while
+    // carrying the tray inside the turn-in zone (Update hands the stuck meats to the
+    // Objectives at that moment); the game loop polls this to raise the results screen.
+    // Always false on a freshly loaded level, since World rebuilds Props from scratch.
+    bool TurnedIn() const { return turned_in_; }
 
     // One entry per meat in the yard for the on-screen "meats" panel. `name` is the food's
     // type (the string Objectives keys on, uppercased for display by the caller), `band`
@@ -198,12 +209,16 @@ private:
     // None does nothing. `camera_to_world` places a gripped meat and aims a release.
     // Only ever called with a valid carried index.
     void TriggerAbility(int item, DirectX::FXMMATRIX camera_to_world);
-    // Attempts to deliver the carried meat `meat` onto tray item `tray`, asking
-    // `objectives` whether its current doneness fills an open order. On acceptance the
-    // meat is marked served, stuck to the tray (its pose stored in the tray's frame) and
-    // released from the hand; on rejection nothing changes and it stays carried. Returns
-    // whether it was served.
-    bool Serve(int meat, int tray, Objectives& objectives);
+    // Loads the carried meat `meat` onto tray item `tray`, unjudged. The meat is marked
+    // served (its cook frozen), stuck to the tray -- its pose stored in the tray's frame,
+    // scattered across the face so several spread out -- and released from the hand. Any
+    // meat is accepted; whether its doneness fills an order is decided later, at turn-in.
+    void Load(int meat, int tray);
+    // Turns in tray item `tray`: hands every meat stuck to it to `objectives` at once
+    // (each doneness matched against the open orders) and marks the level turned in. The
+    // one place the win condition is evaluated -- called when the loaded tray is carried
+    // into the turn-in zone and Interact is pressed.
+    void TurnIn(int tray, Objectives& objectives);
     // The world-space model-to-world transform an item is drawn and posed under right
     // now: the held pose while carried, otherwise its resting pose. Used to place a
     // tray's serve zone and to hang served meat off it, resting or in hand.
@@ -227,15 +242,15 @@ private:
     std::string primary_label_;
     // The tray item the carried meat is held over this frame (its serve zone contains
     // the meat), or -1. Cached in Update so the (const) prompt can read it -- it drives
-    // the "[E] Serve" hint and is what the Interact press serves onto.
+    // the "[E] Place on tray" hint and is what the Interact press loads onto.
     int serve_tray_ = -1;
-    // Whether the carried meat's current cook would be accepted at that zone this frame,
-    // and -- when it would not -- the doneness the outstanding order still wants, as
-    // ready-made text ("medium well to well done") or empty if no order needs this type.
-    // Both are computed in Update against the Objectives, so the const prompt can explain
-    // an about-to-be-rejected serve rather than silently doing nothing.
-    bool serve_ok_ = false;
-    std::string serve_need_;
+    // Whether the carried item is the tray and it sits inside the level's turn-in zone
+    // this frame. Cached in Update so the (const) prompt can offer "[E] Turn in" and the
+    // Interact press knows to hand the tray in rather than drop it.
+    bool in_turn_in_ = false;
+    // Whether the tray has been turned in -- latched true by the turn-in press and read
+    // by TurnedIn(). Ends the level; never cleared (the level reloads to play again).
+    bool turned_in_ = false;
 
     // Rebuilt each Update: every resting item, the carried one, and the one the
     // outline glows around.

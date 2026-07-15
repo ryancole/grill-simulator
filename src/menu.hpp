@@ -4,10 +4,13 @@
 #include <vector>
 
 // Which top-level mode the game is in. It launches into Menu; confirming a level
-// entry switches to Playing, and Escape out of play raises the menu again.
+// entry switches to Playing, and Escape out of play raises the menu again. Turning the
+// loaded tray in at the level's delivery zone switches Playing to LevelComplete, the
+// results screen, which offers a replay of the level or a return to the launch menu.
 enum class GameState {
     Menu,
     Playing,
+    LevelComplete,
 };
 
 // The launch menu's model: a vertical list of selectable entries and the one

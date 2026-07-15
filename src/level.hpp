@@ -6,6 +6,7 @@
 #include <DirectXMath.h>
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,16 @@ struct FoodGoal {
     CookInformation::Doneness max = CookInformation::Doneness::WellDone;
 };
 
+// The level's turn-in spot: where the player carries the loaded tray to end the level. A
+// horizontal circle (`radius` metres around `pos` in the ground plane, height ignored)
+// that Props tests the carried tray against -- pressing Interact inside it hands the tray
+// in and its meats are judged against the goals. Present only on a level that sets a
+// `turn_in`; a level without one is a sandbox with no way to win (like an empty `goal`).
+struct TurnInDef {
+    DirectX::XMFLOAT3 pos{0.0f, 0.0f, 0.0f};
+    float radius = 1.0f;
+};
+
 // Everything that makes one level its own place: a name, where the player starts,
 // which way the sun falls, and the things standing in it. Plain data, parsed from a
 // level's TOML file by LoadFromFile -- this struct is that format's schema, so a
@@ -84,10 +95,14 @@ struct LevelDef {
     std::vector<PropPlacement> props;
     std::vector<CarryablePlacement> carryables;
 
-    // The level's win condition: the orders the player must deliver to a serving zone,
-    // each cooked into its band range. Empty on a level that sets no `goal` array, which
-    // is simply a level with nothing to win (the sandbox levels leave it so).
+    // The level's win condition: the orders the player must deliver on the tray, each
+    // cooked into its band range. Empty on a level that sets no `goal` array, which is
+    // simply a level with nothing to win (the sandbox levels leave it so).
     std::vector<FoodGoal> goals;
+
+    // Where the player turns the loaded tray in to end the level. Unset on a level with
+    // no `turn_in` table, which then has no delivery point (a sandbox).
+    std::optional<TurnInDef> turn_in;
 };
 
 namespace levels {

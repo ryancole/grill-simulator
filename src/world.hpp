@@ -4,6 +4,9 @@
 #include "objectives.hpp"
 #include "props.hpp"
 #include "scene.hpp"
+#include "serve_zone.hpp"
+
+#include <optional>
 
 struct LevelDef;
 class Physics;
@@ -39,6 +42,10 @@ public:
     Furniture& furniture() { return furniture_; }
     Objectives& objectives() { return objectives_; }
     const Objectives& objectives() const { return objectives_; }
+    // The level's turn-in zone, or nullptr on a level that set no `turn_in`. Props tests
+    // the carried tray against it each frame; a null zone means the level cannot be turned
+    // in (a sandbox). Stable for the level's lifetime, so a borrowed pointer is safe.
+    const ServeZone* turn_in_zone() const { return turn_in_ ? &*turn_in_ : nullptr; }
 
 private:
     // Declared before props_/furniture_ so it is built first (they take a Scene&)
@@ -49,6 +56,8 @@ private:
     // The level's win-condition tracker, seeded from its goals. Ordinary per-level
     // state -- it borrows nothing, so its position among the members is free.
     Objectives objectives_;
+    // The level's turn-in zone, built from its `turn_in`, or empty on a sandbox level.
+    std::optional<ServeZone> turn_in_;
 
     // The persistent systems this level's content was loaded into, so the
     // destructor can hand it all back.
