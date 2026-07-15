@@ -313,6 +313,14 @@ void Actions::Update(const Input& input) {
     }
 }
 
+std::string Actions::KeyName(Action action) const {
+    const std::vector<int>& keys = bindings_[Index(action)];
+    if (keys.empty()) {
+        return {};
+    }
+    return NameFromKey(keys.front()).value_or("?");
+}
+
 bool Actions::IsActive(Action action) const {
     return current_.test(Index(action));
 }

@@ -98,7 +98,8 @@ Ability AbilityOr(const toml::node_view<const toml::node>& view, Ability fallbac
         Fail(path, "ability must be a string");
     }
     if (*name == "none") return Ability::None;
-    Fail(path, "unknown ability '" + *name + "' (want none)");
+    if (*name == "grip_meat") return Ability::GripMeat;
+    Fail(path, "unknown ability '" + *name + "' (want none or grip_meat)");
 }
 
 // The model name a type must name, or a catalog error.

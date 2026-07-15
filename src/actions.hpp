@@ -102,6 +102,12 @@ public:
     // a failed save must not crash the game mid-menu.
     void SaveUserOverrides(const std::filesystem::path& path) const;
 
+    // The display name of the action's primary (first) key -- "E", "Mouse1" -- for a HUD
+    // prompt that names the real binding rather than a hardcoded key. Empty when the
+    // action is unbound, "?" for a key with no writable name (only a hand-edited config
+    // can produce one). Reflects the current bindings, so it tracks a rebind.
+    std::string KeyName(Action action) const;
+
     // Held this frame: any key bound to the action is down.
     bool IsActive(Action action) const;
     // The frame the action goes down (a rising edge): true only on the transition,

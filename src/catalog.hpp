@@ -20,9 +20,11 @@ enum class HoldStyle { Flat, Tongs, Tray };
 // The action a carryable performs when the player presses the primary action (left
 // mouse button) while holding it. Named by the catalog so a carryable declares its
 // ability without Props knowing the object; Props dispatches on it (see
-// Props::TriggerAbility). `None` is an item that simply does nothing yet -- the
-// starting point every carryable has until a real behaviour is filled in here.
-enum class Ability { None };
+// Props::TriggerAbility). `GripMeat` is the tongs: the primary action clamps a meat
+// (and only a meat) in the jaws to carry it, and releases it on a second press. `None`
+// is an item that simply does nothing yet -- the starting point every carryable has
+// until a real behaviour is filled in here.
+enum class Ability { None, GripMeat };
 
 // The serving surface a carryable provides, as pure data: how close (metres, measured
 // in the ground plane) a carried meat must be brought to deliver it, and where the
