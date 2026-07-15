@@ -136,13 +136,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
         return 0;
     case WM_KEYDOWN:
         if (wparam == VK_ESCAPE) {
-            // Escape backs out one level. In play it drops the mouse look and raises
-            // the menu; from the menu -- already the top level -- it closes the game.
+            // Escape backs out one level. In play it drops the mouse look and raises the
+            // menu. On the menu it means "back", but what that backs out of depends on
+            // which screen is up (cancel a rebind, step back a submenu, or quit) -- so
+            // it is latched for the menu loop to resolve rather than acted on here.
             if (game->state == GameState::Playing) {
                 game->input.SetMouseLook(hwnd, false);
                 game->state = GameState::Menu;
             } else {
-                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                game->input.OnEscape();
             }
             return 0;
         }
@@ -209,10 +211,16 @@ int Run(HINSTANCE instance, int show_command) {
     // (backtick); starts hidden, so the polished HUD is what shows by default.
     bool show_debug = false;
 
-    // The control bindings for the whole session. Read once, over the built-in
-    // defaults, so a missing or partial controls.toml still plays; a syntax error or
-    // an unknown key name throws out to the fatal-error box, naming the file.
-    game.actions.LoadFromFile(ExecutableDirectory() / "assets" / "controls.toml");
+    // The control bindings for the whole session, in three layers: the built-in
+    // defaults the Actions constructor seeds, the committed controls.toml over them,
+    // then the per-user controls.user.toml the in-game keybinds editor writes -- so a
+    // rebind survives a relaunch without touching the shipped defaults. A missing or
+    // partial file at either layer just leaves the layer beneath it standing; a syntax
+    // error or unknown key name throws out to the fatal-error box, naming the file.
+    const std::filesystem::path controls_dir = ExecutableDirectory() / "assets";
+    const std::filesystem::path user_controls_path = controls_dir / "controls.user.toml";
+    game.actions.LoadFromFile(controls_dir / "controls.toml");
+    game.actions.LoadFromFile(user_controls_path);
 
     // Loads a level by index: parses its file, unloads whatever is current (handing
     // its GPU geometry and physics actors back), builds the new one, and drops the
@@ -232,16 +240,37 @@ int Run(HINSTANCE instance, int show_command) {
     // resident means play begins the instant an entry is chosen.
     load_level(0);
 
-    // The launch menu: one entry per level, in level_files order, then Exit. So a
-    // chosen index below is either a level to load or -- at exit_entry, the entry
-    // just past the last level -- the signal to close the game.
+    // Which menu screen is showing while game.state is Menu. Main is the launch list;
+    // Options and Keybinds are reached from it and back out with Escape. A refinement of
+    // the Menu state, kept as a loop local because only the loop navigates it.
+    enum class MenuScreen { Main, Options, Keybinds };
+    MenuScreen screen = MenuScreen::Main;
+
+    // The main menu: one entry per level, in level_files order, then Options, then Exit.
+    // So a chosen index is a level to load, or Options to open that screen, or Exit to
+    // close the game.
     std::vector<std::string> menu_entries;
     for (const char* name : level_names) {
         menu_entries.emplace_back(name);
     }
+    menu_entries.emplace_back("Options");
     menu_entries.emplace_back("Exit");
-    const int exit_entry = static_cast<int>(level_names.size());
+    const int options_entry = static_cast<int>(level_names.size());
+    const int exit_entry = options_entry + 1;
     Menu menu(std::move(menu_entries));
+
+    // The Options screen: for now just the keybinds editor and a way back.
+    Menu options_menu({"Keybinds", "Back"});
+    constexpr int kOptionsKeybinds = 0;
+    constexpr int kOptionsBack = 1;
+
+    // The keybinds screen's own selection and capture state. Its rows are the rebindable
+    // actions (rebuilt each frame from the live bindings so the display stays current)
+    // followed by Reset to Defaults and Back, so the two trailing indices are known
+    // relative to the action count. `capturing` is true while waiting for the player to
+    // press the key to bind to the selected action.
+    int keybind_selected = 0;
+    bool capturing = false;
 
     ShowWindow(hwnd, show_command);
 
@@ -279,57 +308,167 @@ int Run(HINSTANCE instance, int show_command) {
         // fire exactly once per press.
         game.actions.Update(game.input);
 
-        // The menu owns the whole frame while it is up: navigate the list (by mouse
-        // or keyboard), act on a confirm, and draw it. The world behind is neither
-        // stepped nor drawn, so nothing below this block runs until play resumes.
+        // The menu owns the whole frame while it is up: navigate whichever screen is
+        // showing (by mouse or keyboard), act on a confirm or a back, and draw it. The
+        // world behind is neither stepped nor drawn, so nothing below this block runs
+        // until play resumes.
         if (game.state == GameState::Menu) {
-            const int entry_count = static_cast<int>(menu.entries().size());
-            bool confirm = false;
-
-            // Mouse: hovering an entry highlights it, but only when the cursor
-            // actually moves, so a resting mouse does not fight the keyboard. A left
-            // click confirms whichever entry it lands on; a click on empty space is
-            // consumed and ignored.
+            // The client-space cursor, shared by whichever screen's hit-test runs below.
+            // A hover only re-selects when the mouse actually moved, so a resting mouse
+            // never fights the keyboard's selection.
             POINT cursor{};
-            if (GetCursorPos(&cursor) && ScreenToClient(hwnd, &cursor)) {
-                const int hovered = game.renderer.MenuEntryAt(cursor.x, cursor.y, entry_count);
-                if (hovered >= 0 && (cursor.x != last_cursor.x || cursor.y != last_cursor.y)) {
-                    menu.SetSelected(hovered);
-                }
+            const bool have_cursor = GetCursorPos(&cursor) && ScreenToClient(hwnd, &cursor);
+            const bool cursor_moved =
+                have_cursor && (cursor.x != last_cursor.x || cursor.y != last_cursor.y);
+            if (have_cursor) {
                 last_cursor = cursor;
+            }
+
+            // The Main and Options screens are both plain vertical lists, so they share
+            // one block: the same Menu navigation, drawn with RenderMenu, differing only
+            // in what a confirm and a back do.
+            if (screen == MenuScreen::Main || screen == MenuScreen::Options) {
+                Menu& active = screen == MenuScreen::Main ? menu : options_menu;
+                const int entry_count = static_cast<int>(active.entries().size());
+                bool confirm = false;
+
+                int hovered = -1;
+                if (have_cursor) {
+                    hovered = game.renderer.MenuEntryAt(cursor.x, cursor.y, entry_count);
+                    if (hovered >= 0 && cursor_moved) {
+                        active.SetSelected(hovered);
+                    }
+                }
                 if (game.input.ConsumeLeftClick() && hovered >= 0) {
-                    menu.SetSelected(hovered);
+                    active.SetSelected(hovered);
                     confirm = true;
                 }
+
+                if (game.actions.WasPressed(Action::MenuUp)) {
+                    active.MoveUp();
+                }
+                if (game.actions.WasPressed(Action::MenuDown)) {
+                    active.MoveDown();
+                }
+                if (game.actions.WasPressed(Action::MenuConfirm)) {
+                    confirm = true;
+                }
+
+                // Escape steps Options back to Main; on Main -- the top level -- it quits.
+                if (game.input.ConsumeEscape()) {
+                    if (screen == MenuScreen::Options) {
+                        screen = MenuScreen::Main;
+                    } else {
+                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    }
+                } else if (confirm && screen == MenuScreen::Main) {
+                    const int choice = active.selected();
+                    if (choice == exit_entry) {
+                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    } else if (choice == options_entry) {
+                        screen = MenuScreen::Options;
+                    } else {
+                        // Load the chosen level (re-reading its file) and drop into play.
+                        // The switch takes effect next frame; this one still draws the
+                        // menu, which is identical, so the hand-off is invisible.
+                        load_level(choice);
+                        game.state = GameState::Playing;
+                    }
+                } else if (confirm) { // Options
+                    if (active.selected() == kOptionsKeybinds) {
+                        keybind_selected = 0;
+                        capturing = false;
+                        screen = MenuScreen::Keybinds;
+                    } else if (active.selected() == kOptionsBack) {
+                        screen = MenuScreen::Main;
+                    }
+                }
+
+                const char* title = screen == MenuScreen::Main ? "GRILL SIMULATOR" : "OPTIONS";
+                game.renderer.RenderMenu(title, active.entries(), active.selected());
+                continue;
+            }
+
+            // The Keybinds screen. Its rows are the rebindable actions -- rebuilt each
+            // frame from the live bindings so a rebind shows at once -- then Reset to
+            // Defaults and Back.
+            const std::vector<Actions::Binding> binds = game.actions.RebindableBindings();
+            const int action_count = static_cast<int>(binds.size());
+            const int reset_row = action_count;
+            const int back_row = action_count + 1;
+            const int row_count = action_count + 2;
+
+            std::vector<std::string> labels;
+            std::vector<std::string> values;
+            labels.reserve(row_count);
+            values.reserve(row_count);
+            for (const Actions::Binding& b : binds) {
+                labels.push_back(b.display);
+                values.push_back(b.key);
+            }
+            labels.emplace_back("Reset to Defaults");
+            values.emplace_back("");
+            labels.emplace_back("Back");
+            values.emplace_back("");
+
+            if (capturing) {
+                // Waiting for the player to press the key to bind. Escape cancels; any
+                // other fresh key press becomes the binding, is saved, and ends capture.
+                // Navigation and clicks are swallowed meanwhile so nothing moves the
+                // selection out from under the pending bind.
+                game.input.ConsumeLeftClick();
+                if (game.input.ConsumeEscape()) {
+                    game.input.CancelKeyCapture();
+                    capturing = false;
+                } else if (const std::optional<int> key = game.input.ConsumeCapturedKey()) {
+                    if (keybind_selected >= 0 && keybind_selected < action_count) {
+                        game.actions.Rebind(binds[keybind_selected].action, *key);
+                        game.actions.SaveUserOverrides(user_controls_path);
+                    }
+                    capturing = false;
+                }
             } else {
-                game.input.ConsumeLeftClick(); // Clear a click we cannot place.
-            }
+                bool confirm = false;
+                int hovered = -1;
+                if (have_cursor) {
+                    hovered = game.renderer.KeybindRowAt(cursor.x, cursor.y, row_count);
+                    if (hovered >= 0 && cursor_moved) {
+                        keybind_selected = hovered;
+                    }
+                }
+                if (game.input.ConsumeLeftClick() && hovered >= 0) {
+                    keybind_selected = hovered;
+                    confirm = true;
+                }
 
-            // Keyboard: arrows/WS move the highlight, Enter/Space confirms.
-            if (game.actions.WasPressed(Action::MenuUp)) {
-                menu.MoveUp();
-            }
-            if (game.actions.WasPressed(Action::MenuDown)) {
-                menu.MoveDown();
-            }
-            if (game.actions.WasPressed(Action::MenuConfirm)) {
-                confirm = true;
-            }
+                // Arrows/WS wrap through the rows, mirroring Menu's own wrapping.
+                if (game.actions.WasPressed(Action::MenuUp)) {
+                    keybind_selected = (keybind_selected + row_count - 1) % row_count;
+                }
+                if (game.actions.WasPressed(Action::MenuDown)) {
+                    keybind_selected = (keybind_selected + 1) % row_count;
+                }
+                if (game.actions.WasPressed(Action::MenuConfirm)) {
+                    confirm = true;
+                }
 
-            if (confirm) {
-                const int choice = menu.selected();
-                if (choice == exit_entry) {
-                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                } else {
-                    // Load the chosen level (re-reading its file) and drop into play.
-                    // The switch takes effect next frame; this one still draws the
-                    // menu, which is identical, so the hand-off is invisible.
-                    load_level(choice);
-                    game.state = GameState::Playing;
+                if (game.input.ConsumeEscape()) {
+                    screen = MenuScreen::Options;
+                } else if (confirm) {
+                    if (keybind_selected == back_row) {
+                        screen = MenuScreen::Options;
+                    } else if (keybind_selected == reset_row) {
+                        game.actions.ResetToDefaults();
+                        game.actions.SaveUserOverrides(user_controls_path);
+                    } else {
+                        // An action row: listen for the next key press.
+                        capturing = true;
+                        game.input.BeginKeyCapture();
+                    }
                 }
             }
 
-            game.renderer.RenderMenu("GRILL SIMULATOR", menu.entries(), menu.selected());
+            game.renderer.RenderKeybinds("KEYBINDS", labels, values, keybind_selected, capturing);
             continue;
         }
 

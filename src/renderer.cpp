@@ -349,6 +349,20 @@ constexpr float kMenuTitleBaselineFraction = 0.32f;  // Title baseline, from the
 constexpr float kMenuFirstEntryBaselineFraction = 0.52f; // First entry's baseline.
 constexpr float kMenuEntrySpacingFactor = 1.8f; // Line pitch, in entry glyph heights.
 
+// The keybinds screen carries more rows than the launch menu (every gameplay action
+// plus Reset and Back), so its title sits higher and its rows are smaller and tighter
+// to fit them all. The two columns anchor at fractions of the width: the label's left
+// edge and the key value's right edge, leaving a gutter between them.
+constexpr float kKeybindTitleFraction = 0.075f;
+constexpr float kKeybindTitleBaselineFraction = 0.16f;
+constexpr float kKeybindRowFraction = 0.040f;
+constexpr float kKeybindFirstRowBaselineFraction = 0.27f;
+constexpr float kKeybindRowSpacingFactor = 1.95f;
+constexpr float kKeybindLabelLeftFraction = 0.28f;  // Label column's left edge.
+constexpr float kKeybindValueRightFraction = 0.72f; // Value column's right edge.
+constexpr float kKeybindHintFraction = 0.032f;      // Footer glyph height (smaller).
+constexpr float kKeybindHintBaselineFraction = 0.965f; // Footer instructions.
+
 #ifndef NDEBUG
 constexpr bool kEnableDebugLayer = true;
 #else
@@ -2760,6 +2774,88 @@ void Renderer::DrawMenu(std::string_view title, std::span<const std::string> ent
     }
 }
 
+void Renderer::DrawKeybinds(std::string_view title, std::span<const std::string> labels,
+                            std::span<const std::string> values, int selected, bool capturing) {
+    if (width_ == 0 || height_ == 0) {
+        return;
+    }
+
+    const float h = static_cast<float>(height_);
+    const float w = static_cast<float>(width_);
+    const float title_pixel = h * kKeybindTitleFraction;
+    const float row_pixel = h * kKeybindRowFraction;
+    const float spacing = row_pixel * kKeybindRowSpacingFactor;
+    const float label_left = w * kKeybindLabelLeftFraction;
+    const float value_right = w * kKeybindValueRightFraction;
+
+    // Same warm palette as the launch menu: amber title, amber selected row, quiet grey
+    // for the rest, and a dimmer grey for the footer hint.
+    const XMFLOAT4 title_color{1.0f, 0.82f, 0.48f, 1.0f};
+    const XMFLOAT4 selected_color{1.0f, 0.78f, 0.35f, 1.0f};
+    const XMFLOAT4 row_color{0.72f, 0.72f, 0.75f, 1.0f};
+    const XMFLOAT4 hint_color{0.5f, 0.5f, 0.55f, 1.0f};
+
+    struct Run {
+        UINT first;
+        UINT count;
+        XMFLOAT4 color;
+    };
+    std::vector<Run> runs;
+    runs.reserve(labels.size() * 3 + 2);
+
+    const FontFace face = HudFace();
+    UINT cursor = 0;
+    const auto emit = [&](std::string_view text, float baseline, float pixel, float left,
+                          XMFLOAT4 color) {
+        const UINT first = cursor;
+        cursor = LayoutLine(face, text, baseline, pixel, cursor, left);
+        if (cursor > first) {
+            runs.push_back({first, cursor - first, color});
+        }
+    };
+
+    // Title, centred (left < 0).
+    emit(title, h * kKeybindTitleBaselineFraction, title_pixel, -1.0f, title_color);
+
+    const std::size_t count = std::min(labels.size(), values.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const bool is_selected = static_cast<int>(i) == selected;
+        const XMFLOAT4 color = is_selected ? selected_color : row_color;
+        const float baseline =
+            h * kKeybindFirstRowBaselineFraction + static_cast<float>(i) * spacing;
+
+        // A caret to the left marks the selected row so the highlight reads in a still
+        // screenshot, not by colour alone.
+        if (is_selected) {
+            emit(">", baseline, row_pixel, label_left - row_pixel * 1.2f, color);
+        }
+
+        // Label, left-anchored at the label column.
+        emit(labels[i], baseline, row_pixel, label_left, color);
+
+        // Value, right-anchored at the value column. While this row is capturing, the
+        // key is replaced by a prompt; rows with no value (Reset / Back) draw nothing.
+        std::string value = is_selected && capturing ? "Press a key..." : values[i];
+        if (!value.empty()) {
+            const float left = value_right - TextWidth(face, value, row_pixel);
+            emit(value, baseline, row_pixel, left, color);
+        }
+    }
+
+    // Footer hint, centred at the bottom and a touch smaller so it reads as secondary.
+    emit("Enter: rebind    Esc: back", h * kKeybindHintBaselineFraction,
+         h * kKeybindHintFraction, -1.0f, hint_color);
+
+    if (cursor == 0) {
+        return;
+    }
+
+    BindTextPipeline();
+    for (const Run& run : runs) {
+        DrawTextRun(face, run.first, run.count, run.color);
+    }
+}
+
 void Renderer::DrawInstances(std::span<const MeshInstance> instances,
                              const XMMATRIX& view_projection, XMFLOAT3 sun_direction,
                              float shadow_receive, bool bind_probe) {
@@ -3200,6 +3296,47 @@ void Renderer::RenderMenu(std::string_view title, std::span<const std::string> e
     MoveToNextFrame();
 }
 
+void Renderer::RenderKeybinds(std::string_view title, std::span<const std::string> labels,
+                              std::span<const std::string> values, int selected, bool capturing) {
+    ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
+    ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
+    ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
+
+    // Same setup as RenderMenu: the font atlas rides the per-level texture heap, so bind
+    // it, then own the swapchain buffer from clear to present.
+    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
+
+    command_list_->RSSetViewports(1, &viewport_);
+    command_list_->RSSetScissorRects(1, &scissor_);
+
+    TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
+                   D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_ACCESS_NO_ACCESS,
+                   D3D12_BARRIER_LAYOUT_UNDEFINED, D3D12_BARRIER_SYNC_RENDER_TARGET,
+                   D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET);
+
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                            static_cast<INT>(frame_index_), rtv_size_);
+    command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    command_list_->ClearRenderTargetView(rtv, kMenuClearColor, 0, nullptr);
+
+    DrawKeybinds(title, labels, values, selected, capturing);
+
+    TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
+                   D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                   D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_SYNC_NONE,
+                   D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_LAYOUT_PRESENT);
+
+    ThrowIfFailed(command_list_->Close(), "CommandList::Close");
+
+    ID3D12CommandList* lists[] = {command_list_.Get()};
+    queue_->ExecuteCommandLists(_countof(lists), lists);
+
+    ThrowIfFailed(swap_chain_->Present(1, 0), "SwapChain::Present");
+
+    MoveToNextFrame();
+}
+
 int Renderer::MenuEntryAt(int x, int y, int entry_count) const {
     if (height_ == 0 || entry_count <= 0) {
         return -1;
@@ -3218,6 +3355,30 @@ int Renderer::MenuEntryAt(int x, int y, int entry_count) const {
         // the glyphs' feet) and is one line-pitch tall, so consecutive rows tile
         // with no gaps between them.
         const float center = baseline - entry_pixel * 0.3f;
+        if (fy >= center - spacing * 0.5f && fy < center + spacing * 0.5f) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int Renderer::KeybindRowAt(int x, int y, int row_count) const {
+    if (height_ == 0 || row_count <= 0) {
+        return -1;
+    }
+    (void)x; // Rows span the full width, so only the vertical position matters.
+
+    const float h = static_cast<float>(height_);
+    const float row_pixel = h * kKeybindRowFraction;
+    const float spacing = row_pixel * kKeybindRowSpacingFactor;
+    const float fy = static_cast<float>(y);
+
+    for (int i = 0; i < row_count; ++i) {
+        const float baseline =
+            h * kKeybindFirstRowBaselineFraction + static_cast<float>(i) * spacing;
+        // Same tiling as MenuEntryAt: a line-pitch-tall band centred on each row's
+        // glyphs, so adjacent rows meet with no gap.
+        const float center = baseline - row_pixel * 0.3f;
         if (fy >= center - spacing * 0.5f && fy < center + spacing * 0.5f) {
             return i;
         }

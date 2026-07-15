@@ -1,6 +1,19 @@
 #include "input.hpp"
 
 void Input::OnKey(WPARAM key, bool down) {
+    // A rebind in progress swallows the next fresh press: it becomes the captured key
+    // and never lands in keys_, so the key chosen for, say, Move Forward does not also
+    // register as held the instant it is bound. A key already down when capture began is
+    // ignored -- otherwise the Enter or Space used to open the rebind would be captured
+    // by its own auto-repeat before the player pressed anything new.
+    if (capturing_ && down) {
+        if (key < keys_.size() && keys_.test(key)) {
+            return;
+        }
+        captured_key_ = static_cast<int>(key);
+        capturing_ = false;
+        return;
+    }
     if (key < keys_.size()) {
         keys_.set(key, down);
     }
