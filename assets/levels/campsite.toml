@@ -48,14 +48,6 @@ prop = [
   # spawn (see the [0.5, 0, 12] tree below), across the clearing. Scenery.
   {type = "tent", pos = [-2.5, 0.0, 11.5], yaw = 20.0},
 
-  # A pile of firewood rounds on the grass by the ahead-left tree (at [-10, 0, 8]): three
-  # standing in a tight cluster with a fourth stacked on top. (Only yaw rotates a prop, so
-  # the rounds stand upright as authored.) Scenery.
-  {type = "log", pos = [-8.70, 0.0, 6.45], yaw = 0.0},
-  {type = "log", pos = [-8.35, 0.0, 6.45], yaw = 55.0},
-  {type = "log", pos = [-8.52, 0.0, 6.74], yaw = 110.0},
-  {type = "log", pos = [-8.52, 0.38, 6.55], yaw = 25.0},
-
   # The trees ring the site to make a wooded clearing, told apart by scale and turn. A
   # gap to the south (toward the spawn) reads as the way in from the campground road.
   {type = "tree", pos = [-10.0, 0.0, 8.0], yaw = 25.0},
@@ -81,4 +73,13 @@ carryable = [
   {type = "chicken", pos = [-0.15, 0.87, 1.87], yaw = -8.0},
   {type = "patty", pos = [0.15, 0.87, 1.87]},
   {type = "patty", pos = [-0.15, 0.87, 2.23], yaw = -24.0},
+
+  # Four firewood logs the player can pick up, in a loose pile on the grass by the
+  # ahead-left tree (at [-10, 0, 8]). Carryables are dynamic bodies, so they are spaced
+  # apart and dropped a hair above the ground to settle into a heap rather than start
+  # interpenetrating and shove each other away.
+  {type = "log", pos = [-8.75, 0.06, 6.40], yaw = 0.0},
+  {type = "log", pos = [-8.35, 0.06, 6.45], yaw = 50.0},
+  {type = "log", pos = [-8.60, 0.06, 6.82], yaw = 100.0},
+  {type = "log", pos = [-8.25, 0.06, 6.85], yaw = 150.0},
 ]

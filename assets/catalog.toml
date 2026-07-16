@@ -172,6 +172,10 @@ model = "firepit.glb"
 [prop.tent]
 model = "tent.glb"
 
-# A firewood log: scenery, a plain static prop. Levels stack several into a pile.
-[prop.log]
+# A firewood log the player can pick up and carry -- a plain carryable tool (no cook
+# profile, takes no food). `sound` is a stand-in: there is no dedicated wood impact clip
+# yet, so it lands with the soft "meat" thud rather than a metallic clank.
+[tool.log]
 model = "log.glb"
+knock = 5.0
+sound = "meat"
