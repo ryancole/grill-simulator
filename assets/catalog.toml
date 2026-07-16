@@ -132,6 +132,16 @@ hold = "tray"
 knock = 4.0
 sound = "grill_lid"
 
+# Lighter fluid: a carryable utensil (a squeeze can), picked up and carried like the tongs.
+# Its primary action (left mouse) squirts fluid -- the `spray_fluid` ability. The button and
+# prompt are wired; what a squirt actually does is a stub for now (a later step). The type is
+# quoted with a space so the pick-up prompt reads "[E] Pick up lighter fluid" cleanly.
+[tool."lighter fluid"]
+model = "lighter-fluid.glb"
+knock = 2.0
+sound = "metal"
+ability = "spray_fluid"
+
 # --- Props: furniture and scenery --------------------------------------------------
 
 # The charcoal grill base: a dynamic body that radiates heat from its grate. Its lid is

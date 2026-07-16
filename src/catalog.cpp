@@ -100,7 +100,9 @@ Ability AbilityOr(const toml::node_view<const toml::node>& view, Ability fallbac
     if (*name == "none") return Ability::None;
     if (*name == "grip_meat") return Ability::GripMeat;
     if (*name == "stack_in_fire_pit") return Ability::StackInFirePit;
-    Fail(path, "unknown ability '" + *name + "' (want none, grip_meat or stack_in_fire_pit)");
+    if (*name == "spray_fluid") return Ability::SprayFluid;
+    Fail(path, "unknown ability '" + *name +
+                   "' (want none, grip_meat, stack_in_fire_pit or spray_fluid)");
 }
 
 // The optional heat a type radiates, read from its `heat` (centre temperature) and the

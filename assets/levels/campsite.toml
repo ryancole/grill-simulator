@@ -82,6 +82,10 @@ carryable = [
   {type = "log", pos = [-8.35, 0.06, 6.45], yaw = 50.0},
   {type = "log", pos = [-8.60, 0.06, 6.82], yaw = 100.0},
   {type = "log", pos = [-8.25, 0.06, 6.85], yaw = 150.0},
+
+  # The lighter fluid, on the dirt pad between the table and the fire pit -- pick it up
+  # like the tongs; its primary action squirts. Spawned a hair above the pad to settle.
+  {type = "lighter fluid", pos = [4.3, 0.15, 3.9], yaw = -20.0},
 ]
 
 # The fire pit's stacking zone, over the firepit prop at [6.5, 0, 4.5]. Carry a log here

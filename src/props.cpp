@@ -524,6 +524,11 @@ std::string Props::PromptText() const {
         if (log_over_pit_) {
             return "[" + primary_label_ + "] Add log to fire pit";
         }
+        // The lighter fluid squirts on the primary action -- always available while it is
+        // held, so its button shows the whole time (Interact still drops it).
+        if (items_[carried_].ability == Ability::SprayFluid) {
+            return "[" + primary_label_ + "] Spray lighter fluid";
+        }
         return "[E] Drop";
     }
     if (hovered_ >= 0) {
@@ -652,6 +657,10 @@ void Props::TriggerAbility(int item, FXMMATRIX camera_to_world) {
         if (log_over_pit_) {
             PlaceInFirePit(item, fire_pit_center_);
         }
+        break;
+    case Ability::SprayFluid:
+        // The lighter fluid. The button and prompt are wired, but a squirt has no effect
+        // yet -- what it does (priming/lighting the fire pit) is a later step.
         break;
     }
 }
