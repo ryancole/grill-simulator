@@ -5,7 +5,7 @@
       "label": "cmake: configure",
       "type": "shell",
       "command": "cmake",
-      "args": ["--preset", "windows-clang"],
+      "args": ["--preset", "windows-msvc"],
       "problemMatcher": []
     },
     {

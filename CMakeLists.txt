@@ -12,7 +12,7 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-# No C++ modules in this project; skipping the scan removes a per-file clang-scan-deps pass.
+# No C++ modules in this project; skipping the scan removes a per-file dependency-scan pass.
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
@@ -43,6 +43,7 @@ add_executable(grill WIN32
   src/collision.cpp
   src/cook_information.cpp
   src/environment.cpp
+  src/fluid.cpp
   src/heat_source.cpp
   src/image.cpp
   src/input.cpp
@@ -76,13 +77,14 @@ target_compile_options(grill PRIVATE
   /W4
   /permissive-
   /utf-8
-  # DirectX headers declare plenty of unused interface parameters.
-  -Wno-unused-parameter
+  # DirectX headers declare plenty of unused interface parameters (C4100).
+  /wd4100
   $<$<CONFIG:Debug>:/Od>
   $<$<CONFIG:Release>:/O2>)
 
 agility_sdk_stage_runtime(grill)
 fmod_stage_runtime(grill)
+physx_stage_gpu_runtime(grill)
 
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT scene.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT scene.ps.cso)

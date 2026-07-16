@@ -27,16 +27,14 @@ slab is walked onto rather than bumped into.
 
 | Component | Version used | Source |
 | --- | --- | --- |
-| LLVM / clang-cl | 22.1.8 | `winget install --id LLVM.LLVM -e` |
 | MSVC toolset | 14.51 | `winget install --id Microsoft.VisualStudio.BuildTools -e --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64"` |
 | Windows SDK | 10.0.28000.0 | Standalone SDK installer, or a VS workload |
 | CMake | ≥ 3.28 | `winget install --id Kitware.CMake -e` |
 | Ninja | ≥ 1.13 | `winget install --id Ninja-build.Ninja -e` |
 
-MSVC is installed for its **C++ standard library and import libraries only** —
-`cl.exe` is never invoked. clang targeting the `x86_64-pc-windows-msvc` triple
-does not ship its own `<vector>`, and the Windows SDK provides the C runtime but
-not the C++ one, so the MSVC STL is a hard requirement for this toolchain.
+The build is **MSVC (`cl.exe` + `link.exe`)** driven by Ninja — but no
+`vcvars64.bat` developer prompt is ever required; see
+[How the toolchain finds MSVC](#how-the-toolchain-finds-msvc).
 
 The Agility SDK, DXC and fastgltf are **not** prerequisites. CMake fetches all
 three at configure time and pins them by SHA-512.
@@ -47,7 +45,7 @@ which are committed — see [Models](#models).
 ## Building
 
 ```powershell
-cmake --preset windows-clang     # configure once
+cmake --preset windows-msvc      # configure once
 cmake --build --preset debug     # or: --preset release
 ```
 
@@ -73,9 +71,8 @@ Remove-Item -Recurse -Force build
 ```
 
 That covers the CMake cache, the Ninja graph, both configurations' objects and
-binaries, the compiled shaders and their depfiles, clangd's background index
-(`build/.cache`) and the fetched packages (`build/_deps`). Nothing generated is
-written outside it.
+binaries, the compiled shaders and their depfiles, and the fetched packages
+(`build/_deps`). Nothing generated is written outside it.
 
 The one cost is that `build/_deps` holds the pinned Agility SDK, DXC and
 fastgltf packages, so a clean wipe re-downloads roughly 85 MB on the next
@@ -83,44 +80,37 @@ configure. To keep them across wipes, point CMake at a base directory of your
 own:
 
 ```powershell
-cmake --preset windows-clang -D FETCHCONTENT_BASE_DIR=C:/some/shared/cache
+cmake --preset windows-msvc -D FETCHCONTENT_BASE_DIR=C:/some/shared/cache
 ```
 
 ## Editing
 
 Open the folder in VS Code and accept the recommended extensions. IntelliSense
-is **clangd**, not cpptools — cpptools is installed purely for its `cppvsdbg`
-debugger, and its IntelliSense engine is disabled in `.vscode/settings.json` so
-the two do not produce duplicate squiggles over the same file.
+and the `cppvsdbg` debugger both come from **cpptools**.
 
-Configure the project at least once before opening a source file: clangd reads
-`build/compile_commands.json`, and that file is what tells it where the STL and
-the Windows SDK live. Without it, every `#include` will be red.
+Configure the project at least once before opening a source file: cpptools
+reads `build/compile_commands.json`, and that file is what tells it where the
+STL and the Windows SDK live. Without it, every `#include` will be red.
 
 `F5` builds Debug and launches under the Windows debugger.
 
 ## How the toolchain finds MSVC
 
-clang's built-in Visual Studio detection only probes VS 8/9/10-era paths. It does
-not find Visual Studio 18 (2026), so left to itself clang-cl locates no standard
-library at all and fails on `#include <vector>`.
-
-Rather than priming every shell with `vcvars64.bat`,
-`cmake/toolchains/clang-cl-x64.cmake` discovers the roots itself (via `vswhere`
-and the `KitsRoot10` registry value) and passes them explicitly:
-
-```
--vctoolsdir <...>/VC/Tools/MSVC/<ver>  -winsdkdir <...>/Windows Kits/10  -winsdkversion <ver>
-```
+The usual way to build with `cl.exe` is a `vcvars64.bat` developer shell, which
+primes `INCLUDE`/`LIB`/`PATH` in the environment. This project deliberately does
+not depend on that: `cmake/toolchains/msvc-x64.cmake` discovers the MSVC toolset
+and Windows SDK roots itself (via `vswhere` and the `KitsRoot10` registry value)
+and passes them explicitly on every command line — the include roots as
+`/external:I` (with `/external:W0`, so system headers are exempt from `/W4`) and
+the library roots as explicit `/libpath:` linker flags.
 
 Two consequences worth knowing:
 
-- Those flags land in `compile_commands.json`, which is precisely why clangd
-  works with no environment set up. A `vcvars`-based build would leave clangd
-  blind unless VS Code itself were launched from a developer prompt.
-- CMake drives `lld-link.exe` directly rather than through the clang driver, so
-  the driver's implicit `/libpath:` arguments are never generated. The toolchain
-  file supplies them by hand.
+- Those flags land in `compile_commands.json`, which is precisely why editor
+  IntelliSense works with no environment set up. A `vcvars`-based build would
+  leave it blind unless VS Code itself were launched from a developer prompt.
+- Configure and build behave identically from any shell — no developer prompt,
+  ever.
 
 Override the auto-detection with `-DMSVC_TOOLS_DIR=...`, `-DWINDOWS_SDK_DIR=...`
 or `-DWINDOWS_SDK_VERSION=...` if you need a specific toolset.
@@ -298,7 +288,7 @@ drag simdjson's headers into `model.cpp` to read one bool.
 CMakeLists.txt
 CMakePresets.json
 cmake/
-  toolchains/clang-cl-x64.cmake   clang-cl + lld-link, MSVC/SDK roots resolved
+  toolchains/msvc-x64.cmake       cl.exe + link.exe, MSVC/SDK roots resolved (no vcvars)
   AgilitySDK.cmake                fetch + stage the D3D12 runtime
   Shaders.cmake                   fetch DXC, add_hlsl_shader()
   FastGltf.cmake                  fetch fastgltf, pin its simdjson by hand

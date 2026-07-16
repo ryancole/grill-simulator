@@ -30,6 +30,7 @@ class PxMaterial;
 class PxControllerManager;
 class PxRigidDynamic;
 class PxSimulationEventCallback;
+class PxCudaContextManager;
 } // namespace physx
 
 // A sounding collision the solver reported this step, for the audio to play.
@@ -98,6 +99,13 @@ public:
     physx::PxMaterial& DefaultMaterial() const { return *material_; }
     physx::PxControllerManager& Controllers() const { return *controllers_; }
 
+    // Whether the scene runs on the GPU pipeline -- a valid CUDA context came up
+    // at startup and the scene was created with GPU dynamics and broadphase. The
+    // PBD fluid requires this; rigid bodies behave the same either way. False on
+    // a machine with no CUDA device or with the GPU DLLs missing next to the exe.
+    bool GpuActive() const { return cuda_ != nullptr; }
+    physx::PxCudaContextManager* Cuda() const { return cuda_; }
+
 private:
     // The allocator and error callback must outlive the foundation that refers
     // to them, so they are owned here and released last.
@@ -106,6 +114,7 @@ private:
     physx::PxFoundation* foundation_ = nullptr;
     physx::PxPhysics* physics_ = nullptr;
     physx::PxDefaultCpuDispatcher* dispatcher_ = nullptr;
+    physx::PxCudaContextManager* cuda_ = nullptr;
     physx::PxScene* scene_ = nullptr;
     physx::PxMaterial* material_ = nullptr;
     physx::PxControllerManager* controllers_ = nullptr;

@@ -1,6 +1,7 @@
 #include "props.hpp"
 
 #include "actions.hpp"
+#include "fluid.hpp"
 #include "objectives.hpp"
 #include "physics.hpp"
 
@@ -36,6 +37,23 @@ constexpr float kDensity = 500.0f; // kg/m^3, a bit lighter than water.
 constexpr float kThrowSpeed = 1.5f;  // m/s along the gaze.
 constexpr float kThrowDrop = 0.5f;   // m/s downward bias.
 constexpr float kThrowSpin = 2.5f;   // rad/s of forward tumble.
+
+// The lighter fluid's stream: how many droplets a second of held spray emits, and
+// how fast each leaves the nozzle. The rate is banked across frames (spray_carry_),
+// so it holds at any frame time; the speed gives the stream a metre or two of
+// throw before gravity takes it.
+constexpr float kSprayPerSecond = 260.0f;
+constexpr float kSpraySpeed = 7.5f; // m/s out of the nozzle.
+
+// How much pooled fluid lights the fire pit: droplet-seconds inside the pit column.
+// A stream aimed into the pit banks its resident droplets every second, so a
+// deliberate half-second-to-second of spray crosses this; a stray splash does not.
+constexpr float kWetnessToLight = 15.0f;
+
+// A lit log's tint: multiplied into the log model's own browns, it pushes the wood
+// toward glowing ember orange -- the visible difference between a cold stack and a
+// burning one. The red channel rides above one so the HDR pipeline blooms it a touch.
+constexpr XMFLOAT3 kEmberTint{1.35f, 0.62f, 0.28f};
 
 // A carried object hangs by the right hand -- see the viewmodel's wrist, which
 // sits near (0.27, -0.35, 0.78) in this same eye space. Flat things are tipped
@@ -186,6 +204,26 @@ PxRigidDynamic* Props::CreateBody(const Item& item, FXMMATRIX initial_pose) {
     return body;
 }
 
+Props::~Props() {
+    // The bodies still in the physics scene are the scene's to release (see
+    // Physics::ClearLevel); the ones removed for carrying, gripping, serving or
+    // stacking are invisible to that sweep and freed here.
+    for (Item& item : items_) {
+        if (!item.in_simulation && item.rigid.actor() != nullptr) {
+            item.rigid.actor()->release();
+        }
+    }
+}
+
+void Props::RemoveBodyFromScene(int index) {
+    // Out of the scene entirely: no gravity, no collisions, no query hits, and --
+    // unlike PxActorFlag::eDISABLE_SIMULATION, which GPU dynamics does not support
+    // (a stale broadphase entry lingers and the GPU pipeline access-violates when
+    // something moves through it) -- safe on both pipelines. ReleaseBody re-adds.
+    physics_->Scene().removeActor(*items_[index].rigid.actor());
+    items_[index].in_simulation = false;
+}
+
 void Props::RebuildTransform(Item& item) {
     // The body frame is the model frame, so its global pose *is* the model-to-world
     // transform, which the RigidBody hands back directly.
@@ -193,6 +231,10 @@ void Props::RebuildTransform(Item& item) {
 }
 
 XMFLOAT3 Props::ItemTint(const Item& item) {
+    // A burning log glows ember orange -- the one visible cue the pit is lit.
+    if (item.in_fire_pit && item.heat && item.heat->IsOn()) {
+        return kEmberTint;
+    }
     // Raw meat's tint is white, so this leaves uncooked food and the non-cooking
     // props drawing exactly as their models do; only cooking browns the colour.
     return item.cook ? item.cook->SurfaceTint() : kWhite;
@@ -253,7 +295,7 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
 
 void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt,
                    std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                   const ServeZone* fire_pit, Objectives& objectives) {
+                   const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
@@ -343,7 +385,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
             if (target >= 0) {
                 // Lift it out of the simulation while it hangs in the hand: it
                 // neither falls nor shoves anything until it is dropped.
-                items_[target].rigid.actor()->setActorFlag(PxActorFlag::eDISABLE_SIMULATION, true);
+                RemoveBodyFromScene(target);
                 carried_ = target;
             }
         }
@@ -355,6 +397,62 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     // acting on an item and dropping it are distinct presses.
     if (actions.WasPressed(Action::PrimaryAction) && carried_ >= 0) {
         TriggerAbility(carried_, camera_to_world);
+    }
+
+    // The lighter fluid sprays for as long as the primary action is held -- a stream,
+    // not the edge-triggered single fire above. Droplets leave the top of the held can
+    // and fly down the gaze; the emission is banked fractionally so the stream's rate
+    // is steady whatever the frame time. Nothing sprays without the GPU fluid (see
+    // Fluid::Active) -- the can still clicks, it just squirts nothing.
+    if (fluid != nullptr && fluid->Active() && carried_ >= 0 &&
+        items_[carried_].ability == Ability::SprayFluid &&
+        actions.IsActive(Action::PrimaryAction)) {
+        spray_carry_ += kSprayPerSecond * dt;
+        const int count = static_cast<int>(spray_carry_);
+        if (count > 0) {
+            spray_carry_ -= static_cast<float>(count);
+            // The nozzle sits at the top of the can: the held pose's origin lifted up
+            // the can's own Y by its height (the model origin is on the underside and
+            // com_offset.y is half the height), nudged a touch down the gaze so the
+            // stream clears the can's body.
+            const XMMATRIX held =
+                XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world;
+            const XMVECTOR nozzle =
+                XMVectorAdd(XMVectorAdd(held.r[3],
+                                        XMVectorScale(XMVector3Normalize(held.r[1]),
+                                                      items_[carried_].com_offset.y * 2.0f)),
+                            XMVectorScale(forward, 0.06f));
+            XMFLOAT3 origin;
+            XMFLOAT3 aim;
+            XMStoreFloat3(&origin, nozzle);
+            XMStoreFloat3(&aim, forward);
+            fluid->Spray(origin, aim, kSpraySpeed, count);
+        }
+    } else {
+        spray_carry_ = 0.0f;
+    }
+
+    // Fluid pooling in the fire pit primes it. Count the droplets inside the pit column
+    // and bank that over seconds -- a passing splash barely registers, a stream held on
+    // the pit crosses the threshold in about a second -- then light every stacked log at
+    // once. Latched: the pit stays lit, and a log stacked onto it later catches as it is
+    // placed (see PlaceInFirePit).
+    if (fluid != nullptr && fire_pit != nullptr && !pit_lit_) {
+        int soaked = 0;
+        for (const XMFLOAT3& p : fluid->Positions()) {
+            if (fire_pit->Contains(XMLoadFloat3(&p))) {
+                ++soaked;
+            }
+        }
+        pit_wetness_ += static_cast<float>(soaked) * dt;
+        if (pit_wetness_ >= kWetnessToLight) {
+            pit_lit_ = true;
+            for (Item& item : items_) {
+                if (item.in_fire_pit && item.heat) {
+                    item.heat->SetOn(true);
+                }
+            }
+        }
     }
 
     // What the prompt reports this frame: nothing to pick while carrying, else
@@ -567,8 +665,8 @@ int Props::PickTarget(FXMVECTOR eye, FXMVECTOR forward) const {
     // Sweep a small sphere down the gaze and take the nearest prop it meets. The
     // filter restricts the query to prop bodies, so neither the yard's static
     // geometry nor the player's own capsule -- which the sweep starts inside --
-    // can shadow the pick. The carried prop, if any, is eDISABLE_SIMULATION and so
-    // is out of the query too.
+    // can shadow the pick. The carried prop, if any, was removed from the scene and
+    // so is out of the query too.
     PropQueryFilter filter;
     const PxQueryFilterData filter_data(PxQueryFlag::eDYNAMIC | PxQueryFlag::ePREFILTER);
     PxSweepBuffer hit;
@@ -602,9 +700,13 @@ void Props::ReleaseBody(int index, FXMMATRIX pose_world, FXMMATRIX camera_to_wor
         XMStoreFloat3(&spin, XMVectorScale(right, kThrowSpin));
     }
 
+    // Re-enter the scene at the release pose: pose first (so the actor arrives
+    // where the hand let go, not at its stale pre-carry spot), then the add, then
+    // the velocities and wake -- the inverse of RemoveBodyFromScene.
     PxRigidDynamic* body = item.rigid.actor();
-    body->setActorFlag(PxActorFlag::eDISABLE_SIMULATION, false);
     body->setGlobalPose(ToPxTransform(pose_world));
+    physics_->Scene().addActor(*body);
+    item.in_simulation = true;
     body->setLinearVelocity(PxVec3(linear.x, linear.y, linear.z));
     body->setAngularVelocity(PxVec3(spin.x, spin.y, spin.z));
     body->wakeUp();
@@ -644,8 +746,7 @@ void Props::TriggerAbility(int item, FXMMATRIX camera_to_world) {
                         /*toss=*/false);
             gripped_ = -1;
         } else if (grip_target_ >= 0) {
-            items_[grip_target_].rigid.actor()->setActorFlag(PxActorFlag::eDISABLE_SIMULATION,
-                                                             true);
+            RemoveBodyFromScene(grip_target_);
             gripped_ = grip_target_;
             grip_target_ = -1;
         }
@@ -659,8 +760,9 @@ void Props::TriggerAbility(int item, FXMMATRIX camera_to_world) {
         }
         break;
     case Ability::SprayFluid:
-        // The lighter fluid. The button and prompt are wired, but a squirt has no effect
-        // yet -- what it does (priming/lighting the fire pit) is a later step.
+        // The lighter fluid sprays continuously while the button is held, which the
+        // held-spray block in Update drives (see kSprayPerSecond) -- an edge fire here
+        // would spit a single droplet, so the press itself does nothing extra.
         break;
     }
 }
@@ -689,7 +791,7 @@ void Props::Load(int meat, int tray) {
     XMStoreFloat4x4(&item.stuck_local,
                     XMMatrixTranslation(surface.x + sx, surface.y, surface.z + sz));
 
-    // Its body was disabled on pick-up and stays out of the simulation -- loaded food
+    // Its body left the scene on pick-up and stays out of the simulation -- loaded food
     // neither falls nor is knocked; it follows the tray's pose from here (see Update).
     carried_ = -1;
 }
@@ -726,12 +828,18 @@ void Props::PlaceInFirePit(int log, XMFLOAT3 pit_center) {
                           XMMatrixTranslation(pit_center.x + dx, pit_center.y + dy, pit_center.z + dz);
     XMStoreFloat4x4(&item.resting, pose);
 
-    // Its body was disabled on pick-up and stays out of the simulation -- a placed log
+    // Its body left the scene on pick-up and stays out of the simulation -- a placed log
     // neither falls nor is knocked, and is out of the pick sweep too (like carried and
     // served bodies). in_fire_pit fixes `resting` here (RebuildTransform skips it), so the
     // log simply draws at this pose from now on. Mark it placed and empty the hand.
     item.in_fire_pit = true;
     carried_ = -1;
+
+    // A log stacked onto an already-burning pit catches as it lands, so building the
+    // fire up after lighting it works in either order.
+    if (pit_lit_ && item.heat) {
+        item.heat->SetOn(true);
+    }
 }
 
 void Props::TurnIn(int tray, Objectives& objectives) {
