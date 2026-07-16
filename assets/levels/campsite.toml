@@ -1,0 +1,75 @@
+# The campsite: an individual site in a wooded campground -- a dirt clearing ringed
+# by trees, with the picnic table and serving tray. A fire pit for cooking drops into
+# the marked spot once its model lands (with the heat, goals and turn_in that go with
+# it); until then this is a sandbox with nothing to win.
+#
+# See assets/levels/backyard.toml for the full field reference (spawn/facing/sun, the
+# [environment] table, and the box/prop/carryable/goal/turn_in arrays).
+
+name = "Campsite"
+spawn = [0.0, 0.0, -6.0]
+facing = 0.0
+
+# Mid-afternoon: time_of_day paints the sky and lighting at once. At 15:00 the generated
+# sun still sits well up in the west, so the clearing reads bright and easy to see --
+# warm, but short of a deep sunset. (No explicit `sun` override needed at this hour.)
+time_of_day = 15.0
+
+# Light cloud over the afternoon sky, to break up the sun a little. `cloud_coverage` is a
+# *clear* threshold (higher = LESS cloud), so 0.5 keeps a thin, broken deck. Written as an
+# INLINE table on one line on purpose: a `[environment]` header would pull every key below
+# it (grass, box, prop, carryable) into the table, so the level must use the inline form
+# to keep those at the top level.
+environment = { cloud_coverage = 0.5 }
+
+# The clearing floor: a patch of GPU-grown grass over the dirt (top at y = 0), a little
+# sparser and more olive than the manicured backyard lawn.
+grass = {center = [0.0, 0.0, 1.0], size = [18.0, 18.0], color = [0.24, 0.34, 0.14], blade_height = 0.13, blade_width = 0.05, wind = [0.14, 0.06]}
+
+box = [
+  # Forest floor, then the packed-dirt campsite pad the table and fire pit sit on. The
+  # checker just gives the flat ground a texture to move against.
+  {center = [0.0, -0.15, 0.0], size = [80.0, 0.3, 80.0], color = [0.20, 0.26, 0.13], checker = 2.0},
+  {center = [0.0, 0.02, 2.5], size = [10.0, 0.04, 9.0], color = [0.34, 0.28, 0.21], checker = 1.0},
+]
+
+prop = [
+  # The picnic table (the pass): carry the loaded tray here and press E to turn it in
+  # once the fire pit and turn_in are in.
+  {type = "bench", pos = [0.0, 0.0, 2.0]},
+  {type = "cooler", pos = [-3.2, 0.0, 3.4], yaw = 15.0},
+
+  # A stack of crates as camp gear off to the side.
+  {type = "crate", pos = [4.0, 0.0, 3.0]},
+  {type = "crate", pos = [4.0, 0.8, 3.0], yaw = 18.0, scale = 0.875},
+
+  # The campfire pit, off to the right in the clearing so the table does not hide it.
+  # Scenery only for now -- not the cook's heat source (that comes later, from elsewhere).
+  {type = "firepit", pos = [2.2, 0.0, 5.2]},
+
+  # The trees ring the site to make a wooded clearing, told apart by scale and turn. A
+  # gap to the south (toward the spawn) reads as the way in from the campground road.
+  {type = "tree", pos = [-10.0, 0.0, 8.0], yaw = 25.0},
+  {type = "tree", pos = [-11.5, 0.0, 0.5], yaw = -40.0, scale = 1.15},
+  {type = "tree", pos = [-8.5, 0.0, -7.0], yaw = 60.0, scale = 0.9},
+  {type = "tree", pos = [0.5, 0.0, 12.0], yaw = -15.0, scale = 1.2},
+  {type = "tree", pos = [7.5, 0.0, 10.0], yaw = 110.0, scale = 0.95},
+  {type = "tree", pos = [11.5, 0.0, 2.5], yaw = -70.0, scale = 1.1},
+  {type = "tree", pos = [10.0, 0.0, -6.5], yaw = 200.0, scale = 0.87},
+  {type = "tree", pos = [-12.5, 0.0, -9.5], yaw = 140.0, scale = 1.05},
+  {type = "tree", pos = [13.0, 0.0, -11.0], yaw = -25.0, scale = 1.0},
+]
+
+carryable = [
+  # The tongs lie on the dirt pad beside where the fire pit will sit.
+  {type = "tongs", pos = [1.15, 0.05, 4.45], yaw = 25.0},
+
+  # The serving tray starts on the picnic table (a hair above the ~0.755 bench top so
+  # physics settles it flat), the four raw meats in a 2x2 on it. Lift the tray and they
+  # slide off. All in view from the spawn.
+  {type = "tray", pos = [0.0, 0.80, 2.0]},
+  {type = "steak", pos = [0.15, 0.87, 2.23], yaw = 18.0},
+  {type = "chicken", pos = [-0.15, 0.87, 1.87], yaw = -8.0},
+  {type = "patty", pos = [0.15, 0.87, 1.87]},
+  {type = "patty", pos = [-0.15, 0.87, 2.23], yaw = -24.0},
+]

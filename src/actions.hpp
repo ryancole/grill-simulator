@@ -34,6 +34,7 @@ enum class Action {
     // gameplay actions so no raw key code is left hardcoded in the game loop.
     ReloadLevel,
     SelectLevel1,
+    SelectLevel2,
     ToggleDebug,
     // Menu navigation, read only while the launch/pause menu is up. They share
     // keys with movement (Up/W, Down/S, Enter/Space) with no conflict, since the

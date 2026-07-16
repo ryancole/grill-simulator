@@ -162,3 +162,8 @@ model = "crate.glb"
 
 [prop.tree]
 model = "tree.glb"
+
+# The campfire pit: scenery for now -- a plain static prop, no `dynamic` and no `heat`.
+# (It is not the cook's heat source; that will come from elsewhere.)
+[prop.firepit]
+model = "firepit.glb"

@@ -234,9 +234,9 @@ int Run(HINSTANCE instance, int show_command) {
     // The levels the player can load, as the .toml files staged under assets/levels, in
     // the order the number keys select them. Loading is by file so a level is a text
     // edit, not a rebuild. An array of one for now; add a file and a name to grow it.
-    const std::array<const char*, 1> level_files = {"backyard.toml"};
+    const std::array<const char*, 2> level_files = {"backyard.toml", "campsite.toml"};
     // The names the menu shows for each level, parallel to level_files.
-    const std::array<const char*, 1> level_names = {"Backyard"};
+    const std::array<const char*, 2> level_names = {"Backyard", "Campsite"};
     const std::filesystem::path levels_dir = ExecutableDirectory() / "assets" / "levels";
     int current_level = 0;
     // Whether the bottom-left debug overlay is drawn. Toggled by the ToggleDebug action
@@ -616,11 +616,13 @@ int Run(HINSTANCE instance, int show_command) {
         }
 
         // The level controls are edge-triggered so a held key fires once: 1 selects the
-        // backyard, R reloads whatever is current (restoring a level knocked about in
-        // play). Read every frame so each stays current, then act on at most one. Swapping
+        // backyard, 2 the campsite, R reloads whatever is current (restoring a level
+        // knocked about in play). Read every frame so each stays current, then act on at
+        // most one. Swapping
         // here, before anything reads the world this frame, means the step and draw below
         // run entirely on the freshly loaded level.
         const bool pick_backyard = game.actions.WasPressed(Action::SelectLevel1);
+        const bool pick_campsite = game.actions.WasPressed(Action::SelectLevel2);
         const bool reload = game.actions.WasPressed(Action::ReloadLevel);
         // Backtick flips the debug overlay on the rising edge, so a single tap toggles.
         if (game.actions.WasPressed(Action::ToggleDebug)) {
@@ -628,6 +630,8 @@ int Run(HINSTANCE instance, int show_command) {
         }
         if (pick_backyard) {
             load_level(0);
+        } else if (pick_campsite) {
+            load_level(1);
         } else if (reload) {
             load_level(current_level);
         }

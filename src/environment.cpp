@@ -21,7 +21,10 @@ XMFLOAT2 Lerp2(const XMFLOAT2& a, const XMFLOAT2& b, float t) {
 // reads sensibly under a straight linear blend, so the whole struct interpolates --
 // the fields a keyframe leaves at the default simply blend default-to-default.
 Environment LerpEnvironment(const Environment& a, const Environment& b, float t) {
-    Environment e;
+    // Start from the default so any field not blended below (the volumetric cloud
+    // slab -- cloud_bottom/top/density/detail -- which every keyframe leaves at its
+    // default) keeps a sane value rather than reading uninitialised garbage.
+    Environment e = kDefaultEnvironment;
     e.sky.zenith = Lerp3(a.sky.zenith, b.sky.zenith, t);
     e.sky.cloud_scale = Lerp(a.sky.cloud_scale, b.sky.cloud_scale, t);
     e.sky.horizon = Lerp3(a.sky.horizon, b.sky.horizon, t);
