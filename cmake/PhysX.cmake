@@ -26,6 +26,27 @@ find_package(unofficial-omniverse-physx-sdk CONFIG REQUIRED)
 add_library(PhysX::PhysX INTERFACE IMPORTED GLOBAL)
 target_link_libraries(PhysX::PhysX INTERFACE unofficial::omniverse-physx-sdk::sdk)
 
+# The GPU pipeline is late-bound: nothing links these two libraries. PhysX's
+# static core LoadLibrary()s PhysXGpu_64.dll when PxCreateCudaContextManager is
+# called (and that pulls in PhysXDevice64.dll), so the pair just has to sit next
+# to the executable. The port ships only a release build of them; its package
+# config points both configurations at that one file, which is intended -- the
+# boundary between app and GPU library is a C interface, not a CRT handoff.
+function(physx_stage_gpu_runtime target)
+  if(NOT TARGET unofficial::omniverse-physx-sdk::gpu-library
+     OR NOT TARGET unofficial::omniverse-physx-sdk::gpu-device-library)
+    message(WARNING "PhysX GPU library targets missing; GPU physics will be unavailable")
+    return()
+  endif()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:unofficial::omniverse-physx-sdk::gpu-library>
+            $<TARGET_FILE:unofficial::omniverse-physx-sdk::gpu-device-library>
+            $<TARGET_FILE_DIR:${target}>
+    COMMENT "Staging PhysX GPU runtime (PhysXGpu_64.dll, PhysXDevice64.dll)"
+    VERBATIM)
+endfunction()
+
 # Tell the PhysX headers we link the SDK statically. This is NOT optional and the
 # port does NOT set it: the generated PxConfig.h defines PX_PHYSX_STATIC_LIB, but
 # nothing in the SDK's own headers includes PxConfig.h, and the vcpkg package

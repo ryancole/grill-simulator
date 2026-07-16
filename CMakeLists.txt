@@ -83,6 +83,7 @@ target_compile_options(grill PRIVATE
 
 agility_sdk_stage_runtime(grill)
 fmod_stage_runtime(grill)
+physx_stage_gpu_runtime(grill)
 
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT scene.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT scene.ps.cso)

@@ -145,6 +145,18 @@ Physics::Physics() {
     // character-controller module both live in the extensions library.
     PxInitExtensions(*physics_, nullptr);
 
+    // The CUDA context behind every GPU feature: rigid dynamics now, the PBD
+    // fluid later. Creation LoadLibrary()s PhysXGpu_64.dll from next to the exe
+    // and binds the display driver; on a machine where any of that is missing it
+    // fails, cuda_ stays null, and the scene below runs the CPU pipeline instead
+    // -- rigid bodies behave the same, only the fluid needs the GPU.
+    PxCudaContextManagerDesc cuda_desc;
+    cuda_ = PxCreateCudaContextManager(*foundation_, cuda_desc, PxGetProfilerCallback());
+    if (cuda_ != nullptr && !cuda_->contextIsValid()) {
+        cuda_->release();
+        cuda_ = nullptr;
+    }
+
     dispatcher_ = PxDefaultCpuDispatcherCreate(kWorkerThreads);
 
     // The reporter is set on the scene below and appends to impacts_ as meat lands.
@@ -158,6 +170,14 @@ Physics::Physics() {
     // turns them into meat splats; the stock shader would report no contacts.
     desc.filterShader = ContactReportFilterShader;
     desc.simulationEventCallback = contact_reporter_;
+    // With a CUDA context up, the solver and broadphase move to the GPU -- the
+    // prerequisite for the PBD fluid. The CPU dispatcher above still runs the
+    // scene's remaining CPU-side tasks.
+    if (cuda_ != nullptr) {
+        desc.cudaContextManager = cuda_;
+        desc.flags |= PxSceneFlag::eENABLE_GPU_DYNAMICS;
+        desc.broadPhaseType = PxBroadPhaseType::eGPU;
+    }
     scene_ = physics_->createScene(desc);
 
     material_ = physics_->createMaterial(kStaticFriction, kDynamicFriction, kRestitution);
@@ -179,6 +199,11 @@ Physics::~Physics() {
     }
     if (dispatcher_) {
         dispatcher_->release();
+    }
+    // After the scene (which holds tasks on it), before the foundation it was
+    // created from.
+    if (cuda_) {
+        cuda_->release();
     }
     if (physics_) {
         PxCloseExtensions();
