@@ -1,11 +1,10 @@
-# Every generated artifact lives under build/, including clangd's index
-# (build/.cache) and the fetched Agility SDK and DXC packages (build/_deps).
-# Deleting this one directory is a complete reset.
+# Every generated artifact lives under build/, including the fetched Agility
+# SDK and DXC packages (build/_deps). Deleting this one directory is a
+# complete reset.
 build/
 
-# Only reachable if a tool is run outside the presets: clangd falls back to
-# writing its index next to the source root when it cannot resolve the
-# compilation database under build/.
+# Only reachable if a tool is run outside the presets: language-server caches
+# and stray compilation databases written next to the source root.
 .cache/
 out/
 compile_commands.json

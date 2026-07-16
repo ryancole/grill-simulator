@@ -3,16 +3,16 @@
   "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
   "configurePresets": [
     {
-      "name": "windows-clang",
-      "displayName": "Windows x64 (clang-cl + Ninja)",
-      "description": "clang-cl and lld-link against the MSVC STL and Windows SDK. Debug and Release are both configured; pick one at build time.",
+      "name": "windows-msvc",
+      "displayName": "Windows x64 (MSVC cl.exe + Ninja)",
+      "description": "cl.exe and link.exe against the MSVC STL and Windows SDK, roots resolved by the toolchain file (no vcvars shell). Debug and Release are both configured; pick one at build time.",
       "generator": "Ninja Multi-Config",
       "binaryDir": "${sourceDir}/build",
       "toolchainFile": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
         "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/clang-cl-x64.cmake",
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/msvc-x64.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-windows-static-md"
       }
     }
@@ -21,13 +21,13 @@
     {
       "name": "debug",
       "displayName": "Debug",
-      "configurePreset": "windows-clang",
+      "configurePreset": "windows-msvc",
       "configuration": "Debug"
     },
     {
       "name": "release",
       "displayName": "Release",
-      "configurePreset": "windows-clang",
+      "configurePreset": "windows-msvc",
       "configuration": "Release"
     }
   ]

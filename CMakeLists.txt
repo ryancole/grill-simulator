@@ -12,7 +12,7 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-# No C++ modules in this project; skipping the scan removes a per-file clang-scan-deps pass.
+# No C++ modules in this project; skipping the scan removes a per-file dependency-scan pass.
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
@@ -76,8 +76,8 @@ target_compile_options(grill PRIVATE
   /W4
   /permissive-
   /utf-8
-  # DirectX headers declare plenty of unused interface parameters.
-  -Wno-unused-parameter
+  # DirectX headers declare plenty of unused interface parameters (C4100).
+  /wd4100
   $<$<CONFIG:Debug>:/Od>
   $<$<CONFIG:Release>:/O2>)
 
