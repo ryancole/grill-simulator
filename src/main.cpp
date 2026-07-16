@@ -652,6 +652,12 @@ int Run(HINSTANCE instance, int show_command) {
         for (const Impact& impact : game.physics.Impacts()) {
             game.audio.PlayImpact(impact.position, impact.strength, impact.sound);
         }
+        // The furniture's one player interaction: standing a toppled grill back up. Read
+        // before the furniture and props updates so a right this frame is reflected in both
+        // this frame's poses and cook. The hands are free only when nothing is carried, in
+        // which case E rights the aimed-at grill rather than dropping a held item.
+        game.world->furniture().Interact(camera_to_world, game.actions,
+                                         !game.world->props().Carrying());
         // Read the dynamic furniture's body poses back into their draw instances, and
         // place its heat sources at wherever those bodies now sit -- before the props
         // update, so the meats cook against this frame's grate position.
@@ -733,10 +739,24 @@ int Run(HINSTANCE instance, int show_command) {
                                                     meat.served});
         }
 
-        game.renderer.Render(game.world->scene(), props.WorldInstances(),
-                             props.HighlightInstances(),
+        // Merge the props' HUD affordances with the furniture's grill-righting one. Only
+        // one is ever live at a time -- looking at a prop and at the grill are mutually
+        // exclusive aims, and righting is offered only with empty hands -- so the props'
+        // prompt and outline take precedence and the furniture's fill in when they are
+        // empty. Combined here rather than in either owner, which each know only their own.
+        Furniture& furniture = game.world->furniture();
+        std::string prompt = props.PromptText();
+        if (prompt.empty()) {
+            prompt = furniture.PromptText();
+        }
+        std::vector<MeshInstance> highlights(props.HighlightInstances().begin(),
+                                             props.HighlightInstances().end());
+        const std::span<const MeshInstance> grill_highlight = furniture.HighlightInstances();
+        highlights.insert(highlights.end(), grill_highlight.begin(), grill_highlight.end());
+
+        game.renderer.Render(game.world->scene(), props.WorldInstances(), highlights,
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
-                             view_projection, game.camera.Position(), props.PromptText(),
+                             view_projection, game.camera.Position(), prompt,
                              debug_lines, order_cards, meat_cards);
     }
 

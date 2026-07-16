@@ -73,6 +73,11 @@ public:
     // or empty when E would do nothing. Recomputed each Update.
     std::string PromptText() const;
 
+    // Whether a carryable is in hand right now. The furniture's grill-righting reads this
+    // to know the hands are busy -- while carrying, Interact is the held item's drop, so
+    // no righting is offered. Reflects the state at the last Update.
+    bool Carrying() const { return carried_ >= 0; }
+
     // Whether the loaded tray has been turned in at the level's delivery zone -- the one
     // discrete event that ends the level. Set once, when the player presses Interact while
     // carrying the tray inside the turn-in zone (Update hands the stuck meats to the
