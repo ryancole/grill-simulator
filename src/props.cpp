@@ -141,7 +141,7 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
         // so the item can swap look as it cooks.
         Add(spawn.models, pool[spawn.models.front().model], spawn.name, spawn.pos, spawn.yaw,
             HoldFor(spawn.hold), spawn.knock_rating, spawn.impact_sound, spawn.cook, spawn.serve,
-            spawn.ability);
+            spawn.ability, spawn.heat, spawn.heat_offset);
     }
 }
 
@@ -220,7 +220,8 @@ std::uint32_t Props::CurrentModel(const Item& item) {
 void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::string name,
                 XMFLOAT3 position, float yaw_degrees, FXMMATRIX held_local, float knock_rating,
                 ImpactSound impact_sound, std::optional<CookProfile> cook,
-                std::optional<ServeDef> serve, Ability ability) {
+                std::optional<ServeDef> serve, Ability ability, std::optional<HeatSource> heat,
+                XMFLOAT3 heat_offset) {
     Item item{};
     item.stages = std::move(stages);
     item.name = std::move(name);
@@ -230,6 +231,8 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
         item.cook.emplace(*cook);
     }
     item.serve = serve;
+    item.heat = heat;
+    item.heat_offset = heat_offset;
     DeriveBodyShape(item, base_model);
 
     // Seed the body so the model origin lands at `position`, yawed -- the same
@@ -388,12 +391,24 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     }
 
+    // Move each heat-radiating carryable's hot centre to where it sits this frame -- its
+    // current pose (held, or its resting/stacked pose) times the offset up into the log --
+    // so the warm zone rides the log as it is carried, set down or stacked in the pit. Like
+    // the furniture's grill, done before the cook loop so meats read this frame's positions.
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        if (items_[i].heat) {
+            const XMMATRIX pose = CurrentPose(i, camera_to_world);
+            items_[i].heat->SetOrigin(
+                XMVector3Transform(XMLoadFloat3(&items_[i].heat_offset), pose));
+        }
+    }
+
     // Advance the cook on every meat, carried or resting alike. Each cooks against
     // the surrounding air where it sits: room temperature by default, or the hottest
-    // temperature any heat source imposes there -- so a steak laid on the grill's
-    // grate finally crosses the cook threshold, while one carried away cools back to
-    // the yard. The sample point is the item's model origin, which sits on its
-    // underside -- exactly the face resting on the grate.
+    // temperature any heat source imposes there -- the yard's furniture heat (the grill's
+    // grate) or a lit log's -- so a steak laid on the grate or beside the fire finally
+    // crosses the cook threshold, while one carried away cools back to the yard. The sample
+    // point is the item's model origin, which sits on its underside -- the face on the grate.
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
         Item& item = items_[i];
         // Non-food never cooks; a served meat is frozen at the band it was delivered in,
@@ -408,6 +423,13 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         float ambient_f = CookInformation::kRoomTempF;
         for (const HeatSource& source : heat_sources) {
             ambient_f = std::max(ambient_f, source.TemperatureAt(point));
+        }
+        // A carryable's own heat (a lit log) warms nearby meats too. An off source returns
+        // room air, so an unlit stack costs a call but changes nothing.
+        for (const Item& other : items_) {
+            if (other.heat) {
+                ambient_f = std::max(ambient_f, other.heat->TemperatureAt(point));
+            }
         }
         item.cook->Update(ambient_f, dt);
     }

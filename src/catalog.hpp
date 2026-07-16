@@ -46,6 +46,9 @@ struct HeatDef {
     float temp_f = 400.0f;
     float reach = 1.0f;
     DirectX::XMFLOAT3 offset{0.0f, 0.0f, 0.0f};
+    // Whether the heat is emitting from the start. True (the default) for a grill that is
+    // lit as placed; false for a stack of logs that sits cold until it is lit in play.
+    bool starts_on = true;
 };
 
 // One model in a carryable's cook progression: the .glb to draw once the food's
@@ -72,6 +75,10 @@ struct CarryableDef {
     // Set only on a serving tray: the surface cooked meat is delivered onto. A food or
     // an ordinary tool leaves it empty and accepts no deliveries.
     std::optional<ServeDef> serve;
+    // The heat this carryable radiates, if any -- present on the firewood log (which may
+    // start off, unlit), empty on the tongs and the foods. Props gives an item with one
+    // a live HeatSource that rides its pose, so the log warms food set near it once lit.
+    std::optional<HeatDef> heat;
     float knock_rating = 4.0f;
     ImpactSound impact_sound = ImpactSound::Meat;
     HoldStyle hold = HoldStyle::Flat;

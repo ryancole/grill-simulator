@@ -181,3 +181,11 @@ model = "log.glb"
 knock = 5.0
 sound = "meat"
 ability = "stack_in_fire_pit"
+# The log radiates heat once lit, but starts cold: `heat_starts_on = false` means it emits
+# nothing until it is switched on (lighting the fire is a later step). `heat` is the air
+# temperature at its centre when lit, `heat_reach` how far that carries, `heat_offset` the
+# hot centre lifted to the middle of the round.
+heat = 500.0
+heat_reach = 1.6
+heat_offset = [0.0, 0.2, 0.0]
+heat_starts_on = false

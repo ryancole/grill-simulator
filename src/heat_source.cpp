@@ -5,6 +5,12 @@
 using namespace DirectX;
 
 float HeatSource::TemperatureAt(FXMVECTOR point) const {
+    // An off (unlit) source emits nothing: the air everywhere is just room air, so the
+    // cook sees no heat from it until it is switched on.
+    if (!on_) {
+        return CookInformation::kRoomTempF;
+    }
+
     const float distance =
         XMVectorGetX(XMVector3Length(XMVectorSubtract(point, XMLoadFloat3(&origin_))));
 

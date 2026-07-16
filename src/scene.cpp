@@ -54,7 +54,7 @@ Scene::Scene(const LevelDef& level) {
             std::optional<HeatSource> heat;
             XMFLOAT3 offset{0.0f, 0.0f, 0.0f};
             if (def.heat) {
-                heat.emplace(def.heat->temp_f, def.heat->reach);
+                heat.emplace(def.heat->temp_f, def.heat->reach, def.heat->starts_on);
                 offset = def.heat->offset;
             }
             AddDynamicInstance(model, transform, kWhite, def.mass, def.knock_rating,
@@ -89,6 +89,12 @@ Scene::Scene(const LevelDef& level) {
         spawn.impact_sound = def.impact_sound;
         spawn.cook = def.cook;
         spawn.serve = def.serve;
+        // The heat a carryable radiates (the log), built with its start on/off state; its
+        // origin rides the item's pose in Props. Empty leaves the carryable cold.
+        if (def.heat) {
+            spawn.heat.emplace(def.heat->temp_f, def.heat->reach, def.heat->starts_on);
+            spawn.heat_offset = def.heat->offset;
+        }
         carryables_.push_back(std::move(spawn));
     }
 }

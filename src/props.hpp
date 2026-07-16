@@ -154,6 +154,13 @@ private:
         // meat on it. Empty on foods and the tongs.
         std::optional<ServeDef> serve;
 
+        // Set only on a heat-radiating carryable (the firewood log): the heat it gives
+        // off, which may be off (unlit) to start. Its origin is refreshed each frame from
+        // this item's pose plus `heat_offset` (the hot centre in model space), so the warm
+        // zone rides the log wherever it is carried, set down or stacked in the pit.
+        std::optional<HeatSource> heat;
+        DirectX::XMFLOAT3 heat_offset{0.0f, 0.0f, 0.0f};
+
         // Set once a meat has been delivered onto a tray. A served meat is done with
         // play: its cook is frozen at the band it was served in and its body stays out
         // of the simulation. It is not a static display -- it is stuck to the tray it
@@ -180,7 +187,8 @@ private:
     void Add(std::vector<CookStage> stages, const Model& base_model, std::string name,
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
              float knock_rating, ImpactSound impact_sound, std::optional<CookProfile> cook,
-             std::optional<ServeDef> serve, Ability ability);
+             std::optional<ServeDef> serve, Ability ability, std::optional<HeatSource> heat,
+             DirectX::XMFLOAT3 heat_offset);
     // Fills an item's box shape (half_extents, com_offset) from the union of its
     // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);

@@ -103,6 +103,22 @@ Ability AbilityOr(const toml::node_view<const toml::node>& view, Ability fallbac
     Fail(path, "unknown ability '" + *name + "' (want none, grip_meat or stack_in_fire_pit)");
 }
 
+// The optional heat a type radiates, read from its `heat` (centre temperature) and the
+// `heat_reach`/`heat_offset`/`heat_starts_on` beside it. Absent `heat` leaves the type
+// cold. Shared by props (the grill) and carryables (the log), which spell heat the same.
+std::optional<HeatDef> ReadHeat(const toml::table& entry, const std::filesystem::path& path) {
+    const toml::node_view<const toml::node> heat = entry["heat"];
+    if (!heat) {
+        return std::nullopt;
+    }
+    HeatDef h;
+    h.temp_f = static_cast<float>(AsDouble(*heat.node(), path, "heat"));
+    h.reach = NumberOr(entry["heat_reach"], h.reach, path, "heat_reach");
+    h.offset = Vec3Or(entry["heat_offset"], h.offset, path, "heat_offset");
+    h.starts_on = entry["heat_starts_on"].value_or(h.starts_on);
+    return h;
+}
+
 // The model name a type must name, or a catalog error.
 std::string ModelOf(const toml::table& entry, const std::string& name,
                     const std::filesystem::path& path) {
@@ -228,6 +244,8 @@ void ReadCarryables(const toml::table& root, const char* section, bool is_food,
         def.impact_sound = SoundOr((*entry)["sound"], def.impact_sound, path);
         def.hold = HoldOr((*entry)["hold"], def.hold, path);
         def.ability = AbilityOr((*entry)["ability"], def.ability, path);
+        // A carryable may radiate heat too (the firewood log). Same spelling as a prop's.
+        def.heat = ReadHeat(*entry, path);
         out.emplace(name, std::move(def));
     }
 }
@@ -270,13 +288,7 @@ Catalog Load(const std::filesystem::path& path) {
             def.mass = NumberOr((*entry)["mass"], def.mass, path, "mass");
             def.knock_rating = NumberOr((*entry)["knock"], def.knock_rating, path, "knock");
             def.impact_sound = SoundOr((*entry)["sound"], def.impact_sound, path);
-            if (const toml::node_view<const toml::node> heat = (*entry)["heat"]) {
-                HeatDef h;
-                h.temp_f = static_cast<float>(AsDouble(*heat.node(), path, "heat"));
-                h.reach = NumberOr((*entry)["heat_reach"], h.reach, path, "heat_reach");
-                h.offset = Vec3Or((*entry)["heat_offset"], h.offset, path, "heat_offset");
-                def.heat = h;
-            }
+            def.heat = ReadHeat(*entry, path);
             out.props.emplace(name, std::move(def));
         }
     }
