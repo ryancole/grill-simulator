@@ -164,6 +164,11 @@ LevelDef LoadFromFile(const std::filesystem::path& path) {
         env.bloom_threshold =
             NumberOr((*e)["bloom_threshold"], env.bloom_threshold, path, "bloom_threshold");
         env.bloom_knee = NumberOr((*e)["bloom_knee"], env.bloom_knee, path, "bloom_knee");
+        env.cloud_bottom = NumberOr((*e)["cloud_bottom"], env.cloud_bottom, path, "cloud_bottom");
+        env.cloud_top = NumberOr((*e)["cloud_top"], env.cloud_top, path, "cloud_top");
+        env.cloud_density =
+            NumberOr((*e)["cloud_density"], env.cloud_density, path, "cloud_density");
+        env.cloud_detail = NumberOr((*e)["cloud_detail"], env.cloud_detail, path, "cloud_detail");
     }
 
     if (const toml::array* boxes = root["box"].as_array()) {

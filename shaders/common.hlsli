@@ -7,17 +7,18 @@
 
 // The atmosphere the sky is drawn from, handed in rather than baked in: what was
 // once a wall of `static const` here is now a struct a caller fills, so a level
-// can carry its own sky. SampleSky and CloudCoverage take one, and every pass that
-// draws or reflects the sky embeds one in its constant buffer (see FrameConstants
-// in scene.hlsl and SkyConstants in sky.hlsl) filled from the C++ Environment.
+// can carry its own sky. SampleSky takes one, and every pass that draws or reflects
+// the sky embeds one in its constant buffer (see FrameConstants in scene.hlsl and
+// SkyConstants in sky.hlsl) filled from the C++ Environment.
 //
 // The gradient is a deeper blue overhead (zenith) fading to a pale band at the
-// horizon, over a dull bounce below (ground). The clouds ride on top: cloud_scale
-// sets how large the puffs are, cloud_wind how far the layer scrolls per second,
-// the coverage band (cloud_coverage/cloud_softness) turns the noise into
-// cloud-or-sky, and cloud_opacity how solid a fully covered patch gets. All
-// colours are display-space (sRGB), linearised where used, so the cloud tops read
-// as bright white against the blue.
+// horizon, over a dull bounce below (ground). The clouds are no longer drawn here --
+// the sky is just the gradient now, and the volumetric cloud pass (shaders/clouds.hlsl)
+// raymarches the clouds over it on screen. The cloud_* fields still describe that
+// layer and are consumed there: cloud_scale sizes the puffs, cloud_wind scrolls them,
+// cloud_coverage/cloud_softness set the coverage band, cloud_color their lit tone.
+// cloud_opacity is no longer read by anything, kept only so the row stays packed. All
+// colours are display-space (sRGB), linearised where used.
 //
 // Laid out to pack into cbuffer float4 rows with no straddle -- each float3 is
 // followed by a scalar, and the whole is a 16-byte multiple -- so the C++ mirror
@@ -78,36 +79,21 @@ float SkyFbm(float2 p) {
     return value;
 }
 
-// How much cloud covers a world-space view direction at time `time`, in [0,1].
-// The dome is flattened onto a plane by dividing xz by height, the noise is
-// scrolled by the wind, and the coverage band turns it into cloud-or-sky. Clouds
-// fade out toward the horizon, where the flattening would smear them into streaks.
-float CloudCoverage(float3 dir, float time, SkyEnvironment sky) {
-    if (dir.y <= 0.0f) {
-        return 0.0f;
-    }
-    const float2 plane = dir.xz / max(dir.y, 0.15f);
-    const float2 uv = plane * sky.cloud_scale + sky.cloud_wind * time;
-    const float n = SkyFbm(uv);
-    const float cover = smoothstep(sky.cloud_coverage, sky.cloud_coverage + sky.cloud_softness, n);
-    return cover * smoothstep(0.0f, 0.35f, dir.y) * sky.cloud_opacity;
-}
-
-// The radiance of the analytic sky along a world-space direction, in linear light,
-// with the drifting cloud layer laid over it. A horizon band brightens toward it
-// and darkens into the ground below. This is the sky only -- the sun is left out,
-// because the scene's direct term already accounts for it and its GGX lobe already
-// broadens with roughness, so adding a sun disc here would count it twice.
-float3 SampleSky(float3 dir, float time, SkyEnvironment sky) {
+// The radiance of the analytic sky along a world-space direction, in linear light: a
+// plain gradient, a horizon band brightening toward it and darkening into the ground
+// below. The clouds are drawn separately now, by the volumetric pass over the frame,
+// so nothing cloud-like is laid on here -- which is what keeps the sky the reflections
+// and the fog sample cheap. The sun is left out too, because the scene's direct term
+// already accounts for it and its GGX lobe already broadens with roughness, so adding
+// a sun disc here would count it twice.
+float3 SampleSky(float3 dir, SkyEnvironment sky) {
     const float3 zenith = SrgbToLinear(sky.zenith);
     const float3 horizon = SrgbToLinear(sky.horizon);
     const float3 ground = SrgbToLinear(sky.ground);
     // Above the horizon fade horizon->zenith; below, fall off to the ground colour
     // over a short span so the reflection has a floor rather than a hard seam.
     const float3 gradient = lerp(horizon, zenith, saturate(dir.y));
-    const float3 base = lerp(gradient, ground, saturate(-dir.y * 4.0f));
-    // The clouds ride on top, brightening the sky toward their sunlit white.
-    return lerp(base, SrgbToLinear(sky.cloud_color), CloudCoverage(dir, time, sky));
+    return lerp(gradient, ground, saturate(-dir.y * 4.0f));
 }
 
 #endif // GRILL_COMMON_HLSLI

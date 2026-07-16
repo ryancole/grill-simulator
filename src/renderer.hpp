@@ -266,6 +266,11 @@ private:
     // before the resolve. Its own root signature (the camera and light matrices, the
     // sun, and the depth + shadow SRVs) and an additively blended PSO.
     void CreateLightShaftPipeline();
+    // The volumetric cloud pass: a fullscreen pixel shader that marches a density slab
+    // overhead, lit by a short march toward the sun, and composites it over the sky
+    // where the scene depth is the far plane. Its own root signature (the camera and
+    // sky, and the scene depth SRV) and a premultiplied-over blended PSO.
+    void CreateCloudPipeline();
     // The bloom pyramid's textures: kBloomLevels HDR targets, each half the size of
     // the one above, with their RTVs and SRVs. Recreated on resize like the HDR
     // buffer, since the sizes follow the window.
@@ -522,6 +527,8 @@ private:
     // the scene depth and shadow map from engine_heap_ slots 1 and 2.
     ComPtr<ID3D12RootSignature> light_shaft_root_signature_;
     ComPtr<ID3D12PipelineState> light_shaft_pipeline_state_;
+    ComPtr<ID3D12RootSignature> cloud_root_signature_;
+    ComPtr<ID3D12PipelineState> cloud_pipeline_state_;
 
     // The bloom pyramid: its mip textures, one root signature and the downsample /
     // upsample PSOs. Level 0's SRV is what the resolve reads to add the glow.

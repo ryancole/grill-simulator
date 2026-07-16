@@ -180,6 +180,34 @@ constexpr UINT kLightShaftConstantDwords = sizeof(LightShaftConstants) / sizeof(
 static_assert(kLightShaftConstantDwords + 1 <= 64,
               "A root signature holds at most 64 DWORDs in total");
 
+// Mirrors the CloudConstants cbuffer in shaders/clouds.hlsl: the inverse view-
+// projection that rebuilds each pixel's view ray, the eye and the clock, the sun and
+// the light it scatters, the flat sky fill, and the slab's altitudes/density/detail.
+// The shared SkyEnvironment tails it, carrying the coverage/scale/wind the horizontal
+// shape reuses from the 2D layer. Each float3 opens a fresh cbuffer row and is
+// followed by the scalar that shares it, matching the HLSL with no straddle.
+struct CloudConstants {
+    XMFLOAT4X4 inv_view_projection;
+    XMFLOAT3 camera_position;
+    float time;
+    XMFLOAT3 sun_direction;
+    float cloud_bottom;
+    XMFLOAT3 sun_color;
+    float cloud_top;
+    XMFLOAT3 sky_ambient;
+    float cloud_density;
+    float sun_intensity;
+    float ambient_strength;
+    float cloud_detail;
+    float pad;
+    SkyEnvironment sky;
+};
+
+static_assert(sizeof(CloudConstants) % sizeof(UINT) == 0);
+constexpr UINT kCloudConstantDwords = sizeof(CloudConstants) / sizeof(UINT);
+static_assert(kCloudConstantDwords + 1 <= 64,
+              "A root signature holds at most 64 DWORDs in total");
+
 // Mirrors the GrassConstants cbuffer in shaders/grass.hlsl: the field's placement
 // and per-blade parameters the mesh shader grows the grass from, plus the view-
 // projection and the eye. Each float3 opens a fresh cbuffer row and is followed by
@@ -254,6 +282,18 @@ void ApplyEnvironment(LightShaftConstants& shaft, const Environment& env) {
     shaft.shaft_color = env.shaft_color;
     shaft.shaft_intensity = env.shaft_intensity;
     shaft.shaft_g = env.shaft_g;
+}
+
+void ApplyEnvironment(CloudConstants& cloud, const Environment& env) {
+    cloud.sky = env.sky;
+    cloud.sun_color = env.sun_color;
+    cloud.sun_intensity = env.sun_intensity;
+    cloud.sky_ambient = env.sky_ambient;
+    cloud.ambient_strength = env.ambient_strength;
+    cloud.cloud_bottom = env.cloud_bottom;
+    cloud.cloud_top = env.cloud_top;
+    cloud.cloud_density = env.cloud_density;
+    cloud.cloud_detail = env.cloud_detail;
 }
 
 // Mirrors the BloomConstants cbuffer in shaders/bloom.hlsl: one texel of the source
@@ -524,6 +564,7 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     CreateTextPipeline();
     CreateTonemapPipeline();
     CreateLightShaftPipeline();
+    CreateCloudPipeline();
     CreateBloomPipeline();
     // The grass pass only exists where the device grows blades in a mesh shader; on
     // hardware without the tier the pipeline is never built and RenderGrass returns
@@ -1487,6 +1528,89 @@ void Renderer::CreateLightShaftPipeline() {
     ThrowIfFailed(
         device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&light_shaft_pipeline_state_)),
         "CreateGraphicsPipelineState(light shafts)");
+}
+
+void Renderer::CreateCloudPipeline() {
+    // b0: the camera, the sun and the sky, as root constants. t0: the scene depth, a
+    // one-entry table into the engine heap -- the clouds need no shadow map, only the
+    // depth that stops them behind the world. s0: a point clamp sampler, since the
+    // march reads the raw stored depth.
+    const CD3DX12_DESCRIPTOR_RANGE srv_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+    CD3DX12_ROOT_PARAMETER parameters[2];
+    parameters[0].InitAsConstants(kCloudConstantDwords, 0);
+    parameters[1].InitAsDescriptorTable(1, &srv_range, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_POINT,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                        D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    root_desc.Init(_countof(parameters), parameters, 1, &sampler,
+                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr =
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr)) {
+        std::string message = error
+                                  ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                                error->GetBufferSize())
+                                  : "unknown error";
+        throw std::runtime_error("D3D12SerializeRootSignature(clouds) failed: " + message);
+    }
+    ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                               signature->GetBufferSize(),
+                                               IID_PPV_ARGS(&cloud_root_signature_)),
+                  "CreateRootSignature(clouds)");
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "clouds.vs.cso");
+    const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "clouds.ps.cso");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.InputLayout = {nullptr, 0};
+    pso.pRootSignature = cloud_root_signature_.Get();
+    pso.VS = {vs.data(), vs.size()};
+    pso.PS = {ps.data(), ps.size()};
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+    // Premultiplied-over: the shader weights its colour by coverage and returns the
+    // covered fraction as alpha, so ONE / INV_SRC_ALPHA lays the clouds over the sky
+    // already in the HDR buffer without double-counting the coverage. A world pixel
+    // returns alpha 0 and is left untouched.
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    D3D12_RENDER_TARGET_BLEND_DESC& blend = pso.BlendState.RenderTarget[0];
+    blend.BlendEnable = TRUE;
+    blend.SrcBlend = D3D12_BLEND_ONE;
+    blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    // No depth target: the scene depth it needs is bound as a shader resource, and the
+    // pass writes colour over the whole frame with the blend above.
+    pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = kHdrFormat;
+    pso.SampleDesc.Count = 1;
+
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&cloud_pipeline_state_)),
+                  "CreateGraphicsPipelineState(clouds)");
 }
 
 void Renderer::CreateBloomPipeline() {
@@ -3535,6 +3659,51 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
         DrawInstances(highlight, view_projection, sun, 1.0f, true);
     }
 
+    // The volumetric clouds, composited over the sky *before* the arms are drawn --
+    // crucially while the depth buffer still holds the yard, so the world occludes
+    // them: a pixel on the tree or the fence reads a near depth and the pass leaves it
+    // alone. The arms pass below clears depth to draw the viewmodel on top of
+    // everything, so the clouds cannot ride alongside the shafts after it -- by then
+    // only the arms are in the depth buffer, and the clouds would spill over the
+    // treetops. Depth flips to a shader resource for the march, then back to a target
+    // for the arms.
+    TextureBarrier(command_list_.Get(), depth_stencil_.Get(), D3D12_BARRIER_SYNC_DEPTH_STENCIL,
+                   D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+                   D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                   D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, nullptr);
+    ID3D12DescriptorHeap* cloud_heaps[] = {engine_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(cloud_heaps), cloud_heaps);
+    command_list_->SetGraphicsRootSignature(cloud_root_signature_.Get());
+    command_list_->SetPipelineState(cloud_pipeline_state_.Get());
+    CloudConstants cloud{};
+    XMStoreFloat4x4(&cloud.inv_view_projection, XMMatrixInverse(nullptr, view_projection));
+    cloud.camera_position = camera_position;
+    cloud.time = seconds;
+    cloud.sun_direction = sun_direction_;
+    ApplyEnvironment(cloud, environment_);
+    command_list_->SetGraphicsRoot32BitConstants(0, kCloudConstantDwords, &cloud, 0);
+    const CD3DX12_GPU_DESCRIPTOR_HANDLE cloud_depth_srv(
+        engine_heap_->GetGPUDescriptorHandleForHeapStart(), static_cast<INT>(kDepthSrvIndex),
+        engine_heap_size_);
+    command_list_->SetGraphicsRootDescriptorTable(1, cloud_depth_srv);
+    command_list_->IASetVertexBuffers(0, 0, nullptr);
+    command_list_->DrawInstanced(3, 1, 0, 0);
+
+    // Depth back to a write target, and the scene pipeline the arms draw with. The
+    // cloud pass swapped the engine heap in for its depth SRV; rebind the texture heap
+    // the scene's draws sample, or the arms would read their materials from the wrong
+    // heap.
+    TextureBarrier(command_list_.Get(), depth_stencil_.Get(), D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                   D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+                   D3D12_BARRIER_SYNC_DEPTH_STENCIL, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+                   D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE);
+    command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, &dsv);
+    ID3D12DescriptorHeap* scene_heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(scene_heaps), scene_heaps);
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    command_list_->SetPipelineState(pipeline_state_.Get());
+
     // The arms live about half a metre from the eye, close enough that any wall
     // the player leans against would be drawn in front of them. Throwing the
     // depth buffer away first is the usual answer: it costs one clear, and the
@@ -3563,6 +3732,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // which the tonemap pass below also binds -- so it stays bound through both.
     ID3D12DescriptorHeap* engine_heaps[] = {engine_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(engine_heaps), engine_heaps);
+
     command_list_->SetGraphicsRootSignature(light_shaft_root_signature_.Get());
     command_list_->SetPipelineState(light_shaft_pipeline_state_.Get());
 
