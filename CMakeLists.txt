@@ -43,6 +43,7 @@ add_executable(grill WIN32
   src/collision.cpp
   src/cook_information.cpp
   src/environment.cpp
+  src/fluid.cpp
   src/heat_source.cpp
   src/image.cpp
   src/input.cpp

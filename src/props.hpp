@@ -16,6 +16,7 @@
 #include <vector>
 
 class Actions;
+class Fluid;
 class Objectives;
 class Physics;
 
@@ -34,6 +35,10 @@ public:
     // those live on the Models the scene loaded. `physics` is where the bodies
     // are created and stepped.
     Props(const Scene& scene, Physics& physics);
+    // Frees the bodies that were removed from the physics scene (carried, gripped,
+    // served, stacked) -- Physics::ClearLevel releases only what is still in the
+    // scene, and an out-of-scene actor is otherwise leaked.
+    ~Props();
 
     // Advances pick-up and drop for one frame and rebuilds the draw lists from the
     // current body poses. The simulation itself is stepped by Physics in the game
@@ -50,10 +55,12 @@ public:
     // cook frozen at that band. The judging happens later: `turn_in` is the level's
     // static delivery zone (null on a sandbox level), and pressing Interact while
     // carrying the loaded tray inside it hands every stuck meat to `objectives` at once
-    // and ends the level -- see TurnedIn.
+    // and ends the level -- see TurnedIn. `fluid` is the session's GPU fluid: the
+    // lighter-fluid can sprays into it while the primary action is held, and droplets
+    // pooling inside `fire_pit` prime the pit until the stacked logs light.
     void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt,
                 std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                const ServeZone* fire_pit, Objectives& objectives);
+                const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -110,9 +117,11 @@ private:
     // PickTarget and the highlight to share.
     //
     // `held_local` is the pose in eye space while carried, lifted into the world
-    // every frame by the camera's basis. A carried body is taken out of the
-    // simulation (eDISABLE_SIMULATION) so it neither falls nor shoves anything
-    // while it hangs in the hand.
+    // every frame by the camera's basis. A carried body is REMOVED from the physics
+    // scene so it neither falls nor shoves anything while it hangs in the hand, and
+    // re-added on release. Removal, not eDISABLE_SIMULATION: that flag is not
+    // supported by GPU dynamics -- it leaves a stale broadphase entry the GPU
+    // pipeline crashes on when something moves through it.
     struct Item {
         // The models this item draws as it cooks, resolved to loaded ids and each
         // tagged with the doneness band it begins at. A tool or single-model food has
@@ -177,6 +186,12 @@ private:
         // `resting` pose is fixed to the spot in the pit it was placed, so RebuildTransform
         // leaves it alone. Unlike served meat it rides nothing -- the pit does not move.
         bool in_fire_pit = false;
+
+        // Whether the body is currently in the physics scene. False while carried,
+        // gripped, served or stacked -- the body is scene-removed for those, and a
+        // removed actor is invisible to Physics::ClearLevel's release sweep, so the
+        // Props destructor frees whatever this still marks as out.
+        bool in_simulation = true;
     };
 
     // `stages` are the item's cook-stage models (at least one); `base_model` is the
@@ -246,6 +261,10 @@ private:
     // now: the held pose while carried, otherwise its resting pose. Used to place a
     // tray's serve zone and to hang served meat off it, resting or in hand.
     DirectX::XMMATRIX CurrentPose(int index, DirectX::FXMMATRIX camera_to_world) const;
+    // Takes item `index`'s body out of the physics scene -- the "held in hand /
+    // done with play" state. The GPU-safe replacement for eDISABLE_SIMULATION;
+    // ReleaseBody is the inverse.
+    void RemoveBodyFromScene(int index);
 
     Physics* physics_;
     std::vector<Item> items_;
@@ -279,6 +298,16 @@ private:
     // Whether the tray has been turned in -- latched true by the turn-in press and read
     // by TurnedIn(). Ends the level; never cleared (the level reloads to play again).
     bool turned_in_ = false;
+
+    // The spray's emission bank: droplets owed but not yet whole at this frame's rate,
+    // carried so a fast frame still spits a steady stream. Reset the moment the button
+    // is up, so a new hold never starts with a stale fraction.
+    float spray_carry_ = 0.0f;
+    // How soaked the fire pit is: the count of fluid droplets inside the pit column,
+    // integrated over seconds. Crossing the lighting threshold latches pit_lit_ and
+    // switches on every stacked log's heat; per-level state, reset with Props.
+    float pit_wetness_ = 0.0f;
+    bool pit_lit_ = false;
 
     // Rebuilt each Update: every resting item, the carried one, and the one the
     // outline glows around.

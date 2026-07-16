@@ -333,6 +333,12 @@ void Physics::Step(float dt) {
     while (accumulator_ >= kSubstep && ticks < kMaxSubsteps) {
         scene_->simulate(kSubstep);
         scene_->fetchResults(true);
+        // On the GPU pipeline, the particle systems' buffers are synchronised by
+        // this extra fetch -- without it, reading a particle buffer between steps
+        // sees stale device data. Meaningless (and skipped) on the CPU pipeline.
+        if (cuda_ != nullptr) {
+            scene_->fetchResultsParticleSystem();
+        }
         accumulator_ -= kSubstep;
         ++ticks;
     }

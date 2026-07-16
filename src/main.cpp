@@ -2,6 +2,7 @@
 #include "audio.hpp"
 #include "camera.hpp"
 #include "dx_common.hpp"
+#include "fluid.hpp"
 #include "furniture.hpp"
 #include "input.hpp"
 #include "level.hpp"
@@ -48,6 +49,9 @@ constexpr float kMaxFrameSeconds = 0.1f;
 struct Game {
     Renderer renderer;
     Physics physics;
+    // The GPU fluid rides the physics scene, so it sits between Physics (whose CUDA
+    // context and scene it borrows -- declared after, destroyed before) and the world.
+    Fluid fluid{physics};
     Camera camera{physics};
     Viewmodel viewmodel{Scene::kCubeModel};
     Input input;
@@ -266,6 +270,9 @@ int Run(HINSTANCE instance, int show_command) {
         game.world.reset();
         game.world.emplace(level, game.renderer, game.physics);
         game.camera.Respawn(level.player_spawn, level.player_facing);
+        // Park any droplets still in flight: the fluid is session state, and a puddle
+        // must not survive into (or pre-soak the fire pit of) the fresh level.
+        game.fluid.Clear();
     };
     // A level is loaded at startup even though the game launches into the menu: the
     // menu draws with the font atlas that rides a level's upload, and having one
@@ -639,6 +646,11 @@ int Run(HINSTANCE instance, int show_command) {
         // Advance the physics scene on its fixed clock: the props, furniture and the
         // player's controller all move on it. Simulate first, then read poses.
         game.physics.Step(dt);
+        // The fluid reads its droplet positions back from the stepped scene and injects
+        // whatever last frame's spray queued -- after the step (the readback wants this
+        // frame's results) and before the props update (which tests the fire pit's
+        // wetness against the fresh positions).
+        game.fluid.Update(dt);
 
         float mouse_dx = 0.0f;
         float mouse_dy = 0.0f;
@@ -669,7 +681,7 @@ int Run(HINSTANCE instance, int show_command) {
         game.world->props().Update(camera_to_world, game.actions, dt,
                                    game.world->furniture().HeatSources(),
                                    game.world->turn_in_zone(), game.world->fire_pit_zone(),
-                                   game.world->objectives());
+                                   game.world->objectives(), &game.fluid);
 
         // Turning the loaded tray in at the delivery zone ends the level: Props latches it
         // during the Update above. Drop the mouse look and raise the results screen, whose
@@ -759,7 +771,15 @@ int Run(HINSTANCE instance, int show_command) {
         const std::span<const MeshInstance> grill_highlight = furniture.HighlightInstances();
         highlights.insert(highlights.end(), grill_highlight.begin(), grill_highlight.end());
 
-        game.renderer.Render(game.world->scene(), props.WorldInstances(), highlights,
+        // The world draw list: the props where they lie plus any lighter-fluid droplets
+        // in flight -- both plain mesh instances, merged here so the renderer keeps its
+        // one world span. Empty droplets cost an empty append.
+        std::vector<MeshInstance> world_instances(props.WorldInstances().begin(),
+                                                  props.WorldInstances().end());
+        const std::span<const MeshInstance> droplets = game.fluid.Instances();
+        world_instances.insert(world_instances.end(), droplets.begin(), droplets.end());
+
+        game.renderer.Render(game.world->scene(), world_instances, highlights,
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
                              view_projection, game.camera.Position(), prompt,
                              debug_lines, order_cards, meat_cards);
