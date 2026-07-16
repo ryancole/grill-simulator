@@ -39,13 +39,22 @@ prop = [
   {type = "bench", pos = [0.0, 0.0, 2.0]},
   {type = "cooler", pos = [-3.2, 0.0, 3.4], yaw = 15.0},
 
-  # The campfire pit, off to the right in the clearing so the table does not hide it.
-  # Scenery only for now -- not the cook's heat source (that comes later, from elsewhere).
-  {type = "firepit", pos = [2.2, 0.0, 5.2]},
+  # The campfire pit, out on the grass just off the right edge of the dirt pad (which
+  # spans x -5..5), clear of the table. Scenery only for now -- not the cook's heat
+  # source (that comes later, from elsewhere).
+  {type = "firepit", pos = [6.5, 0.0, 4.5]},
 
   # A tent pitched off in the distance, tucked beside the far tree straight ahead of the
   # spawn (see the [0.5, 0, 12] tree below), across the clearing. Scenery.
   {type = "tent", pos = [-2.5, 0.0, 11.5], yaw = 20.0},
+
+  # A pile of firewood rounds on the grass by the ahead-left tree (at [-10, 0, 8]): three
+  # standing in a tight cluster with a fourth stacked on top. (Only yaw rotates a prop, so
+  # the rounds stand upright as authored.) Scenery.
+  {type = "log", pos = [-8.70, 0.0, 6.45], yaw = 0.0},
+  {type = "log", pos = [-8.35, 0.0, 6.45], yaw = 55.0},
+  {type = "log", pos = [-8.52, 0.0, 6.74], yaw = 110.0},
+  {type = "log", pos = [-8.52, 0.38, 6.55], yaw = 25.0},
 
   # The trees ring the site to make a wooded clearing, told apart by scale and turn. A
   # gap to the south (toward the spawn) reads as the way in from the campground road.

@@ -171,3 +171,7 @@ model = "firepit.glb"
 # A pitched tent: scenery, a plain static prop.
 [prop.tent]
 model = "tent.glb"
+
+# A firewood log: scenery, a plain static prop. Levels stack several into a pile.
+[prop.log]
+model = "log.glb"
