@@ -21,10 +21,14 @@ enum class HoldStyle { Flat, Tongs, Tray };
 // mouse button) while holding it. Named by the catalog so a carryable declares its
 // ability without Props knowing the object; Props dispatches on it (see
 // Props::TriggerAbility). `GripMeat` is the tongs: the primary action clamps a meat
-// (and only a meat) in the jaws to carry it, and releases it on a second press. `None`
-// is an item that simply does nothing yet -- the starting point every carryable has
-// until a real behaviour is filled in here.
-enum class Ability { None, GripMeat };
+// (and only a meat) in the jaws to carry it, and releases it on a second press.
+// `StackInFirePit` is the firewood log: the primary action, while the log is held over a
+// level's fire-pit zone, drops it onto the pit in a stacked pose and takes it out of the
+// simulation so it can no longer be knocked about. `SprayFluid` is the lighter fluid: the
+// primary action squirts it (behaviour still a stub -- the button is wired, the effect is
+// to come). `None` is an item that simply does nothing yet -- the starting point every
+// carryable has until a real behaviour is filled in here.
+enum class Ability { None, GripMeat, StackInFirePit, SprayFluid };
 
 // The serving surface a carryable provides, as pure data: how close (metres, measured
 // in the ground plane) a carried meat must be brought to deliver it, and where the
@@ -44,6 +48,9 @@ struct HeatDef {
     float temp_f = 400.0f;
     float reach = 1.0f;
     DirectX::XMFLOAT3 offset{0.0f, 0.0f, 0.0f};
+    // Whether the heat is emitting from the start. True (the default) for a grill that is
+    // lit as placed; false for a stack of logs that sits cold until it is lit in play.
+    bool starts_on = true;
 };
 
 // One model in a carryable's cook progression: the .glb to draw once the food's
@@ -70,6 +77,10 @@ struct CarryableDef {
     // Set only on a serving tray: the surface cooked meat is delivered onto. A food or
     // an ordinary tool leaves it empty and accepts no deliveries.
     std::optional<ServeDef> serve;
+    // The heat this carryable radiates, if any -- present on the firewood log (which may
+    // start off, unlit), empty on the tongs and the foods. Props gives an item with one
+    // a live HeatSource that rides its pose, so the log warms food set near it once lit.
+    std::optional<HeatDef> heat;
     float knock_rating = 4.0f;
     ImpactSound impact_sound = ImpactSound::Meat;
     HoldStyle hold = HoldStyle::Flat;

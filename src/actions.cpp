@@ -46,6 +46,7 @@ constexpr ActionSpec kSpecs[] = {
     {Action::PrimaryAction, "primary_action", "Mouse1", "Primary Action", true},
     {Action::ReloadLevel, "reload_level", "R", "Reload Level", false},
     {Action::SelectLevel1, "select_level_1", "1", "Select Level 1", false},
+    {Action::SelectLevel2, "select_level_2", "2", "Select Level 2", false},
     {Action::ToggleDebug, "toggle_debug", "Backtick", "Toggle Debug", false},
     {Action::MenuUp, "menu_up", "Up", "Menu Up", false},
     {Action::MenuDown, "menu_down", "Down", "Menu Down", false},

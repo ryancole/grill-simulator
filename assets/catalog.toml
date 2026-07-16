@@ -132,6 +132,16 @@ hold = "tray"
 knock = 4.0
 sound = "grill_lid"
 
+# Lighter fluid: a carryable utensil (a squeeze can), picked up and carried like the tongs.
+# Its primary action (left mouse) squirts fluid -- the `spray_fluid` ability. The button and
+# prompt are wired; what a squirt actually does is a stub for now (a later step). The type is
+# quoted with a space so the pick-up prompt reads "[E] Pick up lighter fluid" cleanly.
+[tool."lighter fluid"]
+model = "lighter-fluid.glb"
+knock = 2.0
+sound = "metal"
+ability = "spray_fluid"
+
 # --- Props: furniture and scenery --------------------------------------------------
 
 # The charcoal grill base: a dynamic body that radiates heat from its grate. Its lid is
@@ -162,3 +172,30 @@ model = "crate.glb"
 
 [prop.tree]
 model = "tree.glb"
+
+# The campfire pit: scenery for now -- a plain static prop, no `dynamic` and no `heat`.
+# (It is not the cook's heat source; that will come from elsewhere.)
+[prop.firepit]
+model = "firepit.glb"
+
+# A pitched tent: scenery, a plain static prop.
+[prop.tent]
+model = "tent.glb"
+
+# A firewood log the player can pick up and carry -- a plain carryable tool (no cook
+# profile, takes no food). `sound` is a stand-in: there is no dedicated wood impact clip
+# yet, so it lands with the soft "meat" thud rather than a metallic clank. Its primary
+# action (left mouse) stacks it onto a level's fire pit -- see `fire_pit` in the level.
+[tool.log]
+model = "log.glb"
+knock = 5.0
+sound = "meat"
+ability = "stack_in_fire_pit"
+# The log radiates heat once lit, but starts cold: `heat_starts_on = false` means it emits
+# nothing until it is switched on (lighting the fire is a later step). `heat` is the air
+# temperature at its centre when lit, `heat_reach` how far that carries, `heat_offset` the
+# hot centre lifted to the middle of the round.
+heat = 500.0
+heat_reach = 1.6
+heat_offset = [0.0, 0.2, 0.0]
+heat_starts_on = false

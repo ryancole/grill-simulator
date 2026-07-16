@@ -26,9 +26,17 @@ public:
     HeatSource() = default;
     // `emitter_temp_f` is the air temperature at the very centre of the source, in
     // degrees Fahrenheit; `reach` is how far in metres that heat carries before it
-    // has faded entirely back to room air.
-    HeatSource(float emitter_temp_f, float reach)
-        : emitter_temp_f_(emitter_temp_f), reach_(reach) {}
+    // has faded entirely back to room air. `on` is whether it is emitting to begin
+    // with -- true for a lit grill, false for an unlit fire that is switched on later.
+    HeatSource(float emitter_temp_f, float reach, bool on = true)
+        : emitter_temp_f_(emitter_temp_f), reach_(reach), on_(on) {}
+
+    // Whether the source is currently emitting. An off source imposes no heat at all --
+    // TemperatureAt returns room temperature everywhere, as if it were not there -- so a
+    // source can sit cold (an unlit stack of logs) and be lit later by switching it on,
+    // without being created and destroyed. A source built without saying otherwise is on.
+    void SetOn(bool on) { on_ = on; }
+    bool IsOn() const { return on_; }
 
     // Move the hot centre to `origin` in world space. The owner calls this each frame
     // from the body's current pose, so the heat follows the object as it is knocked
@@ -52,5 +60,8 @@ public:
 private:
     float emitter_temp_f_ = 0.0f;
     float reach_ = 1.0f;
+    // Whether it is emitting. Off means TemperatureAt yields only room air; the fixed
+    // temperature and reach are kept so lighting it (SetOn(true)) needs no other change.
+    bool on_ = true;
     DirectX::XMFLOAT3 origin_{0.0f, 0.0f, 0.0f};
 };

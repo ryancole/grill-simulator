@@ -61,6 +61,11 @@ struct CarryableSpawn {
     // Set only on a serving tray: the delivery surface it provides. Props builds a
     // live serve zone from it that rides the tray wherever it is set down or carried.
     std::optional<ServeDef> serve;
+    // The heat this carryable radiates, if any (the firewood log) -- the fixed temperature,
+    // reach and on/off state; its origin is unset here (Props refreshes it each frame from
+    // the item's pose). `heat_offset` is the hot centre in the model's own space.
+    std::optional<HeatSource> heat;
+    DirectX::XMFLOAT3 heat_offset{0.0f, 0.0f, 0.0f};
 };
 
 // A world object the player can knock over -- the grill, the cooler -- given its
