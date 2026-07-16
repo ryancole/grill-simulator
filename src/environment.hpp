@@ -61,6 +61,17 @@ struct Environment {
     float bloom_intensity;
     float bloom_threshold;
     float bloom_knee;
+    // The volumetric cloud pass (shaders/clouds.hlsl). The slab lives between
+    // `cloud_bottom` and `cloud_top` metres; `cloud_density` is its extinction (how
+    // solid it reads); `cloud_detail` how hard the 3D noise erodes the edges into
+    // billows. The horizontal shape, colour, coverage and wind come from `sky` above,
+    // shared with the flat 2D layer -- these four are the volumetric-only knobs, and
+    // like the shaft/bloom fields they reach only the cloud pass, not the SkyEnvironment
+    // mirror, so they stay plain Environment data.
+    float cloud_bottom;
+    float cloud_top;
+    float cloud_density;
+    float cloud_detail;
 };
 
 // The default sky: the values that were `static const` in common.hlsli, scene.hlsl
@@ -71,7 +82,7 @@ struct Environment {
 constexpr Environment kDefaultEnvironment{
     /*sky*/ {
         /*zenith*/ {0.40f, 0.54f, 0.76f}, /*cloud_scale*/ 0.55f,
-        /*horizon*/ {0.70f, 0.76f, 0.82f}, /*cloud_coverage*/ 0.52f,
+        /*horizon*/ {0.70f, 0.76f, 0.82f}, /*cloud_coverage*/ 0.30f,
         /*ground*/ {0.20f, 0.18f, 0.16f}, /*cloud_softness*/ 0.30f,
         /*cloud_color*/ {0.96f, 0.97f, 1.0f}, /*cloud_opacity*/ 0.9f,
         /*cloud_wind*/ {0.010f, 0.006f}, /*pad*/ 0.0f, 0.0f,
@@ -91,6 +102,10 @@ constexpr Environment kDefaultEnvironment{
     /*bloom_intensity*/ 0.7f,
     /*bloom_threshold*/ 0.9f,
     /*bloom_knee*/ 0.4f,
+    /*cloud_bottom*/ 160.0f,
+    /*cloud_top*/ 210.0f,
+    /*cloud_density*/ 0.24f,
+    /*cloud_detail*/ 0.45f,
 };
 
 // Expands a time of day into a whole sky. `hours` is a clock time in [0,24) (values

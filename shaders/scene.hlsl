@@ -44,13 +44,15 @@ cbuffer FrameConstants : register(b1) {
     row_major float4x4 g_light_view_projection;
     // The eye, in world space, for the view vector the specular term needs.
     float3 g_camera_position;
-    // Seconds since the renderer came up, so the cloud layer the fog fades into
-    // drifts in step with the sky pass. The probe capture passes 0.
+    // Vestigial: once the seconds that drifted the flat cloud layer the fog faded
+    // into. The clouds are volumetric now (shaders/clouds.hlsl) and the sky the fog
+    // samples is a static gradient, so nothing reads this -- the field stays only to
+    // keep this buffer's layout in step with its C++ mirror.
     float g_time;
     // The level's atmosphere, carried per frame rather than baked in: the sky
-    // gradient and clouds SampleSky reads, then the sun, ambient, fill and fog the
-    // shade below was once seeded with `static const`. Filled from the C++
-    // Environment; see FrameConstants in renderer.cpp.
+    // gradient SampleSky reads, then the sun, ambient, fill and fog the shade below
+    // was once seeded with `static const`. Filled from the C++ Environment; see
+    // FrameConstants in renderer.cpp.
     SkyEnvironment g_sky;
     // The sun's colour and radiance. The diffuse BRDF carries a 1/pi that a real
     // light's intensity would swallow; g_sun_intensity folds a pi back in so a lit
@@ -230,8 +232,8 @@ float3 SkyAverage() {
 // which the real split-sum approximation bakes into mip levels of a cubemap. With
 // an analytic sky there is nothing to prebake, so the blur is faked by fading the
 // sharp reflection toward the sky's rough average as roughness climbs.
-float3 PrefilteredSky(float3 r, float roughness, float time) {
-    return lerp(SampleSky(r, time, g_sky), SkyAverage(), roughness);
+float3 PrefilteredSky(float3 r, float roughness) {
+    return lerp(SampleSky(r, g_sky), SkyAverage(), roughness);
 }
 
 // The prefiltered *environment* along a reflection vector: the captured cubemap
@@ -239,12 +241,12 @@ float3 PrefilteredSky(float3 r, float roughness, float time) {
 // otherwise -- the path the capture pass itself takes, which is why it must not
 // read the cube it is filling. The single-mip cube cannot blur, so roughness fades
 // its reflection toward the sky average, the same floor PrefilteredSky uses.
-float3 SpecularEnvironment(float3 r, float roughness, bool use_probe, float time) {
+float3 SpecularEnvironment(float3 r, float roughness, bool use_probe) {
     if (use_probe) {
         const float3 sharp = g_reflection_probe.SampleLevel(g_sampler, r, 0.0f).rgb;
         return lerp(sharp, SkyAverage(), roughness);
     }
-    return PrefilteredSky(r, roughness, time);
+    return PrefilteredSky(r, roughness);
 }
 
 // The environment half of the split-sum: the integral of the specular BRDF over
@@ -339,7 +341,7 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     const float3 reflection = reflect(-view, normal);
     const float2 env_brdf = EnvBRDFApprox(roughness, n_dot_v);
     const float3 ambient_specular =
-        SpecularEnvironment(reflection, roughness, use_probe, g_time) * (f0 * env_brdf.x + env_brdf.y);
+        SpecularEnvironment(reflection, roughness, use_probe) * (f0 * env_brdf.x + env_brdf.y);
 
     // Ambient occlusion darkens only the indirect light -- the sky's diffuse and
     // its reflection -- in the crevices and contact points the map records. The
@@ -360,7 +362,7 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     // that would seam against it at the horizon.
     const float3 view_ray = normalize(input.world - g_camera_position);
     const float fog = saturate((input.view_depth - g_fog_start) / (g_fog_end - g_fog_start));
-    const float3 color = lerp(lit, SampleSky(view_ray, g_time, g_sky), fog * 0.9f);
+    const float3 color = lerp(lit, SampleSky(view_ray, g_sky), fog * 0.9f);
     // Left in linear light: the whole world renders into the HDR scene buffer,
     // and the tonemap pass (tonemap.hlsl) is the one place the linear->sRGB encode
     // happens. The capture path below, which writes an 8-bit cube instead, encodes

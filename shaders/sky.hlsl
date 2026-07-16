@@ -8,8 +8,10 @@ cbuffer SkyConstants : register(b0) {
     // Clip space back to world: the inverse of the camera's view-projection.
     row_major float4x4 g_inv_view_projection;
     float3 g_camera_position;
-    // Seconds since the renderer came up, so the cloud layer drifts. The probe
-    // capture passes 0, baking a still cloudscape into the static reflection.
+    // Vestigial: once the seconds that drifted the flat cloud layer drawn over the
+    // sky here. The clouds are volumetric now (shaders/clouds.hlsl), drawn in their
+    // own pass, so the background is a static gradient and nothing reads this -- it
+    // stays only to keep this buffer's layout in step with its C++ mirror.
     float g_time;
     // The level's atmosphere SampleSky draws from -- the same struct the scene pass
     // carries, so the background and the sky a metal reflects stay one sky. Filled
@@ -43,7 +45,7 @@ float3 SkyRadiance(VSOutput input) {
     float4 world = mul(float4(input.clip, 1.0f, 1.0f), g_inv_view_projection);
     world /= world.w;
     const float3 dir = normalize(world.xyz - g_camera_position);
-    return SampleSky(dir, g_time, g_sky);
+    return SampleSky(dir, g_sky);
 }
 
 // The on-screen background: into the linear HDR scene buffer, so no encode here --

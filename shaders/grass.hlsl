@@ -429,7 +429,7 @@ float4 PSMain(MSOut input) : SV_TARGET {
     const float3 view_ray = normalize(input.world - g_camera_position);
     const float dist = distance(input.world, g_grass_camera);
     const float fog = saturate((dist - g_fog_start) / (g_fog_end - g_fog_start));
-    color = lerp(color, SampleSky(view_ray, g_time, g_sky), fog * 0.9f);
+    color = lerp(color, SampleSky(view_ray, g_sky), fog * 0.9f);
 
     return float4(color, 1.0f);
 }
