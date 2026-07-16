@@ -39,13 +39,13 @@ prop = [
   {type = "bench", pos = [0.0, 0.0, 2.0]},
   {type = "cooler", pos = [-3.2, 0.0, 3.4], yaw = 15.0},
 
-  # A stack of crates as camp gear off to the side.
-  {type = "crate", pos = [4.0, 0.0, 3.0]},
-  {type = "crate", pos = [4.0, 0.8, 3.0], yaw = 18.0, scale = 0.875},
-
   # The campfire pit, off to the right in the clearing so the table does not hide it.
   # Scenery only for now -- not the cook's heat source (that comes later, from elsewhere).
   {type = "firepit", pos = [2.2, 0.0, 5.2]},
+
+  # A tent pitched off in the distance, tucked beside the far tree straight ahead of the
+  # spawn (see the [0.5, 0, 12] tree below), across the clearing. Scenery.
+  {type = "tent", pos = [-2.5, 0.0, 11.5], yaw = 20.0},
 
   # The trees ring the site to make a wooded clearing, told apart by scale and turn. A
   # gap to the south (toward the spawn) reads as the way in from the campground road.

@@ -167,3 +167,7 @@ model = "tree.glb"
 # (It is not the cook's heat source; that will come from elsewhere.)
 [prop.firepit]
 model = "firepit.glb"
+
+# A pitched tent: scenery, a plain static prop.
+[prop.tent]
+model = "tent.glb"
