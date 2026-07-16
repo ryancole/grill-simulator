@@ -53,7 +53,7 @@ public:
     // and ends the level -- see TurnedIn.
     void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt,
                 std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                Objectives& objectives);
+                const ServeZone* fire_pit, Objectives& objectives);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -164,6 +164,12 @@ private:
         // each frame -- delivered meat travels with the tray, resting or carried.
         int stuck_to = -1;
         DirectX::XMFLOAT4X4 stuck_local;
+
+        // Set once a log has been stacked onto the fire pit. Like a served meat it is done
+        // with play: its body stays out of the simulation (so nothing knocks it) and its
+        // `resting` pose is fixed to the spot in the pit it was placed, so RebuildTransform
+        // leaves it alone. Unlike served meat it rides nothing -- the pit does not move.
+        bool in_fire_pit = false;
     };
 
     // `stages` are the item's cook-stage models (at least one); `base_model` is the
@@ -219,6 +225,10 @@ private:
     // scattered across the face so several spread out -- and released from the hand. Any
     // meat is accepted; whether its doneness fills an order is decided later, at turn-in.
     void Load(int meat, int tray);
+    // Stacks the carried log `log` onto the fire pit centred at `pit_center`: snaps it to
+    // a stacked pose above the pit (nestled over any logs already there), leaves its body
+    // out of the simulation so nothing can knock it, marks it placed, and empties the hand.
+    void PlaceInFirePit(int log, DirectX::XMFLOAT3 pit_center);
     // Turns in tray item `tray`: hands every meat stuck to it to `objectives` at once
     // (each doneness matched against the open orders) and marks the level turned in. The
     // one place the win condition is evaluated -- called when the loaded tray is carried
@@ -253,6 +263,11 @@ private:
     // this frame. Cached in Update so the (const) prompt can offer "[E] Turn in" and the
     // Interact press knows to hand the tray in rather than drop it.
     bool in_turn_in_ = false;
+    // Whether the carried item is a fire-pit log and it sits inside the level's fire-pit
+    // zone this frame, with the pit's centre to stack it at. Cached in Update so the same
+    // read drives the "[Mouse1] Add log to fire pit" prompt and the primary-action press.
+    bool log_over_pit_ = false;
+    DirectX::XMFLOAT3 fire_pit_center_{0.0f, 0.0f, 0.0f};
     // Whether the tray has been turned in -- latched true by the turn-in press and read
     // by TurnedIn(). Ends the level; never cleared (the level reloads to play again).
     bool turned_in_ = false;

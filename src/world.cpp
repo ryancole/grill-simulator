@@ -60,6 +60,10 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
     if (level.turn_in) {
         turn_in_.emplace(DirectX::XMLoadFloat3(&level.turn_in->pos), level.turn_in->radius);
     }
+    // Likewise the fire-pit zone: a static column over the pit where logs are stacked.
+    if (level.fire_pit) {
+        fire_pit_.emplace(DirectX::XMLoadFloat3(&level.fire_pit->pos), level.fire_pit->radius);
+    }
 }
 
 World::~World() {

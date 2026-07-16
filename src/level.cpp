@@ -269,6 +269,16 @@ LevelDef LoadFromFile(const std::filesystem::path& path) {
         level.turn_in = t;
     }
 
+    // The fire pit: an optional `fire_pit = {pos = [x,y,z], radius = r}` table naming
+    // where firewood logs are stacked. `pos` is required when the table is present;
+    // `radius` defaults to the struct's 1 m. Omit the table for a level that takes no logs.
+    if (const toml::table* fire_pit = root["fire_pit"].as_table()) {
+        FirePitDef f;
+        f.pos = Vec3((*fire_pit)["pos"], path, "fire_pit pos");
+        f.radius = NumberOr((*fire_pit)["radius"], f.radius, path, "fire_pit radius");
+        level.fire_pit = f;
+    }
+
     // The grass field: an optional `grass = {center = [x,y,z], size = [x,z], ...}` table.
     // `center` and `size` place the rectangle; the rest read over the struct defaults, so
     // a terse `grass` is just a centre and a size. Omit the table for a level with no

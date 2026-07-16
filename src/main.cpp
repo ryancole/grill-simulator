@@ -668,7 +668,8 @@ int Run(HINSTANCE instance, int show_command) {
         game.world->furniture().Update();
         game.world->props().Update(camera_to_world, game.actions, dt,
                                    game.world->furniture().HeatSources(),
-                                   game.world->turn_in_zone(), game.world->objectives());
+                                   game.world->turn_in_zone(), game.world->fire_pit_zone(),
+                                   game.world->objectives());
 
         // Turning the loaded tray in at the delivery zone ends the level: Props latches it
         // during the Update above. Drop the mouse look and raise the results screen, whose

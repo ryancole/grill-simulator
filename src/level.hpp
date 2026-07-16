@@ -65,6 +65,17 @@ struct TurnInDef {
     float radius = 1.0f;
 };
 
+// The level's fire pit: where the player stacks firewood logs. A horizontal circle
+// (`radius` metres around `pos` in the ground plane, height ignored) that Props tests a
+// carried log against -- pressing the primary action inside it snaps the log onto the
+// pit, stacked, and takes it out of the simulation so it can no longer be knocked over.
+// `pos` is the pit's ground centre, where the stack builds up. Present only on a level
+// that sets a `fire_pit` table; without one, a held log's primary action does nothing.
+struct FirePitDef {
+    DirectX::XMFLOAT3 pos{0.0f, 0.0f, 0.0f};
+    float radius = 1.0f;
+};
+
 // The level's grass field: a flat rectangle of GPU-grown blades over the ground.
 // `center` is its middle (y the ground height the blades stand on) and `size` its
 // extent in metres (x by z). The rest tune the look: `color` the base blade colour
@@ -119,6 +130,10 @@ struct LevelDef {
     // Where the player turns the loaded tray in to end the level. Unset on a level with
     // no `turn_in` table, which then has no delivery point (a sandbox).
     std::optional<TurnInDef> turn_in;
+
+    // The level's fire pit, where firewood logs are stacked. Unset on a level with no
+    // `fire_pit` table, which then accepts no logs.
+    std::optional<FirePitDef> fire_pit;
 
     // The level's grass field, if it set a `grass` table. Unset on a level with none,
     // which grows no grass.

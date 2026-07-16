@@ -250,7 +250,7 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
 
 void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt,
                    std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                   Objectives& objectives) {
+                   const ServeZone* fire_pit, Objectives& objectives) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
@@ -285,6 +285,20 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     if (turn_in != nullptr && carried_ >= 0 && items_[carried_].serve) {
         const XMVECTOR tray_origin = CurrentPose(carried_, camera_to_world).r[3];
         in_turn_in_ = turn_in->Contains(tray_origin);
+    }
+
+    // Whether the carried item is a fire-pit log inside the level's fire-pit zone this
+    // frame -- tested at the held log's position, like the turn-in above, and only when a
+    // pit exists and the log's ability is to stack there. Its centre is cached alongside so
+    // the primary-action press stacks onto the pit without re-reading the zone.
+    log_over_pit_ = false;
+    if (fire_pit != nullptr && carried_ >= 0 &&
+        items_[carried_].ability == Ability::StackInFirePit) {
+        const XMVECTOR held = (XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world).r[3];
+        if (fire_pit->Contains(held)) {
+            log_over_pit_ = true;
+            fire_pit_center_ = fire_pit->Origin();
+        }
     }
 
     // The meat the tongs would grip this frame: with the tongs in hand and their jaws
@@ -350,7 +364,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     // served item is skipped: its body is out of the simulation and its resting pose
     // was set to the counter when it was delivered, so there is nothing to read back.
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-        if (i != carried_ && i != gripped_ && !items_[i].served) {
+        if (i != carried_ && i != gripped_ && !items_[i].served && !items_[i].in_fire_pit) {
             RebuildTransform(items_[i]);
         }
     }
@@ -482,6 +496,12 @@ std::string Props::PromptText() const {
         if (in_turn_in_) {
             return "[E] Turn in";
         }
+        // Holding a log over the fire pit, the primary action stacks it on -- name the real
+        // binding, like the tongs' hint. Off it, the log's primary action does nothing and
+        // Interact is the drop.
+        if (log_over_pit_) {
+            return "[" + primary_label_ + "] Add log to fire pit";
+        }
         return "[E] Drop";
     }
     if (hovered_ >= 0) {
@@ -603,6 +623,14 @@ void Props::TriggerAbility(int item, FXMMATRIX camera_to_world) {
             grip_target_ = -1;
         }
         break;
+    case Ability::StackInFirePit:
+        // The firewood log. Held over the fire pit, the primary action stacks it onto the
+        // pit and takes it out of play; held anywhere else it does nothing (step over the
+        // pit to place it). log_over_pit_ and the pit centre were cached this frame above.
+        if (log_over_pit_) {
+            PlaceInFirePit(item, fire_pit_center_);
+        }
+        break;
     }
 }
 
@@ -632,6 +660,46 @@ void Props::Load(int meat, int tray) {
 
     // Its body was disabled on pick-up and stays out of the simulation -- loaded food
     // neither falls nor is knocked; it follows the tray's pose from here (see Update).
+    carried_ = -1;
+}
+
+void Props::PlaceInFirePit(int log, XMFLOAT3 pit_center) {
+    Item& item = items_[log];
+
+    // Where in the pit this log lands: logs stack two to a layer, each layer turned a
+    // quarter so they cross like laid firewood. Count the logs already in the pit to pick
+    // the slot -- 0,1 fill the bottom layer side by side, 2,3 the next layer crossing it,
+    // and so on up. The offsets are in the log's own half-extents, so a layer's pair sits
+    // just touching and each layer rests a full log-height on the one below.
+    int placed = 0;
+    for (const Item& other : items_) {
+        if (&other != &item && other.in_fire_pit) {
+            ++placed;
+        }
+    }
+    const float half_w = item.half_extents.x; // half a log's width
+    const float half_h = item.half_extents.y; // half a log's height
+    const int row = placed / 2;
+    const int col = placed % 2;
+    const float lateral = (col == 0 ? -half_w : half_w);
+    const bool cross = (row % 2) != 0; // alternate layers lie the other way
+    const float dx = cross ? 0.0f : lateral;
+    const float dz = cross ? lateral : 0.0f;
+    const float dy = static_cast<float>(row) * (2.0f * half_h);
+    const float yaw = XMConvertToRadians((cross ? 96.0f : 6.0f) + static_cast<float>(placed) * 7.0f);
+
+    // The log's body frame is its model frame (origin on the underside), so this rotate-
+    // then-translate is exactly the pose the renderer draws it under, and the underside
+    // lands on the pit floor (dy 0) or atop the layer below.
+    const XMMATRIX pose = XMMatrixRotationY(yaw) *
+                          XMMatrixTranslation(pit_center.x + dx, pit_center.y + dy, pit_center.z + dz);
+    XMStoreFloat4x4(&item.resting, pose);
+
+    // Its body was disabled on pick-up and stays out of the simulation -- a placed log
+    // neither falls nor is knocked, and is out of the pick sweep too (like carried and
+    // served bodies). in_fire_pit fixes `resting` here (RebuildTransform skips it), so the
+    // log simply draws at this pose from now on. Mark it placed and empty the hand.
+    item.in_fire_pit = true;
     carried_ = -1;
 }
 

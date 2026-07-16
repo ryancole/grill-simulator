@@ -174,8 +174,10 @@ model = "tent.glb"
 
 # A firewood log the player can pick up and carry -- a plain carryable tool (no cook
 # profile, takes no food). `sound` is a stand-in: there is no dedicated wood impact clip
-# yet, so it lands with the soft "meat" thud rather than a metallic clank.
+# yet, so it lands with the soft "meat" thud rather than a metallic clank. Its primary
+# action (left mouse) stacks it onto a level's fire pit -- see `fire_pit` in the level.
 [tool.log]
 model = "log.glb"
 knock = 5.0
 sound = "meat"
+ability = "stack_in_fire_pit"

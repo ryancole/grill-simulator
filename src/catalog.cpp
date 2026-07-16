@@ -99,7 +99,8 @@ Ability AbilityOr(const toml::node_view<const toml::node>& view, Ability fallbac
     }
     if (*name == "none") return Ability::None;
     if (*name == "grip_meat") return Ability::GripMeat;
-    Fail(path, "unknown ability '" + *name + "' (want none or grip_meat)");
+    if (*name == "stack_in_fire_pit") return Ability::StackInFirePit;
+    Fail(path, "unknown ability '" + *name + "' (want none, grip_meat or stack_in_fire_pit)");
 }
 
 // The model name a type must name, or a catalog error.

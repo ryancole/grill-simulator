@@ -83,3 +83,9 @@ carryable = [
   {type = "log", pos = [-8.60, 0.06, 6.82], yaw = 100.0},
   {type = "log", pos = [-8.25, 0.06, 6.85], yaw = 150.0},
 ]
+
+# The fire pit's stacking zone, over the firepit prop at [6.5, 0, 4.5]. Carry a log here
+# and press the primary action (left mouse) to stack it onto the pit; the radius is
+# generous so standing at the pit with the log out front counts. An inline table so it
+# does not swallow the keys above it (see the [environment] note near the top).
+fire_pit = {pos = [6.5, 0.0, 4.5], radius = 1.5}
