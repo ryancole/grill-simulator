@@ -31,6 +31,12 @@ struct MeshInstance {
     // leaves the surface flat -- it is only there to give the ground a texture
     // to move against.
     float checker;
+    // How much light the surface gives off on its own, as a multiple of its own
+    // base colour added on top of the shading. Zero -- everything in the yard --
+    // is lit by the sun and the sky alone. Above one it climbs into the HDR
+    // buffer's headroom and the bloom's bright-pass, which is what makes the
+    // lighter's flame (the only thing that sets this today) glow.
+    float emissive = 0.0f;
 };
 
 // One model of a carryable's cook progression, resolved to a loaded model id: the

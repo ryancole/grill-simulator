@@ -1,6 +1,7 @@
 #include "props.hpp"
 
 #include "actions.hpp"
+#include "flame.hpp"
 #include "fluid.hpp"
 #include "objectives.hpp"
 #include "physics.hpp"
@@ -295,7 +296,8 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
 
 void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt,
                    std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                   const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid) {
+                   const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid,
+                   Flame* flame) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
@@ -430,6 +432,29 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     } else {
         spray_carry_ = 0.0f;
+    }
+
+    // The lighter burns for as long as the primary action is held, like the can's spray
+    // above and unlike the edge-triggered abilities: the flame stands at the nozzle while
+    // the button is down and goes out when it is released. Emitting is all it does -- the
+    // fire is a visual, and lights nothing yet. The flame itself keeps burning down after
+    // release, since Flame::Update runs whether or not this fired (see main).
+    if (flame != nullptr && carried_ >= 0 && items_[carried_].ability == Ability::Flame &&
+        actions.IsActive(Action::PrimaryAction)) {
+        // The nozzle is the far tip of the barrel. Unlike the fluid can -- which stands on
+        // its base, so its top is up its model's Y -- the lighter is a long-barrelled
+        // utility one modelled lying down its own Z, with the grip at the origin and the
+        // muzzle at the far end of the box (its Y is the barrel's *thickness*, a
+        // centimetre of it, so lifting up Y would leave the flame in the player's fist).
+        // The far face along Z is where the flame stands.
+        const Item& lighter = items_[carried_];
+        const XMMATRIX held = XMLoadFloat4x4(&lighter.held_local) * camera_to_world;
+        const XMVECTOR nozzle =
+            XMVectorAdd(held.r[3], XMVectorScale(XMVector3Normalize(held.r[2]),
+                                                 lighter.com_offset.z + lighter.half_extents.z));
+        XMFLOAT3 origin;
+        XMStoreFloat3(&origin, nozzle);
+        flame->Emit(origin, dt);
     }
 
     // Fluid pooling in the fire pit primes it. Count the droplets inside the pit column

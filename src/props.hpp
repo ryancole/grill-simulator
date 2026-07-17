@@ -16,6 +16,7 @@
 #include <vector>
 
 class Actions;
+class Flame;
 class Fluid;
 class Objectives;
 class Physics;
@@ -57,10 +58,12 @@ public:
     // carrying the loaded tray inside it hands every stuck meat to `objectives` at once
     // and ends the level -- see TurnedIn. `fluid` is the session's GPU fluid: the
     // lighter-fluid can sprays into it while the primary action is held, and droplets
-    // pooling inside `fire_pit` prime the pit until the stacked logs light.
+    // pooling inside `fire_pit` prime the pit until the stacked logs light. `flame` is
+    // the session's flame effect, which the lighter burns into at its nozzle for as long
+    // as the primary action is held -- a visual only, so far.
     void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt,
                 std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid);
+                const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid, Flame* flame);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
