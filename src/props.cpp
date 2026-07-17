@@ -435,26 +435,31 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     }
 
     // The lighter burns for as long as the primary action is held, like the can's spray
-    // above and unlike the edge-triggered abilities: the flame stands at the nozzle while
-    // the button is down and goes out when it is released. Emitting is all it does -- the
-    // fire is a visual, and lights nothing yet. The flame itself keeps burning down after
-    // release, since Flame::Update runs whether or not this fired (see main).
-    if (flame != nullptr && carried_ >= 0 && items_[carried_].ability == Ability::Flame &&
-        actions.IsActive(Action::PrimaryAction)) {
-        // The nozzle is the far tip of the barrel. Unlike the fluid can -- which stands on
-        // its base, so its top is up its model's Y -- the lighter is a long-barrelled
-        // utility one modelled lying down its own Z, with the grip at the origin and the
-        // muzzle at the far end of the box (its Y is the barrel's *thickness*, a
-        // centimetre of it, so lifting up Y would leave the flame in the player's fist).
-        // The far face along Z is where the flame stands.
-        const Item& lighter = items_[carried_];
-        const XMMATRIX held = XMLoadFloat4x4(&lighter.held_local) * camera_to_world;
-        const XMVECTOR nozzle =
-            XMVectorAdd(held.r[3], XMVectorScale(XMVector3Normalize(held.r[2]),
-                                                 lighter.com_offset.z + lighter.half_extents.z));
-        XMFLOAT3 origin;
-        XMStoreFloat3(&origin, nozzle);
-        flame->Emit(origin, dt);
+    // above and unlike the edge-triggered abilities: the flame stands at the muzzle while
+    // the button is down and goes out when it is released. The flame itself keeps burning
+    // down after release, since Flame::Update runs whether or not this fired (see main).
+    //
+    // Being lit is also what makes the lighter hot: its heat switches on with the fire and
+    // off with it, so it warms (and will light) what it is held to only while it burns.
+    // Every Flame item is visited, not just the carried one, so a lighter dropped mid-burn
+    // goes cold rather than lying in the dirt radiating.
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        Item& item = items_[i];
+        if (item.ability != Ability::Flame) {
+            continue;
+        }
+        const bool burning =
+            i == carried_ && flame != nullptr && actions.IsActive(Action::PrimaryAction);
+        if (item.heat) {
+            item.heat->SetOn(burning);
+        }
+        if (burning) {
+            XMFLOAT3 origin;
+            XMStoreFloat3(&origin, XMVector3Transform(NozzleLocal(item),
+                                                      XMLoadFloat4x4(&item.held_local) *
+                                                          camera_to_world));
+            flame->Emit(origin, dt);
+        }
     }
 
     // Fluid pooling in the fire pit primes it. Count the droplets inside the pit column
@@ -521,8 +526,14 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
         if (items_[i].heat) {
             const XMMATRIX pose = CurrentPose(i, camera_to_world);
-            items_[i].heat->SetOrigin(
-                XMVector3Transform(XMLoadFloat3(&items_[i].heat_offset), pose));
+            // The lighter is the exception to the authored offset: its heat comes off its
+            // flame, which stands at the muzzle the model itself defines (see
+            // NozzleLocal), so the two cannot be spelled separately without drifting
+            // apart. Everything else radiates from the point its catalog entry names.
+            const XMVECTOR local = items_[i].ability == Ability::Flame
+                                       ? NozzleLocal(items_[i])
+                                       : XMLoadFloat3(&items_[i].heat_offset);
+            items_[i].heat->SetOrigin(XMVector3Transform(local, pose));
         }
     }
 
@@ -897,4 +908,10 @@ XMMATRIX Props::CurrentPose(int index, FXMMATRIX camera_to_world) const {
         return XMLoadFloat4x4(&items_[index].held_local) * camera_to_world;
     }
     return XMLoadFloat4x4(&items_[index].resting);
+}
+
+XMVECTOR Props::NozzleLocal(const Item& item) const {
+    // The box's far face down Z, on the model's own axis. A point, so w is 1: the
+    // callers carry it into the world through the item's pose, which has to translate it.
+    return XMVectorSet(0.0f, 0.0f, item.com_offset.z + item.half_extents.z, 1.0f);
 }

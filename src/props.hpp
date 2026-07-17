@@ -264,6 +264,14 @@ private:
     // now: the held pose while carried, otherwise its resting pose. Used to place a
     // tray's serve zone and to hang served meat off it, resting or in hand.
     DirectX::XMMATRIX CurrentPose(int index, DirectX::FXMMATRIX camera_to_world) const;
+    // Where the lighter's flame stands, in the item's own model space: the far face of
+    // its box down the model's Z. Derived from the box rather than authored in the
+    // catalog because two things need the very same point -- the flame is emitted here
+    // and the lighter's heat radiates from here -- and a fire whose heat came from
+    // somewhere else would be a lie. Only meaningful for a Flame item: the lighter is a
+    // long-barrelled utility one, modelled lying down its Z with the grip at the origin,
+    // so its far Z face is the muzzle (its Y is the barrel's centimetre of thickness).
+    DirectX::XMVECTOR NozzleLocal(const Item& item) const;
     // Takes item `index`'s body out of the physics scene -- the "held in hand /
     // done with play" state. The GPU-safe replacement for eDISABLE_SIMULATION;
     // ReleaseBody is the inverse.

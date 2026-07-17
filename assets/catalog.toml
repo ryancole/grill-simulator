@@ -142,14 +142,29 @@ knock = 2.0
 sound = "metal"
 ability = "spray_fluid"
 
-# A pocket lighter: a carryable utensil, picked up and carried like the tongs. Its primary
-# action (left mouse) strikes a flame -- the `flame` ability. The button and prompt are
-# wired; what a flame actually does (lighting the fluid-soaked logs) is a stub for now.
+# A long-barrelled utility lighter: a carryable utensil, picked up and carried like the
+# tongs. Its primary action (left mouse) strikes a flame -- the `flame` ability -- which
+# burns at the muzzle for as long as the button is held.
+#
+# The flame is what makes it hot. `heat_starts_on = false` leaves it cold in the hand (and
+# in the dirt); striking it switches its heat on, and releasing switches it back off, so
+# it warms what it is held to only while it is actually burning. Hot at the tip like a real
+# flame but with a short `heat_reach`: it has to be held to a thing to do anything to it,
+# which is what makes it a lighter and not a blowtorch. That reach is set by the player's
+# arm, not by realism -- a carried item hangs about 0.8m under the eye, so a muzzle held
+# down at a log on the ground is still the better part of a metre off it, and a reach much
+# tighter than this would be a flame that can never light anything a standing player holds
+# it to. It is still well under the lit grill's own 1.0. There is no
+# `heat_offset` -- alone among heat sources, the lighter's hot centre is placed in code, at
+# the muzzle its own model defines, because that is exactly where the fire is drawn.
 [tool.lighter]
 model = "lighter.glb"
 knock = 1.0
 sound = "metal"
 ability = "flame"
+heat = 900.0
+heat_reach = 1.2
+heat_starts_on = false
 
 # --- Props: furniture and scenery --------------------------------------------------
 
