@@ -86,6 +86,10 @@ carryable = [
   # The lighter fluid, on the dirt pad between the table and the fire pit -- pick it up
   # like the tongs; its primary action squirts. Spawned a hair above the pad to settle.
   {type = "lighter fluid", pos = [4.3, 0.15, 3.9], yaw = -20.0},
+
+  # The lighter, on the picnic table beside the tray -- far enough out along the table to
+  # clear the tray and its meats, a hair above the top so physics settles it flat.
+  {type = "lighter", pos = [0.60, 0.80, 2.05], yaw = -35.0},
 ]
 
 # The fire pit's stacking zone, over the firepit prop at [6.5, 0, 4.5]. Carry a log here

@@ -26,9 +26,10 @@ enum class HoldStyle { Flat, Tongs, Tray };
 // level's fire-pit zone, drops it onto the pit in a stacked pose and takes it out of the
 // simulation so it can no longer be knocked about. `SprayFluid` is the lighter fluid: the
 // primary action squirts it (behaviour still a stub -- the button is wired, the effect is
-// to come). `None` is an item that simply does nothing yet -- the starting point every
-// carryable has until a real behaviour is filled in here.
-enum class Ability { None, GripMeat, StackInFirePit, SprayFluid };
+// to come). `Flame` is the lighter: the primary action strikes a flame (behaviour also
+// still a stub). `None` is an item that simply does nothing yet -- the starting point
+// every carryable has until a real behaviour is filled in here.
+enum class Ability { None, GripMeat, StackInFirePit, SprayFluid, Flame };
 
 // The serving surface a carryable provides, as pure data: how close (metres, measured
 // in the ground plane) a carried meat must be brought to deliver it, and where the

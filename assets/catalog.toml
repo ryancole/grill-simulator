@@ -142,6 +142,15 @@ knock = 2.0
 sound = "metal"
 ability = "spray_fluid"
 
+# A pocket lighter: a carryable utensil, picked up and carried like the tongs. Its primary
+# action (left mouse) strikes a flame -- the `flame` ability. The button and prompt are
+# wired; what a flame actually does (lighting the fluid-soaked logs) is a stub for now.
+[tool.lighter]
+model = "lighter.glb"
+knock = 1.0
+sound = "metal"
+ability = "flame"
+
 # --- Props: furniture and scenery --------------------------------------------------
 
 # The charcoal grill base: a dynamic body that radiates heat from its grate. Its lid is

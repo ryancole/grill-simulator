@@ -627,6 +627,11 @@ std::string Props::PromptText() const {
         if (items_[carried_].ability == Ability::SprayFluid) {
             return "[" + primary_label_ + "] Spray lighter fluid";
         }
+        // The lighter strikes a flame on the primary action -- like the fluid's squirt,
+        // available the whole time it is held, so its button shows throughout.
+        if (items_[carried_].ability == Ability::Flame) {
+            return "[" + primary_label_ + "] Flame";
+        }
         return "[E] Drop";
     }
     if (hovered_ >= 0) {
@@ -764,6 +769,8 @@ void Props::TriggerAbility(int item, FXMMATRIX camera_to_world) {
         // held-spray block in Update drives (see kSprayPerSecond) -- an edge fire here
         // would spit a single droplet, so the press itself does nothing extra.
         break;
+    case Ability::Flame:
+        break; // The lighter's flame: wired, but no behaviour yet.
     }
 }
 
