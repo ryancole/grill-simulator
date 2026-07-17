@@ -28,8 +28,9 @@ class PxParticleBuffer;
 // the spans stay empty, and the lighter fluid simply squirts nothing.
 //
 // A session-persistent system, like Physics -- the particle system rides the one
-// physics scene. A level swap calls Clear() to park every droplet; the per-level
-// consequences of the fluid (the fire pit's wetness) live in Props, not here.
+// physics scene. A level swap calls Clear() to park every droplet. The spray is all
+// the fluid does today: nothing reads the droplets back to decide anything, so a
+// squirt is so far only something to look at.
 //
 // The particle pool is fixed. Every slot is always active in the simulation; an
 // idle slot is "parked": pinned (zero inverse mass, so it never moves or falls)
@@ -55,18 +56,14 @@ public:
 
     // Once per frame, after Physics::Step: reads the simulated positions back from
     // the GPU, retires droplets past their lifetime, injects the sprays queued
-    // since the last frame, and rebuilds Positions()/Instances(). The injected
-    // droplets take effect on the next physics step, but they appear in this
-    // frame's draw list already -- at the nozzle, where they were queued.
+    // since the last frame, and rebuilds Instances(). The injected droplets take
+    // effect on the next physics step, but they appear in this frame's draw list
+    // already -- at the nozzle, where they were queued.
     void Update(float dt);
 
-    // Parks every droplet at once: the level-swap reset, so no puddle survives
-    // into (or re-primes the fire pit of) a freshly loaded level.
+    // Parks every droplet at once: the level-swap reset, so no puddle sprayed in one
+    // level survives into the next.
     void Clear();
-
-    // The live droplets' world positions this frame, for gameplay to test (the
-    // fire pit's wetness). Rebuilt by Update; empty while nothing is in flight.
-    std::span<const DirectX::XMFLOAT3> Positions() const { return positions_; }
 
     // The live droplets as draw instances -- little tinted cubes of the shared
     // unit-cube model -- for the renderer's world pass. Rebuilt by Update.
@@ -103,7 +100,6 @@ private:
     // paths, so an arbitrarily seeded engine is fine.
     std::minstd_rand rng_{20260716u};
 
-    // Rebuilt by Update for the renderer and for gameplay queries.
-    std::vector<DirectX::XMFLOAT3> positions_;
+    // Rebuilt by Update for the renderer.
     std::vector<MeshInstance> instances_;
 };

@@ -56,11 +56,13 @@ public:
     // cook frozen at that band. The judging happens later: `turn_in` is the level's
     // static delivery zone (null on a sandbox level), and pressing Interact while
     // carrying the loaded tray inside it hands every stuck meat to `objectives` at once
-    // and ends the level -- see TurnedIn. `fluid` is the session's GPU fluid: the
-    // lighter-fluid can sprays into it while the primary action is held, and droplets
-    // pooling inside `fire_pit` prime the pit until the stacked logs light. `flame` is
-    // the session's flame effect, which the lighter burns into at its nozzle for as long
-    // as the primary action is held -- a visual only, so far.
+    // and ends the level -- see TurnedIn. `fire_pit` is the level's fire-pit zone (null on
+    // a level without one): a log held over it is stacked onto it by the primary action.
+    // `fluid` is the session's GPU fluid, which the lighter-fluid can sprays into while the
+    // primary action is held; the fluid has no consequence beyond the spray itself today.
+    // `flame` is the session's flame effect, which the lighter burns at its muzzle for as
+    // long as the primary action is held -- and which is what makes the lighter hot.
+    // Nothing lights the fire pit yet.
     void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt,
                 std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
                 const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid, Flame* flame);
@@ -314,11 +316,6 @@ private:
     // carried so a fast frame still spits a steady stream. Reset the moment the button
     // is up, so a new hold never starts with a stale fraction.
     float spray_carry_ = 0.0f;
-    // How soaked the fire pit is: the count of fluid droplets inside the pit column,
-    // integrated over seconds. Crossing the lighting threshold latches pit_lit_ and
-    // switches on every stacked log's heat; per-level state, reset with Props.
-    float pit_wetness_ = 0.0f;
-    bool pit_lit_ = false;
 
     // Rebuilt each Update: every resting item, the carried one, and the one the
     // outline glows around.

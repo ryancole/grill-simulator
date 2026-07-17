@@ -46,11 +46,6 @@ constexpr float kThrowSpin = 2.5f;   // rad/s of forward tumble.
 constexpr float kSprayPerSecond = 260.0f;
 constexpr float kSpraySpeed = 7.5f; // m/s out of the nozzle.
 
-// How much pooled fluid lights the fire pit: droplet-seconds inside the pit column.
-// A stream aimed into the pit banks its resident droplets every second, so a
-// deliberate half-second-to-second of spray crosses this; a stray splash does not.
-constexpr float kWetnessToLight = 15.0f;
-
 // A lit log's tint: multiplied into the log model's own browns, it pushes the wood
 // toward glowing ember orange -- the visible difference between a cold stack and a
 // burning one. The red channel rides above one so the HDR pipeline blooms it a touch.
@@ -462,29 +457,6 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     }
 
-    // Fluid pooling in the fire pit primes it. Count the droplets inside the pit column
-    // and bank that over seconds -- a passing splash barely registers, a stream held on
-    // the pit crosses the threshold in about a second -- then light every stacked log at
-    // once. Latched: the pit stays lit, and a log stacked onto it later catches as it is
-    // placed (see PlaceInFirePit).
-    if (fluid != nullptr && fire_pit != nullptr && !pit_lit_) {
-        int soaked = 0;
-        for (const XMFLOAT3& p : fluid->Positions()) {
-            if (fire_pit->Contains(XMLoadFloat3(&p))) {
-                ++soaked;
-            }
-        }
-        pit_wetness_ += static_cast<float>(soaked) * dt;
-        if (pit_wetness_ >= kWetnessToLight) {
-            pit_lit_ = true;
-            for (Item& item : items_) {
-                if (item.in_fire_pit && item.heat) {
-                    item.heat->SetOn(true);
-                }
-            }
-        }
-    }
-
     // What the prompt reports this frame: nothing to pick while carrying, else
     // whatever is in reach and looked at. Cheap enough to recompute outright for
     // a handful of items.
@@ -877,12 +849,6 @@ void Props::PlaceInFirePit(int log, XMFLOAT3 pit_center) {
     // log simply draws at this pose from now on. Mark it placed and empty the hand.
     item.in_fire_pit = true;
     carried_ = -1;
-
-    // A log stacked onto an already-burning pit catches as it lands, so building the
-    // fire up after lighting it works in either order.
-    if (pit_lit_ && item.heat) {
-        item.heat->SetOn(true);
-    }
 }
 
 void Props::TurnIn(int tray, Objectives& objectives) {

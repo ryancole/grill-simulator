@@ -276,7 +276,7 @@ int Run(HINSTANCE instance, int show_command) {
         game.world.emplace(level, game.renderer, game.physics);
         game.camera.Respawn(level.player_spawn, level.player_facing);
         // Park any droplets still in flight: the fluid is session state, and a puddle
-        // must not survive into (or pre-soak the fire pit of) the fresh level.
+        // sprayed in one level must not survive into the next.
         game.fluid.Clear();
         // Likewise the flame: a lighter lit as the level changed must not leave its fire
         // hanging in the air of the new one.
@@ -655,9 +655,8 @@ int Run(HINSTANCE instance, int show_command) {
         // player's controller all move on it. Simulate first, then read poses.
         game.physics.Step(dt);
         // The fluid reads its droplet positions back from the stepped scene and injects
-        // whatever last frame's spray queued -- after the step (the readback wants this
-        // frame's results) and before the props update (which tests the fire pit's
-        // wetness against the fresh positions).
+        // whatever last frame's spray queued -- after the step, which is what the readback
+        // wants this frame's results of.
         game.fluid.Update(dt);
         // The flame ages its specks on the frame clock, not the physics one: it collides
         // with nothing, so it has no reason to wait for a step. Unconditional -- specks
