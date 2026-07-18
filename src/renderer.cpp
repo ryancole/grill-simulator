@@ -77,13 +77,18 @@ struct Constants {
     // and reuses the DWORD that was only padding before shadows existed.
     float shadow_receive;
     // The glTF metallic-roughness factors, each multiplying its channel of the
-    // metallic-roughness texture. They open a fresh cbuffer row, so two DWORDs of
-    // padding follow to keep the C++ size a whole 16-byte multiple like the HLSL
-    // side.
+    // metallic-roughness texture. They open a fresh cbuffer row, which `emissive`
+    // then shares, leaving one DWORD of padding to keep the C++ size a whole
+    // 16-byte multiple like the HLSL side.
     float metallic;
     float roughness;
+    // Self-lit multiple of the base colour, added on top of the shading (see
+    // MeshInstance::emissive). This rides the row's spare DWORD deliberately: the
+    // signature is already at the 64-DWORD ceiling noted below, so a fresh row --
+    // an emissive colour, say, rather than a strength on the tint -- would not fit
+    // without merging the descriptor tables.
+    float emissive;
     float pad0;
-    float pad1;
 };
 
 static_assert(sizeof(Constants) % sizeof(UINT) == 0);
@@ -3314,6 +3319,7 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
             constants.shadow_receive = shadow_receive;
             constants.metallic = primitive.metallic;
             constants.roughness = primitive.roughness;
+            constants.emissive = instance.emissive;
 
             command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
             command_list_->SetGraphicsRootDescriptorTable(1, primitive.base_color_texture);

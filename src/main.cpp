@@ -2,6 +2,7 @@
 #include "audio.hpp"
 #include "camera.hpp"
 #include "dx_common.hpp"
+#include "flame.hpp"
 #include "fluid.hpp"
 #include "furniture.hpp"
 #include "input.hpp"
@@ -52,6 +53,10 @@ struct Game {
     // The GPU fluid rides the physics scene, so it sits between Physics (whose CUDA
     // context and scene it borrows -- declared after, destroyed before) and the world.
     Fluid fluid{physics};
+    // The flames, on the other hand, need neither the GPU nor the physics scene -- rising
+    // specks with nothing to collide against. One system draws every fire (the lighter's
+    // and each burning log's). Session state like the fluid, parked by the same level swap.
+    Flame flame;
     Camera camera{physics};
     Viewmodel viewmodel{Scene::kCubeModel};
     Input input;
@@ -271,8 +276,11 @@ int Run(HINSTANCE instance, int show_command) {
         game.world.emplace(level, game.renderer, game.physics);
         game.camera.Respawn(level.player_spawn, level.player_facing);
         // Park any droplets still in flight: the fluid is session state, and a puddle
-        // must not survive into (or pre-soak the fire pit of) the fresh level.
+        // sprayed in one level must not survive into the next.
         game.fluid.Clear();
+        // Likewise the flame: a lighter lit as the level changed must not leave its fire
+        // hanging in the air of the new one.
+        game.flame.Clear();
     };
     // A level is loaded at startup even though the game launches into the menu: the
     // menu draws with the font atlas that rides a level's upload, and having one
@@ -647,10 +655,13 @@ int Run(HINSTANCE instance, int show_command) {
         // player's controller all move on it. Simulate first, then read poses.
         game.physics.Step(dt);
         // The fluid reads its droplet positions back from the stepped scene and injects
-        // whatever last frame's spray queued -- after the step (the readback wants this
-        // frame's results) and before the props update (which tests the fire pit's
-        // wetness against the fresh positions).
+        // whatever last frame's spray queued -- after the step, which is what the readback
+        // wants this frame's results of.
         game.fluid.Update(dt);
+        // The flame ages its specks on the frame clock, not the physics one: it collides
+        // with nothing, so it has no reason to wait for a step. Unconditional -- specks
+        // already in the air burn out whether or not the lighter is lit this frame.
+        game.flame.Update(dt);
 
         float mouse_dx = 0.0f;
         float mouse_dy = 0.0f;
@@ -681,7 +692,7 @@ int Run(HINSTANCE instance, int show_command) {
         game.world->props().Update(camera_to_world, game.actions, dt,
                                    game.world->furniture().HeatSources(),
                                    game.world->turn_in_zone(), game.world->fire_pit_zone(),
-                                   game.world->objectives(), &game.fluid);
+                                   game.world->objectives(), &game.fluid, &game.flame);
 
         // Turning the loaded tray in at the delivery zone ends the level: Props latches it
         // during the Update above. Drop the mouse look and raise the results screen, whose
@@ -772,12 +783,14 @@ int Run(HINSTANCE instance, int show_command) {
         highlights.insert(highlights.end(), grill_highlight.begin(), grill_highlight.end());
 
         // The world draw list: the props where they lie plus any lighter-fluid droplets
-        // in flight -- both plain mesh instances, merged here so the renderer keeps its
-        // one world span. Empty droplets cost an empty append.
+        // in flight and any flame burning -- all plain mesh instances, merged here so the
+        // renderer keeps its one world span. Empty droplets cost an empty append.
         std::vector<MeshInstance> world_instances(props.WorldInstances().begin(),
                                                   props.WorldInstances().end());
         const std::span<const MeshInstance> droplets = game.fluid.Instances();
         world_instances.insert(world_instances.end(), droplets.begin(), droplets.end());
+        const std::span<const MeshInstance> flame = game.flame.Instances();
+        world_instances.insert(world_instances.end(), flame.begin(), flame.end());
 
         game.renderer.Render(game.world->scene(), world_instances, highlights,
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),

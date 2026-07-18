@@ -225,17 +225,14 @@ void Fluid::Update(float dt) {
                                                        PxParticleBufferFlag::eUPDATE_VELOCITY));
     }
 
-    // Rebuild what the rest of the game sees: the live positions and their draw
-    // instances. A handful of hundreds at most, remade flat each frame like the
-    // props' draw lists.
-    positions_.clear();
+    // Rebuild what the rest of the game sees: the live droplets' draw instances. A
+    // handful of hundreds at most, remade flat each frame like the props' draw lists.
     instances_.clear();
     for (int i = 0; i < kMaxDroplets; ++i) {
         if (age_[i] <= 0.0f) {
             continue;
         }
         const XMFLOAT4& p = pos_inv_mass_[i];
-        positions_.push_back(XMFLOAT3(p.x, p.y, p.z));
 
         MeshInstance instance{};
         instance.model = Scene::kCubeModel;
@@ -256,7 +253,6 @@ void Fluid::Clear() {
         Park(i);
     }
     pending_.clear();
-    positions_.clear();
     instances_.clear();
     {
         PxScopedCudaLock lock(*physics_->Cuda());

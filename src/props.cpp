@@ -1,6 +1,7 @@
 #include "props.hpp"
 
 #include "actions.hpp"
+#include "flame.hpp"
 #include "fluid.hpp"
 #include "objectives.hpp"
 #include "physics.hpp"
@@ -45,15 +46,15 @@ constexpr float kThrowSpin = 2.5f;   // rad/s of forward tumble.
 constexpr float kSprayPerSecond = 260.0f;
 constexpr float kSpraySpeed = 7.5f; // m/s out of the nozzle.
 
-// How much pooled fluid lights the fire pit: droplet-seconds inside the pit column.
-// A stream aimed into the pit banks its resident droplets every second, so a
-// deliberate half-second-to-second of spray crosses this; a stray splash does not.
-constexpr float kWetnessToLight = 15.0f;
-
 // A lit log's tint: multiplied into the log model's own browns, it pushes the wood
 // toward glowing ember orange -- the visible difference between a cold stack and a
 // burning one. The red channel rides above one so the HDR pipeline blooms it a touch.
 constexpr XMFLOAT3 kEmberTint{1.35f, 0.62f, 0.28f};
+
+// How much bigger a caught object's fire stands than the lighter's pilot tongue (scale
+// one). A log fire wants to read as a fire, not the same little flame the lighter carries,
+// so its Flame::Emit is scaled up -- taller, wider, and denser (see Flame::Emit).
+constexpr float kIgnitedFlameScale = 3.0f;
 
 // A carried object hangs by the right hand -- see the viewmodel's wrist, which
 // sits near (0.27, -0.35, 0.78) in this same eye space. Flat things are tipped
@@ -159,7 +160,7 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
         // so the item can swap look as it cooks.
         Add(spawn.models, pool[spawn.models.front().model], spawn.name, spawn.pos, spawn.yaw,
             HoldFor(spawn.hold), spawn.knock_rating, spawn.impact_sound, spawn.cook, spawn.serve,
-            spawn.ability, spawn.heat, spawn.heat_offset);
+            spawn.ability, spawn.heat, spawn.heat_offset, spawn.ignitable);
     }
 }
 
@@ -231,8 +232,12 @@ void Props::RebuildTransform(Item& item) {
 }
 
 XMFLOAT3 Props::ItemTint(const Item& item) {
-    // A burning log glows ember orange -- the one visible cue the pit is lit.
-    if (item.in_fire_pit && item.heat && item.heat->IsOn()) {
+    // Anything that has caught fire glows ember orange -- the one visible cue a thing is
+    // burning, wherever it lies. Keyed on being ignitable rather than on lying in the pit:
+    // a log lit on the grass is just as alight as one in the fire, and a log is not the
+    // only thing here whose heat is on -- the lighter's is too, while it burns, and a
+    // lighter is the thing doing the lighting, not a thing that caught.
+    if (item.ignitable && item.heat && item.heat->IsOn()) {
         return kEmberTint;
     }
     // Raw meat's tint is white, so this leaves uncooked food and the non-cooking
@@ -263,7 +268,7 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
                 XMFLOAT3 position, float yaw_degrees, FXMMATRIX held_local, float knock_rating,
                 ImpactSound impact_sound, std::optional<CookProfile> cook,
                 std::optional<ServeDef> serve, Ability ability, std::optional<HeatSource> heat,
-                XMFLOAT3 heat_offset) {
+                XMFLOAT3 heat_offset, std::optional<IgnitableRequirements> ignitable) {
     Item item{};
     item.stages = std::move(stages);
     item.name = std::move(name);
@@ -275,6 +280,7 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
     item.serve = serve;
     item.heat = heat;
     item.heat_offset = heat_offset;
+    item.ignitable = ignitable;
     DeriveBodyShape(item, base_model);
 
     // Seed the body so the model origin lands at `position`, yawed -- the same
@@ -295,7 +301,8 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
 
 void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt,
                    std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                   const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid) {
+                   const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid,
+                   Flame* flame) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
@@ -432,27 +439,22 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         spray_carry_ = 0.0f;
     }
 
-    // Fluid pooling in the fire pit primes it. Count the droplets inside the pit column
-    // and bank that over seconds -- a passing splash barely registers, a stream held on
-    // the pit crosses the threshold in about a second -- then light every stacked log at
-    // once. Latched: the pit stays lit, and a log stacked onto it later catches as it is
-    // placed (see PlaceInFirePit).
-    if (fluid != nullptr && fire_pit != nullptr && !pit_lit_) {
-        int soaked = 0;
-        for (const XMFLOAT3& p : fluid->Positions()) {
-            if (fire_pit->Contains(XMLoadFloat3(&p))) {
-                ++soaked;
-            }
+    // The lighter is hot for as long as the primary action is held, like the can's spray
+    // above and unlike the edge-triggered abilities: its heat switches on with the flame
+    // and off when the button is released, so it warms (and lights) what it is held to only
+    // while it burns. Only the flag is set here -- the fire itself is drawn below, in the
+    // one pass that shows every burning thing. Set before the ignition check further down,
+    // so a log held under the flame feels the lighter's heat this frame. Every Flame item
+    // is visited, not just the carried one, so a lighter dropped mid-burn goes cold rather
+    // than lying in the dirt radiating.
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        Item& item = items_[i];
+        if (item.ability != Ability::Flame || !item.heat) {
+            continue;
         }
-        pit_wetness_ += static_cast<float>(soaked) * dt;
-        if (pit_wetness_ >= kWetnessToLight) {
-            pit_lit_ = true;
-            for (Item& item : items_) {
-                if (item.in_fire_pit && item.heat) {
-                    item.heat->SetOn(true);
-                }
-            }
-        }
+        const bool burning =
+            i == carried_ && flame != nullptr && actions.IsActive(Action::PrimaryAction);
+        item.heat->SetOn(burning);
     }
 
     // What the prompt reports this frame: nothing to pick while carrying, else
@@ -496,8 +498,76 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
         if (items_[i].heat) {
             const XMMATRIX pose = CurrentPose(i, camera_to_world);
-            items_[i].heat->SetOrigin(
-                XMVector3Transform(XMLoadFloat3(&items_[i].heat_offset), pose));
+            // The lighter is the exception to the authored offset: its heat comes off its
+            // flame, which stands at the muzzle the model itself defines (see
+            // NozzleLocal), so the two cannot be spelled separately without drifting
+            // apart. Everything else radiates from the point its catalog entry names.
+            const XMVECTOR local = items_[i].ability == Ability::Flame
+                                       ? NozzleLocal(items_[i])
+                                       : XMLoadFloat3(&items_[i].heat_offset);
+            items_[i].heat->SetOrigin(XMVector3Transform(local, pose));
+        }
+    }
+
+    // Light anything ignitable the air has got hot enough around: hold the lighter's flame
+    // to a log and it catches, and once caught it is a heat source itself -- which is the
+    // whole point, since that is what cooks the food over it and what lights the next log.
+    // Igniting is one-way and needs no flag of its own: an item is alight exactly when its
+    // own heat is on, so a lit one is skipped and nothing here ever puts a fire out.
+    //
+    // After the origin refresh above (so every source is where it is this frame) and before
+    // the cook below, so a log that catches this frame warms the food over it this frame.
+    // Fire still spreads -- a lit log is a heat source the next one reads -- but no longer
+    // in a single pass: each log has to heat through to its own ignition temperature first
+    // (see IgnitableRequirements), so a stack catches progressively over seconds rather
+    // than flashing over the instant the first log lights.
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        Item& item = items_[i];
+        if (!item.ignitable || !item.heat || item.heat->IsOn()) {
+            continue;
+        }
+        // Warm it toward the air at its own heat centre -- the middle of the round, which
+        // the origin refresh above has already placed in the world. The point that will
+        // radiate once it catches is the point that has to get hot, which is both the
+        // symmetric rule and the fair one: an item's model origin sits on its *underside*,
+        // so asking there would measure the air at the spot furthest from a flame held
+        // over it. It catches once its own temperature has climbed past the threshold, not
+        // the instant the air does -- so the flame has to be held on it, and a flame taken
+        // away too soon lets it cool back down.
+        const XMFLOAT3 hot_centre = item.heat->Origin();
+        const XMVECTOR point = XMLoadFloat3(&hot_centre);
+        item.ignitable->Update(AmbientAt(point, heat_sources), dt);
+        if (item.ignitable->Ignited()) {
+            item.heat->SetOn(true);
+        }
+    }
+
+    // Draw a flame on everything that is burning right now: the lighter at its muzzle and
+    // every log that has caught. One pass over the whole yard, keyed on the heat being on
+    // -- the single truth of "is this on fire" -- so the lighter (its heat set above), a
+    // log lit this very frame (the ignition just above ran first), and a log still burning
+    // from before all read the same way, and a released lighter simply stops. The fire
+    // stands at each source's own hot centre, which the origin refresh placed: the lighter's
+    // muzzle, a log's middle. A caught log burns bigger than the lighter's pilot tongue, so
+    // its flame is scaled up. Emitting is all this does -- Flame::Update ages and draws the
+    // specks, and the heat that cooks and spreads is the HeatSource, already handled.
+    if (flame != nullptr) {
+        for (const Item& item : items_) {
+            if (!item.heat || !item.heat->IsOn()) {
+                continue;
+            }
+            // A caught object's fire stands on top of it, not down at its hot centre --
+            // that centre is the middle of the log, and a fire emitted there burns up
+            // inside the wood where the glowing body hides it. Lift the origin by the
+            // object's own half-height so the fire roots at its top surface and rises into
+            // the open air. In world up: fire climbs the same way whichever way a knocked
+            // log lies. The lighter is not ignitable, so its flame stays at the muzzle.
+            XMFLOAT3 origin = item.heat->Origin();
+            if (item.ignitable) {
+                origin.y += item.half_extents.y;
+            }
+            const float scale = item.ignitable ? kIgnitedFlameScale : 1.0f;
+            flame->Emit(origin, dt, scale);
         }
     }
 
@@ -517,19 +587,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         const XMMATRIX pose = i == carried_
                                   ? XMLoadFloat4x4(&item.held_local) * camera_to_world
                                   : XMLoadFloat4x4(&item.resting);
-        const XMVECTOR point = pose.r[3];
-        float ambient_f = CookInformation::kRoomTempF;
-        for (const HeatSource& source : heat_sources) {
-            ambient_f = std::max(ambient_f, source.TemperatureAt(point));
-        }
-        // A carryable's own heat (a lit log) warms nearby meats too. An off source returns
-        // room air, so an unlit stack costs a call but changes nothing.
-        for (const Item& other : items_) {
-            if (other.heat) {
-                ambient_f = std::max(ambient_f, other.heat->TemperatureAt(point));
-            }
-        }
-        item.cook->Update(ambient_f, dt);
+        item.cook->Update(AmbientAt(pose.r[3], heat_sources), dt);
     }
 
     // Rebuild the draw lists from the current state. There are a handful of
@@ -626,6 +684,11 @@ std::string Props::PromptText() const {
         // held, so its button shows the whole time (Interact still drops it).
         if (items_[carried_].ability == Ability::SprayFluid) {
             return "[" + primary_label_ + "] Spray lighter fluid";
+        }
+        // The lighter strikes a flame on the primary action -- like the fluid's squirt,
+        // available the whole time it is held, so its button shows throughout.
+        if (items_[carried_].ability == Ability::Flame) {
+            return "[" + primary_label_ + "] Flame";
         }
         return "[E] Drop";
     }
@@ -764,6 +827,8 @@ void Props::TriggerAbility(int item, FXMMATRIX camera_to_world) {
         // held-spray block in Update drives (see kSprayPerSecond) -- an edge fire here
         // would spit a single droplet, so the press itself does nothing extra.
         break;
+    case Ability::Flame:
+        break; // The lighter's flame: wired, but no behaviour yet.
     }
 }
 
@@ -834,12 +899,6 @@ void Props::PlaceInFirePit(int log, XMFLOAT3 pit_center) {
     // log simply draws at this pose from now on. Mark it placed and empty the hand.
     item.in_fire_pit = true;
     carried_ = -1;
-
-    // A log stacked onto an already-burning pit catches as it lands, so building the
-    // fire up after lighting it works in either order.
-    if (pit_lit_ && item.heat) {
-        item.heat->SetOn(true);
-    }
 }
 
 void Props::TurnIn(int tray, Objectives& objectives) {
@@ -865,4 +924,29 @@ XMMATRIX Props::CurrentPose(int index, FXMMATRIX camera_to_world) const {
         return XMLoadFloat4x4(&items_[index].held_local) * camera_to_world;
     }
     return XMLoadFloat4x4(&items_[index].resting);
+}
+
+float Props::AmbientAt(FXMVECTOR point, std::span<const HeatSource> heat_sources) const {
+    // The hottest thing wins: heat does not stack here, so standing a log in a campfire
+    // and a lit grill at once is as hot as the hotter of the two, not their sum.
+    float ambient_f = CookInformation::kRoomTempF;
+    for (const HeatSource& source : heat_sources) {
+        ambient_f = std::max(ambient_f, source.TemperatureAt(point));
+    }
+    // A carryable's own heat -- a lit log, a struck lighter -- warms what is near it too.
+    // An off source returns room air, so an unlit stack costs a call and changes nothing.
+    // An item's own heat is included: harmless, since a thing is only hot once it is lit,
+    // and once lit there is nothing left to light.
+    for (const Item& other : items_) {
+        if (other.heat) {
+            ambient_f = std::max(ambient_f, other.heat->TemperatureAt(point));
+        }
+    }
+    return ambient_f;
+}
+
+XMVECTOR Props::NozzleLocal(const Item& item) const {
+    // The box's far face down Z, on the model's own axis. A point, so w is 1: the
+    // callers carry it into the world through the item's pose, which has to translate it.
+    return XMVectorSet(0.0f, 0.0f, item.com_offset.z + item.half_extents.z, 1.0f);
 }
