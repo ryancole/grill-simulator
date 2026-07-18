@@ -237,8 +237,8 @@ ability = "stack_in_fire_pit"
 # nothing until it is switched on. `heat` is the air temperature at its centre when lit,
 # `heat_reach` how far that carries, `heat_offset` the hot centre lifted to the middle of
 # the round.
-heat = 500.0
-heat_reach = 1.6
+heat = 560.0
+heat_reach = 2.4
 heat_offset = [0.0, 0.2, 0.0]
 heat_starts_on = false
 # ...and `ignite_temp` is the temperature it must heat through to before it catches -- it
@@ -248,9 +248,12 @@ heat_starts_on = false
 # something held under it at arm's length (the muzzle cannot get closer than ~0.55m to the
 # ground), so this has to sit under that or the lighter could never light a fire at all. The
 # lit grill's grate is 425F, so a log left leaning on the barbecue does *not* go up. It also
-# sets how fire spreads: a lit log is itself 500F, which clears this out to about a third of
-# a metre, so a stacked pile catches from its neighbours and a log dropped across the
-# clearing does not.
+# sets how fire spreads: a lit log is itself 560F over a 2.4m reach, which holds the air past
+# this 450F out to about 0.7m -- comfortably past the ~0.46m a stacked pile's logs sit apart
+# (and the ~0.59m up to the crossing layer), so a stack catches from its neighbours over a few
+# seconds, while a log dropped across the clearing stays cold. (A log is ~0.46m wide, so the
+# earlier 500F/1.6m fire only cleared 450F to ~0.34m -- short of the stack spacing, and a
+# neighbour warmed toward ~414F and stalled there without ever catching.)
 ignite_temp = 450.0
 # How slowly it heats through to that. At 3s a log held right in the lighter's ~560F flame
 # takes about four seconds to catch -- a deliberate hold, not a tap -- and a log warmed by a

@@ -18,6 +18,7 @@
 #include <vector>
 
 class Actions;
+class Flame;
 class Fluid;
 class Objectives;
 class Physics;
@@ -61,12 +62,13 @@ public:
     // a level without one): a log held over it is stacked onto it by the primary action.
     // `fluid` is the session's GPU fluid, which the lighter-fluid can sprays into while the
     // primary action is held; the fluid has no consequence beyond the spray itself today.
-    // The lighter's own flame, and every burning log's, are volumetric NVIDIA Flow fires now
-    // (see FlowEmitters) -- there is no separate flame effect to pass in. Nothing lights the
-    // fire pit yet.
+    // Every burning log's fire is a volumetric NVIDIA Flow fire (see FlowEmitters). The
+    // lighter's own muzzle flame is the exception: it burns as `flame`, a CPU particle
+    // system, for as long as the primary action is held -- its little pilot tongue sits too
+    // close to the eye for the Flow pass to show. Nothing lights the fire pit yet.
     void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt,
                 std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid);
+                const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid, Flame* flame);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
