@@ -3,6 +3,9 @@
 # complete reset.
 build/
 
+# Packaged release zips and their staging folders (tools/package.ps1).
+dist/
+
 # Only reachable if a tool is run outside the presets: language-server caches
 # and stray compilation databases written next to the source root.
 .cache/
