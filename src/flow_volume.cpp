@@ -159,24 +159,32 @@ void FillFireColorMap(NvFlowContext* context, NvFlowRenderMaterialHandle materia
     if (!map.data || map.dim == 0) {
         return;
     }
+    struct Point {
+        float pos;
+        NvFlowFloat4 rgba;
+    };
+    static const Point kCurve[] = {
+        {0.00f, {0.090000f, 0.090000f, 0.100000f, 0.35f}}, // cool grey smoke
+        {0.35f, {0.240000f, 0.170000f, 0.130000f, 0.55f}}, // warm soot
+        {0.65f, {0.835294f, 0.392157f, 0.117647f, 0.80f}}, // orange (demo)
+        {0.85f, {1.270000f, 1.200000f, 0.390000f, 0.85f}}, // yellow, HDR (demo)
+        {1.00f, {1.500000f, 1.500000f, 1.500000f, 0.80f}}, // white-hot, HDR (demo)
+    };
+    constexpr int kCount = static_cast<int>(sizeof(kCurve) / sizeof(kCurve[0]));
     for (NvFlowUint i = 0; i < map.dim; ++i) {
         const float u = static_cast<float>(i) / static_cast<float>(map.dim - 1);
-        NvFlowFloat4 c;
-        if (u < 0.5f) {
-            // Cool half: dark smoke fading up from transparent to a dim ember.
-            const float t = u / 0.5f;
-            c.x = 0.05f + 0.55f * t;
-            c.y = 0.05f + 0.20f * t;
-            c.z = 0.05f + 0.05f * t;
-            c.w = 0.15f + 0.35f * t;
-        } else {
-            // Hot half: orange through to a bright yellow-white core.
-            const float t = (u - 0.5f) / 0.5f;
-            c.x = 0.60f + 0.40f * t;
-            c.y = 0.25f + 0.70f * t;
-            c.z = 0.10f + 0.65f * t;
-            c.w = 0.50f + 0.50f * t;
+        int seg = 0;
+        while (seg + 2 < kCount && u > kCurve[seg + 1].pos) {
+            ++seg;
         }
+        const Point& a = kCurve[seg];
+        const Point& b = kCurve[seg + 1];
+        const float t = b.pos > a.pos ? (u - a.pos) / (b.pos - a.pos) : 0.0f;
+        NvFlowFloat4 c;
+        c.x = a.rgba.x + (b.rgba.x - a.rgba.x) * t;
+        c.y = a.rgba.y + (b.rgba.y - a.rgba.y) * t;
+        c.z = a.rgba.z + (b.rgba.z - a.rgba.z) * t;
+        c.w = a.rgba.w + (b.rgba.w - a.rgba.w) * t;
         map.data[i] = c;
     }
     NvFlowRenderMaterialColorUnmap(context, material);
@@ -195,6 +203,19 @@ void CreateFlowObjects(FlowVolume::Impl* impl) {
     gridDesc.initialLocation = {0.0f, 2.5f, 5.0f};
     gridDesc.halfSize = {4.0f, 4.0f, 4.0f};
     impl->grid = NvFlowCreateGrid(impl->context, &gridDesc);
+
+    // Tune how the fire moves: vorticity adds the turbulent curl that makes flame and smoke
+    // billow rather than stand as a smooth jet, and a stronger buoyancy lifts the hot column.
+    // Values from Flow's own simple-flame demo. Applied to the grid's default material, which
+    // the default emitter (emitMaterialIndex 0) feeds.
+    NvFlowGridMaterialParams gridMat;
+    NvFlowGridMaterialParamsDefaults(&gridMat);
+    gridMat.vorticityStrength = 5.0f;
+    gridMat.vorticityVelocityMask = 0.0f;
+    gridMat.vorticityConstantMask = 1.0f;
+    gridMat.smoke.macCormackBlendFactor = 0.75f;
+    gridMat.buoyancyPerTemp *= 2.0f;
+    NvFlowGridSetMaterialParams(impl->grid, NvFlowGridGetDefaultMaterial(impl->grid), &gridMat);
 
     NvFlowRenderMaterialPoolDesc poolDesc = {};
     poolDesc.colorMapResolution = kColorMapResolution;
