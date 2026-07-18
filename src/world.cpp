@@ -4,6 +4,9 @@
 #include "physics.hpp"
 #include "renderer.hpp"
 
+#include <algorithm>
+#include <limits>
+
 World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
     // Scene first: Props and Furniture both read its models and instances. Building
     // them here (in the member list) mirrors the old startup order, where the props
@@ -63,6 +66,46 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
     // Likewise the fire-pit zone: a static column over the pit where logs are stacked.
     if (level.fire_pit) {
         fire_pit_.emplace(DirectX::XMLoadFloat3(&level.fire_pit->pos), level.fire_pit->radius);
+    }
+
+    // Box the Flow smoke simulation around this level's fires. They can burn at the furniture
+    // grates (the grill) and the fire pit (stacked logs), which sit in different spots from
+    // one level to the next -- the backyard grill at the centre, the campsite pit off to the
+    // side -- so the sim box is placed here rather than baked into the renderer. Update the
+    // furniture first so its heat origins are at their spawn poses, not the origin.
+    furniture_.Update();
+    float min_x = std::numeric_limits<float>::max(), max_x = std::numeric_limits<float>::lowest();
+    float min_z = min_x, max_z = max_x;
+    bool any_fire = false;
+    const auto include = [&](float x, float z) {
+        min_x = std::min(min_x, x);
+        max_x = std::max(max_x, x);
+        min_z = std::min(min_z, z);
+        max_z = std::max(max_z, z);
+        any_fire = true;
+    };
+    for (const HeatSource& hot : furniture_.HeatSources()) {
+        const DirectX::XMFLOAT3 origin = hot.Origin();
+        include(origin.x, origin.z);
+    }
+    if (level.fire_pit) {
+        include(level.fire_pit->pos.x, level.fire_pit->pos.z);
+    }
+    // The ignitable carryables (the firewood logs) too: a log can catch and burn where it
+    // lies -- in its pile, not just once stacked in the pit -- and its fire is a Flow fire,
+    // so the sim box has to reach the pile as well or the log would burn invisibly there.
+    for (const DirectX::XMFLOAT3& log : props_.IgnitablePositions()) {
+        include(log.x, log.z);
+    }
+    if (any_fire) {
+        // One box per level, centred on the fires' spread and sized to take in the whole
+        // level around them, so a fire -- or the carried lighter -- shows wherever it is,
+        // not just inside a box drawn around the pit. A generous minimum half keeps even a
+        // single-fire level (the backyard grill) roomy; the grid's high virtual resolution
+        // (see flow_volume.cpp) keeps the fire fine despite the large box. Lifted in y so the
+        // box runs from the ground up to where the smoke thins.
+        const float half = std::max(0.5f * std::max(max_x - min_x, max_z - min_z) + 2.0f, 12.0f);
+        renderer.SetFlowRegion({0.5f * (min_x + max_x), 2.5f, 0.5f * (min_z + max_z)}, half);
     }
 }
 

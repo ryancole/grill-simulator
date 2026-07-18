@@ -2,6 +2,7 @@
 
 #include "collision.hpp"
 #include "cook_information.hpp"
+#include "flow_volume.hpp"
 #include "heat_source.hpp"
 #include "ignitable_requirements.hpp"
 #include "rigid_body.hpp"
@@ -17,7 +18,6 @@
 #include <vector>
 
 class Actions;
-class Flame;
 class Fluid;
 class Objectives;
 class Physics;
@@ -61,12 +61,12 @@ public:
     // a level without one): a log held over it is stacked onto it by the primary action.
     // `fluid` is the session's GPU fluid, which the lighter-fluid can sprays into while the
     // primary action is held; the fluid has no consequence beyond the spray itself today.
-    // `flame` is the session's flame effect, which the lighter burns at its muzzle for as
-    // long as the primary action is held -- and which is what makes the lighter hot.
-    // Nothing lights the fire pit yet.
+    // The lighter's own flame, and every burning log's, are volumetric NVIDIA Flow fires now
+    // (see FlowEmitters) -- there is no separate flame effect to pass in. Nothing lights the
+    // fire pit yet.
     void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt,
                 std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid, Flame* flame);
+                const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -80,6 +80,18 @@ public:
     // glowing outline so the player sees which one an E press would grab. Empty
     // while carrying, since nothing is being aimed at then.
     std::span<const MeshInstance> HighlightInstances() const { return highlight_; }
+
+    // The fire/smoke sources the burning props hand to NVIDIA Flow this frame -- one per
+    // burning carryable: a caught log (an oriented box along the wood) and the lit lighter (a
+    // small flame at its muzzle). Empty when nothing is alight. Rebuilt each Update; the
+    // caller merges it with the furniture's grate fire before handing the lot to the renderer.
+    std::span<const FlowEmitter> FlowEmitters() const { return flow_emitters_; }
+
+    // The world-space positions of every ignitable carryable (the firewood logs), at their
+    // current resting poses. The Flow simulation box is sized to include these so a log burns
+    // as a Flow fire wherever it can catch -- in its pile as well as the fire pit -- not just
+    // inside a box drawn around the pit. Read once on level load.
+    std::vector<DirectX::XMFLOAT3> IgnitablePositions() const;
 
     // The HUD hint for what the E key would do right now: "[E] Pick up tongs"
     // when a loose object is in reach and looked at, "[E] Drop" while carrying,
@@ -181,6 +193,11 @@ private:
         // never catches. There is no "is it lit" flag beside this: an ignited item is one
         // whose own `heat` is switched on, which is the whole point of catching fire.
         std::optional<IgnitableRequirements> ignitable;
+
+        // Seconds this item has been alight, aged each frame while its heat is on. Drives the
+        // Flow fire's build-up: a freshly caught log starts as a small flame and grows to a
+        // full one over the first few seconds rather than flaring up at full size at once.
+        float burn_time = 0.0f;
 
         // Set once a meat has been delivered onto a tray. A served meat is done with
         // play: its cook is frozen at the band it was served in and its body stays out
@@ -334,4 +351,7 @@ private:
     std::vector<MeshInstance> world_;
     std::vector<MeshInstance> held_;
     std::vector<MeshInstance> highlight_;
+    // Rebuilt each Update: a Flow fire/smoke source for every ignitable carryable currently
+    // alight. See FlowEmitters().
+    std::vector<FlowEmitter> flow_emitters_;
 };

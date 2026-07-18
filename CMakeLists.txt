@@ -28,6 +28,7 @@ include(Shaders)
 include(FastGltf)
 include(Fmod)
 include(PhysX)
+include(Flow)
 include(Fonts)
 include(Assets)
 
@@ -43,7 +44,7 @@ add_executable(grill WIN32
   src/collision.cpp
   src/cook_information.cpp
   src/environment.cpp
-  src/flame.cpp
+  src/flow_volume.cpp
   src/fluid.cpp
   src/heat_source.cpp
   src/ignitable_requirements.cpp
@@ -68,7 +69,7 @@ add_executable(grill WIN32
 target_include_directories(grill PRIVATE src)
 # windowscodecs is WIC, which decodes the PNG and JPEG images glTF embeds. It
 # ships with Windows, so it costs the project no third-party dependency.
-target_link_libraries(grill PRIVATE Agility::SDK fastgltf::fastgltf fmod::core PhysX::PhysX tomlplusplus::tomlplusplus windowscodecs)
+target_link_libraries(grill PRIVATE Agility::SDK fastgltf::fastgltf fmod::core Flow::Flow PhysX::PhysX tomlplusplus::tomlplusplus windowscodecs)
 
 target_compile_definitions(grill PRIVATE
   UNICODE _UNICODE
@@ -87,6 +88,7 @@ target_compile_options(grill PRIVATE
 agility_sdk_stage_runtime(grill)
 fmod_stage_runtime(grill)
 physx_stage_gpu_runtime(grill)
+flow_stage_runtime(grill)
 
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT scene.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT scene.ps.cso)

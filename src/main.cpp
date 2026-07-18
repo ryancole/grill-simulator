@@ -2,7 +2,7 @@
 #include "audio.hpp"
 #include "camera.hpp"
 #include "dx_common.hpp"
-#include "flame.hpp"
+#include "flow_volume.hpp"
 #include "fluid.hpp"
 #include "furniture.hpp"
 #include "input.hpp"
@@ -53,10 +53,6 @@ struct Game {
     // The GPU fluid rides the physics scene, so it sits between Physics (whose CUDA
     // context and scene it borrows -- declared after, destroyed before) and the world.
     Fluid fluid{physics};
-    // The flames, on the other hand, need neither the GPU nor the physics scene -- rising
-    // specks with nothing to collide against. One system draws every fire (the lighter's
-    // and each burning log's). Session state like the fluid, parked by the same level swap.
-    Flame flame;
     Camera camera{physics};
     Viewmodel viewmodel{Scene::kCubeModel};
     Input input;
@@ -276,11 +272,9 @@ int Run(HINSTANCE instance, int show_command) {
         game.world.emplace(level, game.renderer, game.physics);
         game.camera.Respawn(level.player_spawn, level.player_facing);
         // Park any droplets still in flight: the fluid is session state, and a puddle
-        // sprayed in one level must not survive into the next.
+        // sprayed in one level must not survive into the next. (The Flow fire is reset by
+        // the renderer's ReleaseScene as the level swaps.)
         game.fluid.Clear();
-        // Likewise the flame: a lighter lit as the level changed must not leave its fire
-        // hanging in the air of the new one.
-        game.flame.Clear();
     };
     // A level is loaded at startup even though the game launches into the menu: the
     // menu draws with the font atlas that rides a level's upload, and having one
@@ -658,10 +652,6 @@ int Run(HINSTANCE instance, int show_command) {
         // whatever last frame's spray queued -- after the step, which is what the readback
         // wants this frame's results of.
         game.fluid.Update(dt);
-        // The flame ages its specks on the frame clock, not the physics one: it collides
-        // with nothing, so it has no reason to wait for a step. Unconditional -- specks
-        // already in the air burn out whether or not the lighter is lit this frame.
-        game.flame.Update(dt);
 
         float mouse_dx = 0.0f;
         float mouse_dy = 0.0f;
@@ -692,7 +682,7 @@ int Run(HINSTANCE instance, int show_command) {
         game.world->props().Update(camera_to_world, game.actions, dt,
                                    game.world->furniture().HeatSources(),
                                    game.world->turn_in_zone(), game.world->fire_pit_zone(),
-                                   game.world->objectives(), &game.fluid, &game.flame);
+                                   game.world->objectives(), &game.fluid);
 
         // Turning the loaded tray in at the delivery zone ends the level: Props latches it
         // during the Update above. Drop the mouse look and raise the results screen, whose
@@ -705,8 +695,11 @@ int Run(HINSTANCE instance, int show_command) {
             continue;
         }
 
-        const XMMATRIX view_projection =
-            game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
+        // Kept separate as well as combined: the scene passes want the product, but Flow
+        // reconstructs its rays from the view and projection individually (see RenderFlow).
+        const XMMATRIX view = game.camera.ViewMatrix();
+        const XMMATRIX projection = game.camera.ProjectionMatrix(game.renderer.AspectRatio());
+        const XMMATRIX view_projection = view * projection;
         Props& props = game.world->props();
 
         // The order ticket data, read once for the polished orders rail further down.
@@ -783,19 +776,35 @@ int Run(HINSTANCE instance, int show_command) {
         highlights.insert(highlights.end(), grill_highlight.begin(), grill_highlight.end());
 
         // The world draw list: the props where they lie plus any lighter-fluid droplets
-        // in flight and any flame burning -- all plain mesh instances, merged here so the
-        // renderer keeps its one world span. Empty droplets cost an empty append.
+        // in flight -- all plain mesh instances, merged here so the renderer keeps its one
+        // world span. Empty droplets cost an empty append. (Every fire is volumetric Flow
+        // now, not mesh instances -- see flow_emitters below.)
         std::vector<MeshInstance> world_instances(props.WorldInstances().begin(),
                                                   props.WorldInstances().end());
         const std::span<const MeshInstance> droplets = game.fluid.Instances();
         world_instances.insert(world_instances.end(), droplets.begin(), droplets.end());
-        const std::span<const MeshInstance> flame = game.flame.Instances();
-        world_instances.insert(world_instances.end(), flame.begin(), flame.end());
+
+        // The frame's fire/smoke sources for NVIDIA Flow: the grate of any lit furniture
+        // (the grill, hot from the start) plus every burning log the props report. Merged
+        // into the one list the renderer steps the sim from.
+        std::vector<FlowEmitter> flow_emitters;
+        for (const HeatSource& hot : game.world->furniture().HeatSources()) {
+            if (hot.IsOn()) {
+                const XMFLOAT3 o = hot.Origin();
+                // A flat, wide box just above the grate -- a bed of coals, not a ball of fire.
+                XMFLOAT4X4 grate;
+                XMStoreFloat4x4(&grate, XMMatrixTranslation(o.x, o.y + 0.1f, o.z));
+                flow_emitters.push_back({grate, {0.35f, 0.08f, 0.35f}, 3.0f, 1.0f, 1.0f, 2.0f});
+            }
+        }
+        const std::span<const FlowEmitter> log_fires = props.FlowEmitters();
+        flow_emitters.insert(flow_emitters.end(), log_fires.begin(), log_fires.end());
 
         game.renderer.Render(game.world->scene(), world_instances, highlights,
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
                              view_projection, game.camera.Position(), prompt,
-                             debug_lines, order_cards, meat_cards);
+                             debug_lines, order_cards, meat_cards, view, projection, dt,
+                             flow_emitters);
     }
 
     game.renderer.Shutdown();
