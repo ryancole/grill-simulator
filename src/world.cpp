@@ -91,11 +91,20 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
     if (level.fire_pit) {
         include(level.fire_pit->pos.x, level.fire_pit->pos.z);
     }
+    // The ignitable carryables (the firewood logs) too: a log can catch and burn where it
+    // lies -- in its pile, not just once stacked in the pit -- and its fire is a Flow fire,
+    // so the sim box has to reach the pile as well or the log would burn invisibly there.
+    for (const DirectX::XMFLOAT3& log : props_.IgnitablePositions()) {
+        include(log.x, log.z);
+    }
     if (any_fire) {
-        // Centre the box on the fires' spread, sized to hold it with a couple of metres of
-        // margin, never below a minimum so a single fire still gets a roomy box for its
-        // plume. Lifted in y so the box runs from the ground up to where the smoke thins.
-        const float half = std::max(0.5f * std::max(max_x - min_x, max_z - min_z) + 2.0f, 4.0f);
+        // One box per level, centred on the fires' spread and sized to take in the whole
+        // level around them, so a fire -- or the carried lighter -- shows wherever it is,
+        // not just inside a box drawn around the pit. A generous minimum half keeps even a
+        // single-fire level (the backyard grill) roomy; the grid's high virtual resolution
+        // (see flow_volume.cpp) keeps the fire fine despite the large box. Lifted in y so the
+        // box runs from the ground up to where the smoke thins.
+        const float half = std::max(0.5f * std::max(max_x - min_x, max_z - min_z) + 2.0f, 12.0f);
         renderer.SetFlowRegion({0.5f * (min_x + max_x), 2.5f, 0.5f * (min_z + max_z)}, half);
     }
 }

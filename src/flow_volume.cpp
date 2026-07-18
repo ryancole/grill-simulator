@@ -2,6 +2,7 @@
 
 #include "dx_common.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 // NVIDIA Flow's headers hardcode every entry point as `extern "C" __declspec(dllexport)`
@@ -32,6 +33,12 @@ constexpr UINT kFlowDescriptorHeapSize = 8192;
 // temperatures read as dark, thin smoke, hot ones as bright orange-white fire. 64 entries
 // is Flow's suggested default resolution.
 constexpr UINT kColorMapResolution = 64;
+
+// The simulation grid's virtual resolution and resident fraction, chosen together so a
+// level-sized box (~24 m) still has ~2 cm voxels while the resident-voxel budget -- and thus
+// the memory -- stays near a small default grid's. See CreateFlowObjects.
+constexpr NvFlowUint kGridVirtualDim = 1536;
+constexpr float kGridResidentScale = 0.00036f;
 
 NvFlowFloat4x4 ToFlow(FXMMATRIX m) {
     XMFLOAT4X4 f;
@@ -209,6 +216,13 @@ void CreateFlowObjects(FlowVolume::Impl* impl) {
     // to rise. Defaults to the backyard grill until a level sets it.
     gridDesc.initialLocation = {impl->region_center.x, impl->region_center.y, impl->region_center.z};
     gridDesc.halfSize = {impl->region_half, impl->region_half, impl->region_half};
+    // The box is level-sized (world.cpp), which would make the default 512^3 grid's voxels
+    // huge and the fire coarse and faint. Raise the virtual resolution so voxels stay ~2 cm
+    // across the big box, and drop residentScale to match: memory tracks the *resident*
+    // voxels (only where smoke is, a small fraction of the box), so keeping that budget fixed
+    // holds the footprint near the default's ~400 MB despite the far higher virtual resolution.
+    gridDesc.virtualDim = {kGridVirtualDim, kGridVirtualDim, kGridVirtualDim};
+    gridDesc.residentScale = kGridResidentScale;
     impl->grid = NvFlowCreateGrid(impl->context, &gridDesc);
 
     // Tune how the fire moves: vorticity adds the turbulent curl that makes flame and smoke
@@ -255,23 +269,28 @@ void FlowVolume::Render(ID3D12GraphicsCommandList* command_list, std::uint64_t l
         NvFlowUpdateContextD3D12(impl_->context, &contextDesc);
     }
 
-    // Queue this frame's emitters. Each is a sphere of hot, smoky fuel: the shape places
-    // and sizes the injection, the targets set what is injected, and the upward velocity is
-    // the draft rising off the coals. The sim applies them on the update below.
+    // Queue this frame's emitters. Each injects hot, smoky fuel over an oriented box shaped
+    // to the burning object, with an upward draft; the sim applies them on the update below.
     for (const FlowEmitter& e : emitters) {
+        const XMMATRIX transform = XMLoadFloat4x4(&e.transform);
+
         NvFlowShapeDesc shape;
-        shape.sphere.radius = e.radius;
+        shape.box.halfSize = {e.half_extents.x, e.half_extents.y, e.half_extents.z};
 
         NvFlowGridEmitParams params;
         NvFlowGridEmitParamsDefaults(&params);
-        params.shapeType = eNvFlowShapeTypeSphere;
+        params.shapeType = eNvFlowShapeTypeBox;
         params.shapeRangeOffset = 0;
         params.shapeRangeSize = 1;
         params.deltaTime = dt;
-        params.localToWorld =
-            ToFlow(XMMatrixTranslation(e.position.x, e.position.y, e.position.z));
-        params.bounds = ToFlow(XMMatrixScaling(1.5f * e.radius, 1.5f * e.radius, 1.5f * e.radius) *
-                               XMMatrixTranslation(e.position.x, e.position.y, e.position.z));
+        params.localToWorld = ToFlow(transform);
+        // Allocate blocks around the box (its world position rides the transform's last row),
+        // sized generously so the rising plume has room to grow into.
+        const float px = e.transform._41, py = e.transform._42, pz = e.transform._43;
+        const float span = std::max({e.half_extents.x, e.half_extents.y, e.half_extents.z, 0.15f});
+        const float bound = 2.0f * span;
+        params.bounds =
+            ToFlow(XMMatrixScaling(bound, bound, bound) * XMMatrixTranslation(px, py, pz));
         params.allocationScale = {1.0f, 1.0f, 1.0f};
         params.velocityLinear = {0.0f, e.velocity_up, 0.0f};
         params.smoke = e.smoke;

@@ -24,16 +24,19 @@
 // Clear() empties the grid on a level swap so a plume lit in one yard does not hang in
 // the air of the next.
 
-// One fire source handed to the sim this frame, in world space. A lit grill grate or a
-// burning log is one of these: hot fuel injected into the grid at a point, which the sim
-// turns into rising, cooling, dissipating smoke and flame.
+// One fire source handed to the sim this frame. A lit grill grate or a burning log is one
+// of these: hot fuel injected into the grid over an oriented box, which the sim turns into
+// rising, cooling, dissipating smoke and flame. The box (rather than a sphere) lets the fire
+// take the shape of what is burning -- a log passes its own pose and dimensions so the flame
+// runs along the wood, the grill a flat box over its grate -- instead of balling up.
 struct FlowEmitter {
-    DirectX::XMFLOAT3 position; // World-space centre of the emit region.
-    float radius;               // Radius of the emit sphere, metres.
-    float temperature;          // Target temperature injected (drives buoyancy + fire colour).
-    float smoke;                // Target smoke density injected (the visible soot).
-    float fuel;                 // Target fuel injected (burns to sustain the flame).
-    float velocity_up;          // Initial upward velocity imparted, m/s (the draft off the coals).
+    DirectX::XMFLOAT4X4 transform;  // Emit box's model-to-world: orients and places it, so it
+                                    // sits and turns with the burning object.
+    DirectX::XMFLOAT3 half_extents; // Box half-size in that local space, metres.
+    float temperature;              // Target temperature injected (drives buoyancy + colour).
+    float smoke;                    // Target smoke density injected (the visible soot).
+    float fuel;                     // Target fuel injected (burns to sustain the flame).
+    float velocity_up;              // Upward draft imparted, m/s.
 };
 
 // Everything Flow needs to composite into our frame, filled by the renderer from its own

@@ -1,7 +1,6 @@
 #include "props.hpp"
 
 #include "actions.hpp"
-#include "flame.hpp"
 #include "fluid.hpp"
 #include "objectives.hpp"
 #include "physics.hpp"
@@ -51,10 +50,10 @@ constexpr float kSpraySpeed = 7.5f; // m/s out of the nozzle.
 // burning one. The red channel rides above one so the HDR pipeline blooms it a touch.
 constexpr XMFLOAT3 kEmberTint{1.35f, 0.62f, 0.28f};
 
-// How much bigger a caught object's fire stands than the lighter's pilot tongue (scale
-// one). A log fire wants to read as a fire, not the same little flame the lighter carries,
-// so its Flame::Emit is scaled up -- taller, wider, and denser (see Flame::Emit).
-constexpr float kIgnitedFlameScale = 3.0f;
+// A caught log's Flow fire builds up rather than flaring to full size the instant it
+// catches: over these seconds its emitter grows from a small starting flame to the full
+// fire, so ignition reads as a fire taking hold, not an immediate bonfire.
+constexpr float kFireBuildupSeconds = 6.0f;
 
 // A carried object hangs by the right hand -- see the viewmodel's wrist, which
 // sits near (0.27, -0.35, 0.78) in this same eye space. Flat things are tipped
@@ -301,8 +300,7 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
 
 void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt,
                    std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                   const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid,
-                   Flame* flame) {
+                   const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
@@ -452,8 +450,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         if (item.ability != Ability::Flame || !item.heat) {
             continue;
         }
-        const bool burning =
-            i == carried_ && flame != nullptr && actions.IsActive(Action::PrimaryAction);
+        const bool burning = i == carried_ && actions.IsActive(Action::PrimaryAction);
         item.heat->SetOn(burning);
     }
 
@@ -542,40 +539,57 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     }
 
-    // Draw a flame on everything that is burning right now: the lighter at its muzzle and
-    // every log that has caught. One pass over the whole yard, keyed on the heat being on
-    // -- the single truth of "is this on fire" -- so the lighter (its heat set above), a
-    // log lit this very frame (the ignition just above ran first), and a log still burning
-    // from before all read the same way, and a released lighter simply stops. The fire
-    // stands at each source's own hot centre, which the origin refresh placed: the lighter's
-    // muzzle, a log's middle. A caught log burns bigger than the lighter's pilot tongue, so
-    // its flame is scaled up. Emitting is all this does -- Flame::Update ages and draws the
-    // specks, and the heat that cooks and spreads is the HeatSource, already handled.
+    // Every burning thing this frame is a volumetric NVIDIA Flow fire -- one emitter per
+    // alight carryable, keyed on the heat being on (the single truth of "is this on fire"):
+    // a caught log gets an oriented box that runs along the wood, the lit lighter a small
+    // flame at its muzzle. The heat that cooks and spreads is the HeatSource, already handled.
     flow_emitters_.clear();
-    if (flame != nullptr) {
-        for (const Item& item : items_) {
-            if (!item.heat || !item.heat->IsOn()) {
-                continue;
-            }
-            // A caught object's fire stands on top of it, not down at its hot centre --
-            // that centre is the middle of the log, and a fire emitted there burns up
-            // inside the wood where the glowing body hides it. Lift the origin by the
-            // object's own half-height so the fire roots at its top surface and rises into
-            // the open air. In world up: fire climbs the same way whichever way a knocked
-            // log lies. The lighter is not ignitable, so its flame stays at the muzzle.
-            XMFLOAT3 origin = item.heat->Origin();
-            if (item.ignitable) {
-                origin.y += item.half_extents.y;
-            }
-            const float scale = item.ignitable ? kIgnitedFlameScale : 1.0f;
-            flame->Emit(origin, dt, scale);
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        Item& item = items_[i];
+        if (!item.heat || !item.heat->IsOn()) {
+            item.burn_time = 0.0f; // Not alight (or gone cold): reset the build-up.
+            continue;
+        }
+        if (item.ignitable) {
+            // A caught log's fire is shaped to the wood: an oriented box turned with the log's
+            // own pose and centred on its hot middle, so the flame runs along its length rather
+            // than balling up as a sphere. It builds -- the box grows from a small patch to (a
+            // little under) the log's footprint and the intensity from ember to full over
+            // kFireBuildupSeconds, eased so it takes hold rather than flaring up at once. A
+            // single log stays a modest campfire; a stack sums several boxes, so more wood
+            // naturally makes a bigger fire.
+            item.burn_time += dt;
+            const float t = std::min(item.burn_time / kFireBuildupSeconds, 1.0f);
+            const float g = t * t * (3.0f - 2.0f * t); // smoothstep ease
+            const auto ramp = [g](float start, float full) { return start + (full - start) * g; };
 
-            // The same burning things feed NVIDIA Flow's volumetric smoke, but only the
-            // ignitable ones (a lit log): the fuller fire is Flow's, while the lighter's
-            // pilot tongue stays the cheap CPU Flame above. Rooted at the same lifted origin.
-            if (item.ignitable) {
-                flow_emitters_.push_back({origin, 0.35f, 3.0f, 1.2f, 1.0f, 2.5f});
-            }
+            XMMATRIX pose = CurrentPose(i, camera_to_world);
+            pose.r[3] = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f); // keep orientation, drop position
+            const XMFLOAT3 centre = item.heat->Origin();
+            XMFLOAT4X4 box;
+            XMStoreFloat4x4(&box, pose * XMMatrixTranslation(centre.x, centre.y, centre.z));
+            const XMFLOAT3 he = item.half_extents;
+            flow_emitters_.push_back({box,
+                                      {ramp(0.06f, 0.9f * he.x), ramp(0.05f, 0.6f * he.y),
+                                       ramp(0.06f, 0.9f * he.z)},
+                                      ramp(0.20f, 0.62f),   // temperature
+                                      ramp(0.03f, 0.16f),   // smoke
+                                      ramp(0.05f, 0.14f),   // fuel
+                                      ramp(0.13f, 0.40f)}); // upward draft (m/s)
+        } else if (item.ability == Ability::Flame) {
+            // The lit lighter: a small flame at its muzzle (heat->Origin() sits there), on the
+            // instant the button is held with no build-up. Kept small -- it is a pilot flame,
+            // not a fire. A voxel sim renders something this tiny coarsely, but it keeps the
+            // whole game on one fire system.
+            const XMFLOAT3 muzzle = item.heat->Origin();
+            XMFLOAT4X4 box;
+            XMStoreFloat4x4(&box, XMMatrixTranslation(muzzle.x, muzzle.y, muzzle.z));
+            flow_emitters_.push_back({box,
+                                      {0.035f, 0.07f, 0.035f}, // small box at the muzzle
+                                      0.62f,   // temperature
+                                      0.04f,   // smoke
+                                      0.12f,   // fuel
+                                      0.40f}); // upward draft (m/s)
         }
     }
 
@@ -725,6 +739,17 @@ std::vector<Props::MeatStatus> Props::MeatStatuses() const {
                                       static_cast<int>(item.cook->InternalTempF()), item.served});
     }
     return statuses;
+}
+
+std::vector<XMFLOAT3> Props::IgnitablePositions() const {
+    std::vector<XMFLOAT3> positions;
+    for (const Item& item : items_) {
+        if (item.ignitable) {
+            // The translation of the resting model-to-world -- where the log sits right now.
+            positions.push_back({item.resting._41, item.resting._42, item.resting._43});
+        }
+    }
+    return positions;
 }
 
 int Props::PickTarget(FXMVECTOR eye, FXMVECTOR forward) const {
