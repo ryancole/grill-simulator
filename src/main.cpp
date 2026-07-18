@@ -53,9 +53,9 @@ struct Game {
     // The GPU fluid rides the physics scene, so it sits between Physics (whose CUDA
     // context and scene it borrows -- declared after, destroyed before) and the world.
     Fluid fluid{physics};
-    // The lighter's flame, on the other hand, needs neither the GPU nor the physics
-    // scene -- it is a handful of rising specks with nothing to collide against. Session
-    // state like the fluid, and parked by the same level swap.
+    // The flames, on the other hand, need neither the GPU nor the physics scene -- rising
+    // specks with nothing to collide against. One system draws every fire (the lighter's
+    // and each burning log's). Session state like the fluid, parked by the same level swap.
     Flame flame;
     Camera camera{physics};
     Viewmodel viewmodel{Scene::kCubeModel};

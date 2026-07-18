@@ -47,9 +47,11 @@ constexpr XMFLOAT3 kCoolTint{0.85f, 0.16f, 0.03f};
 constexpr float kEmissiveAtBirth = 9.0f;
 constexpr float kEmissiveAtDeath = 0.6f;
 
-// A cap on the live particles, so a flame held for a whole level cannot grow the vector
-// without bound if a frame ever runs long enough to bank a huge emission.
-constexpr int kMaxParticles = 256;
+// A cap on the live particles across every fire at once, so a flame held for a whole level
+// -- or a fire pit of several burning logs, each a scale-3 fire feeding the same pool --
+// cannot grow the vector without bound if a frame ever runs long enough to bank a huge
+// emission. Generous enough that a full pit does not visibly starve.
+constexpr int kMaxParticles = 1024;
 
 float Range(std::minstd_rand& rng, float lo, float hi) {
     return std::uniform_real_distribution<float>(lo, hi)(rng);
@@ -62,26 +64,35 @@ Flame::Flame() {
     instances_.reserve(kMaxParticles);
 }
 
-void Flame::Emit(XMFLOAT3 origin, float dt) {
-    burn_carry_ += kParticlesPerSecond * dt;
+void Flame::Emit(XMFLOAT3 origin, float dt, float scale) {
+    // A bigger fire emits proportionally more specks to fill its bigger volume, so it does
+    // not read as the same sparse handful spread thinner. burn_carry_ banks the fraction a
+    // frame could not emit whole; it is shared across every fire, which only shuffles that
+    // sub-one remainder between them and never loses or invents a speck.
+    burn_carry_ += kParticlesPerSecond * scale * dt;
     const int count = static_cast<int>(burn_carry_);
     if (count <= 0) {
         return;
     }
     burn_carry_ -= static_cast<float>(count);
 
+    const float scatter = kSpawnScatter * scale;
     for (int i = 0; i < count; ++i) {
         if (static_cast<int>(particles_.size()) >= kMaxParticles) {
             break;
         }
         Particle particle{};
-        particle.position = XMFLOAT3(origin.x + Range(rng_, -kSpawnScatter, kSpawnScatter),
-                                     origin.y + Range(rng_, -kSpawnScatter, kSpawnScatter),
-                                     origin.z + Range(rng_, -kSpawnScatter, kSpawnScatter));
-        particle.velocity = XMFLOAT3(Range(rng_, -kDriftSpeed, kDriftSpeed), kRiseSpeed,
-                                     Range(rng_, -kDriftSpeed, kDriftSpeed));
+        particle.position = XMFLOAT3(origin.x + Range(rng_, -scatter, scatter),
+                                     origin.y + Range(rng_, -scatter, scatter),
+                                     origin.z + Range(rng_, -scatter, scatter));
+        // Rise and drift are scaled at birth; the continued buoyant climb is scaled in
+        // Update off `scale`. Together they lift a bigger fire proportionally higher.
+        particle.velocity = XMFLOAT3(Range(rng_, -kDriftSpeed, kDriftSpeed) * scale,
+                                     kRiseSpeed * scale,
+                                     Range(rng_, -kDriftSpeed, kDriftSpeed) * scale);
         particle.lifetime = kLifetime + Range(rng_, -kLifetimeJitter, kLifetimeJitter);
         particle.spin = Range(rng_, 0.0f, XM_2PI);
+        particle.scale = scale;
         particles_.push_back(particle);
     }
 }
@@ -92,7 +103,7 @@ void Flame::Update(float dt) {
     // once is the same result in one pass.
     for (Particle& particle : particles_) {
         particle.age += dt;
-        particle.velocity.y += kBuoyancy * dt;
+        particle.velocity.y += kBuoyancy * particle.scale * dt;
         particle.position.x += particle.velocity.x * dt;
         particle.position.y += particle.velocity.y * dt;
         particle.position.z += particle.velocity.z * dt;
@@ -111,7 +122,7 @@ void Flame::Update(float dt) {
 
         MeshInstance instance{};
         instance.model = Scene::kCubeModel;
-        const float side = std::lerp(kSideAtBirth, kSideAtDeath, t);
+        const float side = std::lerp(kSideAtBirth, kSideAtDeath, t) * particle.scale;
         XMStoreFloat4x4(&instance.transform,
                         XMMatrixScaling(side, side, side) * XMMatrixRotationY(particle.spin) *
                             XMMatrixTranslation(particle.position.x, particle.position.y,

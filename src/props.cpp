@@ -51,6 +51,11 @@ constexpr float kSpraySpeed = 7.5f; // m/s out of the nozzle.
 // burning one. The red channel rides above one so the HDR pipeline blooms it a touch.
 constexpr XMFLOAT3 kEmberTint{1.35f, 0.62f, 0.28f};
 
+// How much bigger a caught object's fire stands than the lighter's pilot tongue (scale
+// one). A log fire wants to read as a fire, not the same little flame the lighter carries,
+// so its Flame::Emit is scaled up -- taller, wider, and denser (see Flame::Emit).
+constexpr float kIgnitedFlameScale = 3.0f;
+
 // A carried object hangs by the right hand -- see the viewmodel's wrist, which
 // sits near (0.27, -0.35, 0.78) in this same eye space. Flat things are tipped
 // up so the player sees a face rather than an edge; the tongs are turned to
@@ -434,32 +439,22 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         spray_carry_ = 0.0f;
     }
 
-    // The lighter burns for as long as the primary action is held, like the can's spray
-    // above and unlike the edge-triggered abilities: the flame stands at the muzzle while
-    // the button is down and goes out when it is released. The flame itself keeps burning
-    // down after release, since Flame::Update runs whether or not this fired (see main).
-    //
-    // Being lit is also what makes the lighter hot: its heat switches on with the fire and
-    // off with it, so it warms (and will light) what it is held to only while it burns.
-    // Every Flame item is visited, not just the carried one, so a lighter dropped mid-burn
-    // goes cold rather than lying in the dirt radiating.
+    // The lighter is hot for as long as the primary action is held, like the can's spray
+    // above and unlike the edge-triggered abilities: its heat switches on with the flame
+    // and off when the button is released, so it warms (and lights) what it is held to only
+    // while it burns. Only the flag is set here -- the fire itself is drawn below, in the
+    // one pass that shows every burning thing. Set before the ignition check further down,
+    // so a log held under the flame feels the lighter's heat this frame. Every Flame item
+    // is visited, not just the carried one, so a lighter dropped mid-burn goes cold rather
+    // than lying in the dirt radiating.
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
         Item& item = items_[i];
-        if (item.ability != Ability::Flame) {
+        if (item.ability != Ability::Flame || !item.heat) {
             continue;
         }
         const bool burning =
             i == carried_ && flame != nullptr && actions.IsActive(Action::PrimaryAction);
-        if (item.heat) {
-            item.heat->SetOn(burning);
-        }
-        if (burning) {
-            XMFLOAT3 origin;
-            XMStoreFloat3(&origin, XMVector3Transform(NozzleLocal(item),
-                                                      XMLoadFloat4x4(&item.held_local) *
-                                                          camera_to_world));
-            flame->Emit(origin, dt);
-        }
+        item.heat->SetOn(burning);
     }
 
     // What the prompt reports this frame: nothing to pick while carrying, else
@@ -538,6 +533,35 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         const XMVECTOR point = XMLoadFloat3(&hot_centre);
         if (item.ignitable->MetBy(AmbientAt(point, heat_sources))) {
             item.heat->SetOn(true);
+        }
+    }
+
+    // Draw a flame on everything that is burning right now: the lighter at its muzzle and
+    // every log that has caught. One pass over the whole yard, keyed on the heat being on
+    // -- the single truth of "is this on fire" -- so the lighter (its heat set above), a
+    // log lit this very frame (the ignition just above ran first), and a log still burning
+    // from before all read the same way, and a released lighter simply stops. The fire
+    // stands at each source's own hot centre, which the origin refresh placed: the lighter's
+    // muzzle, a log's middle. A caught log burns bigger than the lighter's pilot tongue, so
+    // its flame is scaled up. Emitting is all this does -- Flame::Update ages and draws the
+    // specks, and the heat that cooks and spreads is the HeatSource, already handled.
+    if (flame != nullptr) {
+        for (const Item& item : items_) {
+            if (!item.heat || !item.heat->IsOn()) {
+                continue;
+            }
+            // A caught object's fire stands on top of it, not down at its hot centre --
+            // that centre is the middle of the log, and a fire emitted there burns up
+            // inside the wood where the glowing body hides it. Lift the origin by the
+            // object's own half-height so the fire roots at its top surface and rises into
+            // the open air. In world up: fire climbs the same way whichever way a knocked
+            // log lies. The lighter is not ignitable, so its flame stays at the muzzle.
+            XMFLOAT3 origin = item.heat->Origin();
+            if (item.ignitable) {
+                origin.y += item.half_extents.y;
+            }
+            const float scale = item.ignitable ? kIgnitedFlameScale : 1.0f;
+            flame->Emit(origin, dt, scale);
         }
     }
 
