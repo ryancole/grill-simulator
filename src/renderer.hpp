@@ -105,6 +105,12 @@ public:
     // in effect where the device has no mesh-shader support, since the pass never runs.
     void SetGrass(const GrassPatch& grass, std::span<const OrientedBox> obstacles);
     void ClearGrass();
+    // Positions the NVIDIA Flow simulation box for the loaded level: `center` its middle in
+    // world space, `half_extent` its half-size in metres. A level sets this around wherever
+    // its fires burn (the grill grate, the fire pit) so their smoke is simulated; fire
+    // outside the box is not. Call on level load, like SetEnvironment. Forwards to the Flow
+    // subsystem, which repositions the grid if it is already running.
+    void SetFlowRegion(DirectX::XMFLOAT3 center, float half_extent);
     void Resize(UINT width, UINT height);
     // `props` are the loose objects resting in the yard, drawn with the scene.
     // `highlight` is the one the player is aiming at, ringed with a glowing

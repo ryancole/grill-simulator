@@ -75,6 +75,12 @@ struct FlowVolume::Impl {
     ID3D12GraphicsCommandList* command_list = nullptr;
     UINT64 last_fence_completed = 0;
     UINT64 next_fence_value = 1;
+
+    // The current level's simulation box (SetRegion). The grid is built and reset to this,
+    // so a level's fires can sit anywhere -- the backyard grill, the campsite fire pit. The
+    // default is the backyard grill, used until the first SetRegion.
+    XMFLOAT3 region_center{0.0f, 2.5f, 5.0f};
+    float region_half = 4.0f;
 };
 
 namespace {
@@ -199,9 +205,10 @@ void CreateFlowObjects(FlowVolume::Impl* impl) {
 
     NvFlowGridDesc gridDesc;
     NvFlowGridDescDefaults(&gridDesc);
-    // Centre the simulation box on the backyard grill and give the plume room to rise.
-    gridDesc.initialLocation = {0.0f, 2.5f, 5.0f};
-    gridDesc.halfSize = {4.0f, 4.0f, 4.0f};
+    // Centre the simulation box on the level's fire region (SetRegion), giving the plume room
+    // to rise. Defaults to the backyard grill until a level sets it.
+    gridDesc.initialLocation = {impl->region_center.x, impl->region_center.y, impl->region_center.z};
+    gridDesc.halfSize = {impl->region_half, impl->region_half, impl->region_half};
     impl->grid = NvFlowCreateGrid(impl->context, &gridDesc);
 
     // Tune how the fire moves: vorticity adds the turbulent curl that makes flame and smoke
@@ -342,14 +349,28 @@ void FlowVolume::Render(ID3D12GraphicsCommandList* command_list, std::uint64_t l
     NvFlowVolumeRenderGridExport(impl_->volume_render, impl_->context, gridExport, &renderParams);
 }
 
+void FlowVolume::SetRegion(XMFLOAT3 center, float half_extent) {
+    impl_->region_center = center;
+    impl_->region_half = half_extent;
+    // If the grid is already up, move (and clear) it to the new box now; otherwise the stored
+    // values are picked up when it is first built. Reset repositions and empties in one go.
+    if (impl_->grid) {
+        NvFlowGridResetDesc reset;
+        NvFlowGridResetDescDefaults(&reset);
+        reset.initialLocation = {center.x, center.y, center.z};
+        reset.halfSize = {half_extent, half_extent, half_extent};
+        NvFlowGridReset(impl_->grid, &reset);
+    }
+}
+
 void FlowVolume::Clear() {
     if (!impl_->grid) {
         return;
     }
     NvFlowGridResetDesc reset;
     NvFlowGridResetDescDefaults(&reset);
-    reset.initialLocation = {0.0f, 2.5f, 5.0f};
-    reset.halfSize = {4.0f, 4.0f, 4.0f};
+    reset.initialLocation = {impl_->region_center.x, impl_->region_center.y, impl_->region_center.z};
+    reset.halfSize = {impl_->region_half, impl_->region_half, impl_->region_half};
     NvFlowGridReset(impl_->grid, &reset);
 }
 

@@ -1904,6 +1904,10 @@ void Renderer::ClearGrass() {
     grass_active_ = false;
 }
 
+void Renderer::SetFlowRegion(XMFLOAT3 center, float half_extent) {
+    flow_.SetRegion(center, half_extent);
+}
+
 void Renderer::CreateShadowPipeline() {
     // The sun starts where the backyard wants it; a loaded level re-aims it through
     // SetSunDirection. Build the light's view-projection from that default now, so

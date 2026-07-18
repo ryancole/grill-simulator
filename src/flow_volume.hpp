@@ -86,6 +86,14 @@ public:
                 const FlowTarget& target, const DirectX::XMMATRIX& view,
                 const DirectX::XMMATRIX& projection);
 
+    // Positions the simulation box for the current level: `center` is its middle in world
+    // space and `half_extent` its half-size in metres (the box is that wide in x and z, and
+    // a little taller so the plume has headroom). Fire outside the box is not simulated, so
+    // a level sets this around wherever its fires can burn -- the grill grate, the fire pit.
+    // Takes effect immediately if the grid already exists (it is repositioned and cleared),
+    // and is remembered for when the grid is first built otherwise. Call on level load.
+    void SetRegion(DirectX::XMFLOAT3 center, float half_extent);
+
     // Empties the grid, preserving its allocation -- the level-swap reset, so smoke from
     // one level does not carry into the next. Mirrors Flame::Clear.
     void Clear();
