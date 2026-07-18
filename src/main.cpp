@@ -301,6 +301,15 @@ int Run(HINSTANCE instance, int show_command) {
     // since only the loop navigates it.
     int results_selected = 0;
 
+    // The pending level swap, driven by the Loading state. Rather than block on
+    // load_level the instant a level is chosen -- which freezes the menu for the second
+    // or two the build takes -- the choice records the target here and switches to
+    // Loading. The Loading block then draws one "loading" frame, presents it, and only on
+    // the next iteration performs the blocking build, so that frame is what sits on screen
+    // through the stall. `loading_shown` tracks whether that frame has been presented yet.
+    int pending_level = 0;
+    bool loading_shown = false;
+
     // The main menu: Select Level opens the level list, Options opens that screen, Exit
     // closes the game. A fixed three entries, so their indices are constants.
     Menu menu({"Select Level", "Options", "Exit"});
@@ -366,6 +375,23 @@ int Run(HINSTANCE instance, int show_command) {
         // and the grab further down -- sees the same snapshot and the edge queries
         // fire exactly once per press.
         game.actions.Update(game.input);
+
+        // The loading screen owns the frame while a level is being built. It is drawn and
+        // presented once, then -- with that frame on screen -- the blocking build runs on
+        // the next iteration and play begins. Splitting it across two iterations is what
+        // makes the loading frame visible: were the build called in the same pass, it would
+        // stall before its own present ever reached the display.
+        if (game.state == GameState::Loading) {
+            if (!loading_shown) {
+                game.renderer.RenderLoading("LOADING", level_names[pending_level]);
+                loading_shown = true;
+                continue;
+            }
+            load_level(pending_level);
+            game.state = GameState::Playing;
+            loading_shown = false;
+            continue;
+        }
 
         // The menu owns the whole frame while it is up: navigate whichever screen is
         // showing (by mouse or keyboard), act on a confirm or a back, and draw it. The
@@ -440,12 +466,12 @@ int Run(HINSTANCE instance, int show_command) {
                     if (active.selected() == level_back_entry) {
                         screen = MenuScreen::Main;
                     } else {
-                        // Load the chosen level (re-reading its file) and drop into play.
-                        // The switch takes effect next frame; this one still draws the
-                        // menu, which is identical, so the hand-off is invisible. Reset the
-                        // screen to Main so a later Escape out of play lands on the top menu.
-                        load_level(active.selected());
-                        game.state = GameState::Playing;
+                        // Hand the chosen level to the Loading state, which draws a loading
+                        // frame before performing the blocking build. Reset the screen to
+                        // Main so a later Escape out of play lands on the top menu.
+                        pending_level = active.selected();
+                        game.state = GameState::Loading;
+                        loading_shown = false;
                         screen = MenuScreen::Main;
                     }
                 } else if (confirm) { // Options
@@ -619,9 +645,10 @@ int Run(HINSTANCE instance, int show_command) {
                 game.state = GameState::Menu;
                 screen = MenuScreen::Main;
             } else if (confirm) {
-                if (results_selected == 0) { // Replay: reload the same level and drop in.
-                    load_level(current_level);
-                    game.state = GameState::Playing;
+                if (results_selected == 0) { // Replay: reload the same level through Loading.
+                    pending_level = current_level;
+                    game.state = GameState::Loading;
+                    loading_shown = false;
                 } else { // Back to Menu.
                     game.state = GameState::Menu;
                     screen = MenuScreen::Main;
@@ -646,12 +673,16 @@ int Run(HINSTANCE instance, int show_command) {
         if (game.actions.WasPressed(Action::ToggleDebug)) {
             show_debug = !show_debug;
         }
-        if (pick_backyard) {
-            load_level(0);
-        } else if (pick_campsite) {
-            load_level(1);
-        } else if (reload) {
-            load_level(current_level);
+        // A hotkey swap goes through the Loading state as well, so the same loading frame
+        // covers the build here as when a level is chosen from the menu. Mouse look is left
+        // as it is -- the loading screen does not use the cursor, and leaving it engaged
+        // means play resumes seamlessly once the build finishes, as an in-place reload did
+        // before this state existed.
+        if (pick_backyard || pick_campsite || reload) {
+            pending_level = pick_backyard ? 0 : pick_campsite ? 1 : current_level;
+            game.state = GameState::Loading;
+            loading_shown = false;
+            continue;
         }
 
         // Advance the physics scene on its fixed clock: the props, furniture and the

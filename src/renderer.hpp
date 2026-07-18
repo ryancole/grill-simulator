@@ -144,6 +144,14 @@ public:
     // line up with what is on screen. Rows span the full width, so only y matters.
     int MenuEntryAt(int x, int y, int entry_count) const;
 
+    // Draws the loading screen as its own complete frame, like RenderMenu: the menu
+    // backdrop, a `title` ("LOADING") and a quieter `subtitle` (the level's name) beneath
+    // it. Owns the swapchain buffer from clear to present. The game loop draws this once
+    // and presents it, so it is the frame left on screen while the following blocking
+    // level build stalls the thread. Reads the font atlas from the per-level texture heap,
+    // so a level must be loaded (the outgoing one, whose geometry simply is not drawn).
+    void RenderLoading(std::string_view title, std::string_view subtitle);
+
     // One line of the level-complete breakdown: an order's readout (e.g. "STEAK -- medium
     // rare to medium") and whether the turned-in tray met it. `met` colours the line so a
     // filled order and a missed one read apart at a glance. Built by the caller from
@@ -375,6 +383,10 @@ private:
     // then drawn, so they never alias one another in the shared buffer the way
     // repeated DrawText calls would.
     void DrawMenu(std::string_view title, std::span<const std::string> entries, int selected);
+    // Packs the loading screen -- the amber title and a quieter subtitle beneath it --
+    // into this frame's text region and draws it, the way DrawMenu does for the list. See
+    // RenderLoading for the arguments; called by it once the target is cleared and bound.
+    void DrawLoading(std::string_view title, std::string_view subtitle);
     // Packs the keybinds screen -- title plus two-column rows -- into this frame's text
     // region and draws it, the way DrawMenu does for the plain list. See RenderKeybinds
     // for the arguments; called by it once the render target is cleared and bound.

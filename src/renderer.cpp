@@ -3131,6 +3131,49 @@ void Renderer::DrawMenu(std::string_view title, std::span<const std::string> ent
     }
 }
 
+void Renderer::DrawLoading(std::string_view title, std::string_view subtitle) {
+    if (width_ == 0 || height_ == 0) {
+        return;
+    }
+
+    const float h = static_cast<float>(height_);
+    const float title_pixel = h * kMenuTitleFraction;
+    const float subtitle_pixel = h * kMenuEntryFraction;
+
+    // The same warm palette the menu uses: an amber title over a quiet grey subtitle.
+    const XMFLOAT4 title_color{1.0f, 0.82f, 0.48f, 1.0f};
+    const XMFLOAT4 subtitle_color{0.72f, 0.72f, 0.75f, 1.0f};
+
+    struct Run {
+        UINT first;
+        UINT count;
+        XMFLOAT4 color;
+    };
+    std::vector<Run> runs;
+
+    const FontFace face = HudFace();
+    UINT cursor = 0;
+    const UINT title_first = cursor;
+    cursor = LayoutLine(face, title, h * kMenuTitleBaselineFraction, title_pixel, cursor);
+    runs.push_back({title_first, cursor - title_first, title_color});
+
+    if (!subtitle.empty()) {
+        const UINT subtitle_first = cursor;
+        cursor = LayoutLine(face, subtitle, h * kMenuFirstEntryBaselineFraction, subtitle_pixel,
+                            cursor);
+        runs.push_back({subtitle_first, cursor - subtitle_first, subtitle_color});
+    }
+
+    if (cursor == 0) {
+        return;
+    }
+
+    BindTextPipeline();
+    for (const Run& run : runs) {
+        DrawTextRun(face, run.first, run.count, run.color);
+    }
+}
+
 void Renderer::DrawResults(std::string_view title, bool passed,
                            std::span<const ResultLine> lines,
                            std::span<const std::string> actions, int selected) {
@@ -3970,6 +4013,47 @@ void Renderer::RenderMenu(std::string_view title, std::span<const std::string> e
     DrawMenu(title, entries, selected);
 
     // The frame is complete; hand the swapchain buffer back for presentation.
+    TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
+                   D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                   D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_SYNC_NONE,
+                   D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_LAYOUT_PRESENT);
+
+    ThrowIfFailed(command_list_->Close(), "CommandList::Close");
+
+    ID3D12CommandList* lists[] = {command_list_.Get()};
+    queue_->ExecuteCommandLists(_countof(lists), lists);
+
+    ThrowIfFailed(swap_chain_->Present(1, 0), "SwapChain::Present");
+
+    MoveToNextFrame();
+}
+
+void Renderer::RenderLoading(std::string_view title, std::string_view subtitle) {
+    ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
+    ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
+    ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
+
+    // Same setup as RenderMenu: the font atlas rides the per-level texture heap (the
+    // outgoing level is still resident), so bind it, then own the swapchain buffer from
+    // clear to present over the menu backdrop.
+    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
+
+    command_list_->RSSetViewports(1, &viewport_);
+    command_list_->RSSetScissorRects(1, &scissor_);
+
+    TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
+                   D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_ACCESS_NO_ACCESS,
+                   D3D12_BARRIER_LAYOUT_UNDEFINED, D3D12_BARRIER_SYNC_RENDER_TARGET,
+                   D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET);
+
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                            static_cast<INT>(frame_index_), rtv_size_);
+    command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    command_list_->ClearRenderTargetView(rtv, kMenuClearColor, 0, nullptr);
+
+    DrawLoading(title, subtitle);
+
     TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
                    D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
                    D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_SYNC_NONE,
