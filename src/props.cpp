@@ -1,6 +1,7 @@
 #include "props.hpp"
 
 #include "actions.hpp"
+#include "flame.hpp"
 #include "fluid.hpp"
 #include "objectives.hpp"
 #include "physics.hpp"
@@ -300,7 +301,8 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
 
 void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt,
                    std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                   const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid) {
+                   const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid,
+                   Flame* flame) {
     // The camera-to-world matrix is right, up, forward, eye as its four rows.
     const XMVECTOR eye = camera_to_world.r[3];
     const XMVECTOR forward = XMVector3Normalize(camera_to_world.r[2]);
@@ -576,20 +578,14 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
                                       ramp(0.03f, 0.16f),   // smoke
                                       ramp(0.05f, 0.14f),   // fuel
                                       ramp(0.13f, 0.40f)}); // upward draft (m/s)
-        } else if (item.ability == Ability::Flame) {
-            // The lit lighter: a small flame at its muzzle (heat->Origin() sits there), on the
-            // instant the button is held with no build-up. Kept small -- it is a pilot flame,
-            // not a fire. A voxel sim renders something this tiny coarsely, but it keeps the
-            // whole game on one fire system.
-            const XMFLOAT3 muzzle = item.heat->Origin();
-            XMFLOAT4X4 box;
-            XMStoreFloat4x4(&box, XMMatrixTranslation(muzzle.x, muzzle.y, muzzle.z));
-            flow_emitters_.push_back({box,
-                                      {0.035f, 0.07f, 0.035f}, // small box at the muzzle
-                                      0.62f,   // temperature
-                                      0.04f,   // smoke
-                                      0.12f,   // fuel
-                                      0.40f}); // upward draft (m/s)
+        } else if (item.ability == Ability::Flame && flame != nullptr) {
+            // The lit lighter's pilot tongue stays a CPU particle flame at its muzzle
+            // (heat->Origin() sits there), not a Flow fire: the muzzle rides ~1 m from the
+            // eye, too close for the world-depth-tested Flow pass to show (it gets culled
+            // against the near ground), so the little flame is emitted as self-lit specks
+            // that draw in the world pass instead. The fuller fires -- caught logs, the
+            // grill grate -- are Flow, above and in main.
+            flame->Emit(item.heat->Origin(), dt, 1.0f);
         }
     }
 
