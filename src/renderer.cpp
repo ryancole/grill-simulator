@@ -3764,19 +3764,6 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
         DrawInstances(highlight, view_projection, sun, 1.0f, true);
     }
 
-    // The grill's fire and smoke, stepped and ray-marched into the HDR buffer while the
-    // scene depth still holds the yard (the arms clear it below) so the plume is occluded by
-    // the grill and the world. Flow records into this command list and leaves its own heap,
-    // root signature, PSO and render targets bound, so the scene's are restored right after.
-    RenderFlow(view, projection, flow_dt, flow_emitters);
-    ID3D12DescriptorHeap* post_flow_heaps[] = {texture_heap_.Get()};
-    command_list_->SetDescriptorHeaps(_countof(post_flow_heaps), post_flow_heaps);
-    command_list_->SetGraphicsRootSignature(root_signature_.Get());
-    command_list_->SetPipelineState(pipeline_state_.Get());
-    command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, &dsv);
-    command_list_->RSSetViewports(1, &viewport_);
-    command_list_->RSSetScissorRects(1, &scissor_);
-
     // The volumetric clouds, composited over the sky *before* the arms are drawn --
     // crucially while the depth buffer still holds the yard, so the world occludes
     // them: a pixel on the tree or the fence reads a near depth and the pass leaves it
@@ -3821,6 +3808,20 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     command_list_->SetDescriptorHeaps(_countof(scene_heaps), scene_heaps);
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
+
+    // The grill's fire and smoke, ray-marched into the HDR buffer *after* the clouds -- so a
+    // plume rising against the sky stands in front of them, not behind -- but before the arms
+    // clear depth, while the scene depth still holds the yard so the world occludes the smoke.
+    // Flow leaves its own heap, root signature, PSO and targets bound, so restore the scene's
+    // for the arms that follow.
+    RenderFlow(view, projection, flow_dt, flow_emitters);
+    ID3D12DescriptorHeap* post_flow_heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(post_flow_heaps), post_flow_heaps);
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    command_list_->SetPipelineState(pipeline_state_.Get());
+    command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, &dsv);
+    command_list_->RSSetViewports(1, &viewport_);
+    command_list_->RSSetScissorRects(1, &scissor_);
 
     // The arms live about half a metre from the eye, close enough that any wall
     // the player leans against would be drawn in front of them. Throwing the
