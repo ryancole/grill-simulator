@@ -122,6 +122,18 @@ std::optional<HeatDef> ReadHeat(const toml::table& entry, const std::filesystem:
     return h;
 }
 
+// What it takes to light a type, read from its `ignite_temp` (the air temperature that
+// sets it alight). Absent, the type simply never catches. A carryable field: nothing
+// among the props is ignitable yet.
+std::optional<IgnitableRequirements> ReadIgnitable(const toml::table& entry,
+                                                   const std::filesystem::path& path) {
+    const toml::node_view<const toml::node> temp = entry["ignite_temp"];
+    if (!temp) {
+        return std::nullopt;
+    }
+    return IgnitableRequirements(static_cast<float>(AsDouble(*temp.node(), path, "ignite_temp")));
+}
+
 // The model name a type must name, or a catalog error.
 std::string ModelOf(const toml::table& entry, const std::string& name,
                     const std::filesystem::path& path) {
@@ -249,6 +261,8 @@ void ReadCarryables(const toml::table& root, const char* section, bool is_food,
         def.ability = AbilityOr((*entry)["ability"], def.ability, path);
         // A carryable may radiate heat too (the firewood log). Same spelling as a prop's.
         def.heat = ReadHeat(*entry, path);
+        // ...and may be lightable, which is what switches that heat on in play.
+        def.ignitable = ReadIgnitable(*entry, path);
         out.emplace(name, std::move(def));
     }
 }

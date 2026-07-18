@@ -72,6 +72,9 @@ struct CarryableSpawn {
     // the item's pose). `heat_offset` is the hot centre in the model's own space.
     std::optional<HeatSource> heat;
     DirectX::XMFLOAT3 heat_offset{0.0f, 0.0f, 0.0f};
+    // What it takes to set this alight, if it can be (the log). Copied straight from the
+    // catalog -- pure requirements, no runtime state to build.
+    std::optional<IgnitableRequirements> ignitable;
 };
 
 // A world object the player can knock over -- the grill, the cooler -- given its

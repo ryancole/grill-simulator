@@ -29,6 +29,15 @@
 #                             "none" (default, no behaviour) or "grip_meat" (the tongs:
 #                             clamp a meat to carry it, press again to release).
 #
+#       heat               -- air temperature in F this radiates once lit, with the same
+#                             `heat_reach`/`heat_offset`/`heat_starts_on` a prop takes
+#                             (below). A carryable may be hot too: the firewood log.
+#       ignite_temp        -- air temperature in F that sets this alight. Reaching it
+#                             switches the type's own `heat` on -- so an ignitable type
+#                             wants a `heat` with `heat_starts_on = false` beside it, or
+#                             it catches and radiates nothing. Omit and it never burns.
+#                             Catching is one-way; nothing puts it out.
+#
 #   [tool.<name>]  -- a carryable that does not cook (the tongs, the serving tray). Same
 #       fields as a food minus the cook profile, plus:
 #       hold               -- how it sits in hand: "flat" (default), "tongs", or "tray".
@@ -148,8 +157,11 @@ ability = "spray_fluid"
 #
 # The flame is what makes it hot. `heat_starts_on = false` leaves it cold in the hand (and
 # in the dirt); striking it switches its heat on, and releasing switches it back off, so
-# it warms what it is held to only while it is actually burning. Hot at the tip like a real
-# flame but with a short `heat_reach`: it has to be held to a thing to do anything to it,
+# it warms what it is held to only while it is actually burning. 1300F at the tip is a real
+# butane flame (they run 1400-1900F) and is deliberately not shaved down: the arm's length
+# below means a log only ever feels the tail of the falloff, about 560F of it, and the log
+# needs 450F to catch -- at the 900F this first carried, a log held under the flame settled
+# at 407F and would not light. Short `heat_reach` though: it has to be held to a thing to do anything to it,
 # which is what makes it a lighter and not a blowtorch. That reach is set by the player's
 # arm, not by realism -- a carried item hangs about 0.8m under the eye, so a muzzle held
 # down at a log on the ground is still the better part of a metre off it, and a reach much
@@ -162,7 +174,7 @@ model = "lighter.glb"
 knock = 1.0
 sound = "metal"
 ability = "flame"
-heat = 900.0
+heat = 1300.0
 heat_reach = 1.2
 heat_starts_on = false
 
@@ -216,10 +228,19 @@ knock = 5.0
 sound = "meat"
 ability = "stack_in_fire_pit"
 # The log radiates heat once lit, but starts cold: `heat_starts_on = false` means it emits
-# nothing until it is switched on (lighting the fire is a later step). `heat` is the air
-# temperature at its centre when lit, `heat_reach` how far that carries, `heat_offset` the
-# hot centre lifted to the middle of the round.
+# nothing until it is switched on. `heat` is the air temperature at its centre when lit,
+# `heat_reach` how far that carries, `heat_offset` the hot centre lifted to the middle of
+# the round.
 heat = 500.0
 heat_reach = 1.6
 heat_offset = [0.0, 0.2, 0.0]
 heat_starts_on = false
+# ...and `ignite_temp` is what switches it on: hold air this hot around the log and it
+# catches. 450F is chosen against the two things that must and must not light it. The
+# lighter's flame imposes about 510F on something held under it at arm's length (the muzzle
+# cannot get closer than ~0.55m to the ground), so this has to sit under that or the lighter
+# could never light a fire at all. The lit grill's grate is 425F, so a log left leaning on
+# the barbecue does *not* go up. It also sets how fire spreads: a lit log is itself 500F,
+# which clears this out to about a third of a metre, so a stacked pile catches from its
+# neighbours and a log dropped across the clearing does not.
+ignite_temp = 450.0

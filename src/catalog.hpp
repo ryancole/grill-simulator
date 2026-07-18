@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cook_information.hpp"
+#include "ignitable_requirements.hpp"
 #include "rigid_body.hpp" // ImpactSound
 
 #include <DirectXMath.h>
@@ -82,6 +83,13 @@ struct CarryableDef {
     // start off, unlit), empty on the tongs and the foods. Props gives an item with one
     // a live HeatSource that rides its pose, so the log warms food set near it once lit.
     std::optional<HeatDef> heat;
+    // What it takes to set this alight, if it can be lit at all (the firewood log). Empty
+    // -- every other type -- simply never catches. Carried straight through: unlike the
+    // heat, these are pure requirements with no runtime state, so the item holds a copy of
+    // this very object rather than building something from it. Pairs with `heat`: igniting
+    // a thing switches its own heat on, so an ignitable type without one would catch fire
+    // and radiate nothing.
+    std::optional<IgnitableRequirements> ignitable;
     float knock_rating = 4.0f;
     ImpactSound impact_sound = ImpactSound::Meat;
     HoldStyle hold = HoldStyle::Flat;

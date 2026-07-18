@@ -155,7 +155,7 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
         // so the item can swap look as it cooks.
         Add(spawn.models, pool[spawn.models.front().model], spawn.name, spawn.pos, spawn.yaw,
             HoldFor(spawn.hold), spawn.knock_rating, spawn.impact_sound, spawn.cook, spawn.serve,
-            spawn.ability, spawn.heat, spawn.heat_offset);
+            spawn.ability, spawn.heat, spawn.heat_offset, spawn.ignitable);
     }
 }
 
@@ -227,8 +227,12 @@ void Props::RebuildTransform(Item& item) {
 }
 
 XMFLOAT3 Props::ItemTint(const Item& item) {
-    // A burning log glows ember orange -- the one visible cue the pit is lit.
-    if (item.in_fire_pit && item.heat && item.heat->IsOn()) {
+    // Anything that has caught fire glows ember orange -- the one visible cue a thing is
+    // burning, wherever it lies. Keyed on being ignitable rather than on lying in the pit:
+    // a log lit on the grass is just as alight as one in the fire, and a log is not the
+    // only thing here whose heat is on -- the lighter's is too, while it burns, and a
+    // lighter is the thing doing the lighting, not a thing that caught.
+    if (item.ignitable && item.heat && item.heat->IsOn()) {
         return kEmberTint;
     }
     // Raw meat's tint is white, so this leaves uncooked food and the non-cooking
@@ -259,7 +263,7 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
                 XMFLOAT3 position, float yaw_degrees, FXMMATRIX held_local, float knock_rating,
                 ImpactSound impact_sound, std::optional<CookProfile> cook,
                 std::optional<ServeDef> serve, Ability ability, std::optional<HeatSource> heat,
-                XMFLOAT3 heat_offset) {
+                XMFLOAT3 heat_offset, std::optional<IgnitableRequirements> ignitable) {
     Item item{};
     item.stages = std::move(stages);
     item.name = std::move(name);
@@ -271,6 +275,7 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
     item.serve = serve;
     item.heat = heat;
     item.heat_offset = heat_offset;
+    item.ignitable = ignitable;
     DeriveBodyShape(item, base_model);
 
     // Seed the body so the model origin lands at `position`, yawed -- the same
@@ -509,6 +514,33 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     }
 
+    // Light anything ignitable the air has got hot enough around: hold the lighter's flame
+    // to a log and it catches, and once caught it is a heat source itself -- which is the
+    // whole point, since that is what cooks the food over it and what lights the next log.
+    // Igniting is one-way and needs no flag of its own: an item is alight exactly when its
+    // own heat is on, so a lit one is skipped and nothing here ever puts a fire out.
+    //
+    // After the origin refresh above (so every source is where it is this frame) and before
+    // the cook below, so a log that catches this frame warms the food over it this frame.
+    // Fire spreads because a lit log is just another source the next one reads -- a stack
+    // can chain in a single pass, which is what a well-built fire should do.
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        Item& item = items_[i];
+        if (!item.ignitable || !item.heat || item.heat->IsOn()) {
+            continue;
+        }
+        // Ask at the item's own heat centre -- the middle of the round, which the origin
+        // refresh above has already placed in the world. The point that will radiate once
+        // it catches is the point that has to get hot, which is both the symmetric rule and
+        // the fair one: an item's model origin sits on its *underside*, so asking there
+        // would measure the air at the spot furthest from a flame held over it.
+        const XMFLOAT3 hot_centre = item.heat->Origin();
+        const XMVECTOR point = XMLoadFloat3(&hot_centre);
+        if (item.ignitable->MetBy(AmbientAt(point, heat_sources))) {
+            item.heat->SetOn(true);
+        }
+    }
+
     // Advance the cook on every meat, carried or resting alike. Each cooks against
     // the surrounding air where it sits: room temperature by default, or the hottest
     // temperature any heat source imposes there -- the yard's furniture heat (the grill's
@@ -525,19 +557,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         const XMMATRIX pose = i == carried_
                                   ? XMLoadFloat4x4(&item.held_local) * camera_to_world
                                   : XMLoadFloat4x4(&item.resting);
-        const XMVECTOR point = pose.r[3];
-        float ambient_f = CookInformation::kRoomTempF;
-        for (const HeatSource& source : heat_sources) {
-            ambient_f = std::max(ambient_f, source.TemperatureAt(point));
-        }
-        // A carryable's own heat (a lit log) warms nearby meats too. An off source returns
-        // room air, so an unlit stack costs a call but changes nothing.
-        for (const Item& other : items_) {
-            if (other.heat) {
-                ambient_f = std::max(ambient_f, other.heat->TemperatureAt(point));
-            }
-        }
-        item.cook->Update(ambient_f, dt);
+        item.cook->Update(AmbientAt(pose.r[3], heat_sources), dt);
     }
 
     // Rebuild the draw lists from the current state. There are a handful of
@@ -874,6 +894,25 @@ XMMATRIX Props::CurrentPose(int index, FXMMATRIX camera_to_world) const {
         return XMLoadFloat4x4(&items_[index].held_local) * camera_to_world;
     }
     return XMLoadFloat4x4(&items_[index].resting);
+}
+
+float Props::AmbientAt(FXMVECTOR point, std::span<const HeatSource> heat_sources) const {
+    // The hottest thing wins: heat does not stack here, so standing a log in a campfire
+    // and a lit grill at once is as hot as the hotter of the two, not their sum.
+    float ambient_f = CookInformation::kRoomTempF;
+    for (const HeatSource& source : heat_sources) {
+        ambient_f = std::max(ambient_f, source.TemperatureAt(point));
+    }
+    // A carryable's own heat -- a lit log, a struck lighter -- warms what is near it too.
+    // An off source returns room air, so an unlit stack costs a call and changes nothing.
+    // An item's own heat is included: harmless, since a thing is only hot once it is lit,
+    // and once lit there is nothing left to light.
+    for (const Item& other : items_) {
+        if (other.heat) {
+            ambient_f = std::max(ambient_f, other.heat->TemperatureAt(point));
+        }
+    }
+    return ambient_f;
 }
 
 XMVECTOR Props::NozzleLocal(const Item& item) const {

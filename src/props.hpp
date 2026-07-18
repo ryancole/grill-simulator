@@ -3,6 +3,7 @@
 #include "collision.hpp"
 #include "cook_information.hpp"
 #include "heat_source.hpp"
+#include "ignitable_requirements.hpp"
 #include "rigid_body.hpp"
 #include "scene.hpp"
 #include "serve_zone.hpp"
@@ -175,6 +176,12 @@ private:
         std::optional<HeatSource> heat;
         DirectX::XMFLOAT3 heat_offset{0.0f, 0.0f, 0.0f};
 
+        // Set only on a carryable that can be set alight (the firewood log): what the air
+        // around it has to do to light it. Empty -- the meats, the tools -- and it simply
+        // never catches. There is no "is it lit" flag beside this: an ignited item is one
+        // whose own `heat` is switched on, which is the whole point of catching fire.
+        std::optional<IgnitableRequirements> ignitable;
+
         // Set once a meat has been delivered onto a tray. A served meat is done with
         // play: its cook is frozen at the band it was served in and its body stays out
         // of the simulation. It is not a static display -- it is stuck to the tray it
@@ -208,7 +215,12 @@ private:
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
              float knock_rating, ImpactSound impact_sound, std::optional<CookProfile> cook,
              std::optional<ServeDef> serve, Ability ability, std::optional<HeatSource> heat,
-             DirectX::XMFLOAT3 heat_offset);
+             DirectX::XMFLOAT3 heat_offset, std::optional<IgnitableRequirements> ignitable);
+    // The air temperature imposed on `point` by everything hot this frame: the level's
+    // furniture heat (the grill's grate) and every carryable's own (a lit log, a struck
+    // lighter), whichever is hottest, or room air when nothing reaches. The one place the
+    // "how hot is it here?" question is answered -- the cook and the ignition both ask it.
+    float AmbientAt(DirectX::FXMVECTOR point, std::span<const HeatSource> heat_sources) const;
     // Fills an item's box shape (half_extents, com_offset) from the union of its
     // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);
