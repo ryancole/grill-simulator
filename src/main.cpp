@@ -3,6 +3,7 @@
 #include "camera.hpp"
 #include "dx_common.hpp"
 #include "flame.hpp"
+#include "flow_volume.hpp"
 #include "fluid.hpp"
 #include "furniture.hpp"
 #include "input.hpp"
@@ -705,8 +706,11 @@ int Run(HINSTANCE instance, int show_command) {
             continue;
         }
 
-        const XMMATRIX view_projection =
-            game.camera.ViewMatrix() * game.camera.ProjectionMatrix(game.renderer.AspectRatio());
+        // Kept separate as well as combined: the scene passes want the product, but Flow
+        // reconstructs its rays from the view and projection individually (see RenderFlow).
+        const XMMATRIX view = game.camera.ViewMatrix();
+        const XMMATRIX projection = game.camera.ProjectionMatrix(game.renderer.AspectRatio());
+        const XMMATRIX view_projection = view * projection;
         Props& props = game.world->props();
 
         // The order ticket data, read once for the polished orders rail further down.
@@ -792,10 +796,17 @@ int Run(HINSTANCE instance, int show_command) {
         const std::span<const MeshInstance> flame = game.flame.Instances();
         world_instances.insert(world_instances.end(), flame.begin(), flame.end());
 
+        // Phase-1 vertical slice: one always-on fire source over the backyard grill grate,
+        // so Flow's smoke can be seen and the pipeline exercised before the emitters are
+        // driven from the real burning-things state (grill HeatSources / caught logs).
+        const FlowEmitter grill_fire{{0.0f, 0.7f, 5.0f}, 0.3f, 3.0f, 1.0f, 1.0f, 2.0f};
+        const FlowEmitter flow_emitters[] = {grill_fire};
+
         game.renderer.Render(game.world->scene(), world_instances, highlights,
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
                              view_projection, game.camera.Position(), prompt,
-                             debug_lines, order_cards, meat_cards);
+                             debug_lines, order_cards, meat_cards, view, projection, dt,
+                             flow_emitters);
     }
 
     game.renderer.Shutdown();

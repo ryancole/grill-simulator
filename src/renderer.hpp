@@ -2,6 +2,7 @@
 
 #include "dx_common.hpp"
 #include "environment.hpp"
+#include "flow_volume.hpp"
 #include "font.hpp"
 #include "scene.hpp"
 #include "viewmodel.hpp"
@@ -121,7 +122,9 @@ public:
                 std::span<const MeshInstance> held_props,
                 const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
                 std::string_view hud_prompt, std::span<const std::string> debug_lines,
-                std::span<const OrderCard> orders, std::span<const MeatCard> meats);
+                std::span<const OrderCard> orders, std::span<const MeatCard> meats,
+                const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, float flow_dt,
+                std::span<const FlowEmitter> flow_emitters);
     // Draws the launch/pause menu as its own complete frame: a solid backdrop, a
     // `title`, and the vertical list of `entries` with the one at `selected` picked
     // out. Owns the swapchain buffer from clear to present, so the game loop calls
@@ -450,6 +453,16 @@ private:
     // scene's for whatever follows.
     void RenderGrass(const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
                      float time);
+    // Steps and ray-marches the NVIDIA Flow fire/smoke sim into the HDR scene buffer. Runs
+    // in the world pass while the scene depth is still a depth target and holds the yard, so
+    // the smoke is occluded by the grill and the world; the arms clear depth afterward and
+    // draw over it. Flow records into our command list and binds its own descriptor heap and
+    // pipelines, so the caller restores the scene's heap, root signature, PSO and render
+    // targets after -- the same bracket the cloud pass uses. A no-op with no emitters and
+    // nothing already burning in the grid. `view` and `projection` are the camera's,
+    // separately (Flow reconstructs rays from both); `dt` steps the sim.
+    void RenderFlow(const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, float dt,
+                    std::span<const FlowEmitter> emitters);
     // Casts the grass into the sun's shadow map: runs the amplification and mesh shaders
     // from the light's point of view with no pixel shader, writing the field's depth so
     // it shadows the ground and the props. Called from RenderShadowMap while the map is a
@@ -591,6 +604,10 @@ private:
     // the shaders once baked in, so the first frames before any level loads -- and
     // the reflection probe's own default capture -- are drawn as they always were.
     Environment environment_ = kDefaultEnvironment;
+    // The NVIDIA Flow fire/smoke sim, run by RenderFlow each frame. Session-persistent like
+    // the device and pipelines: it comes up in Initialize on our device/queue/fence and is
+    // reset (not rebuilt) across level swaps.
+    FlowVolume flow_;
     // One aligned FrameConstants region per frame in flight, kept mapped and
     // rewritten each frame with the sun matrix and the current eye position. Per
     // frame because the camera moves, and buffered per frame so writing this

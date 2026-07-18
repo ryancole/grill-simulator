@@ -578,6 +578,11 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
         CreateGrassPipeline();
     }
 
+    // The Flow fire/smoke sim runs on our own device, recording into our command list and
+    // versioning against our fence -- all of which exist now. Its grid and renderer are
+    // built lazily on the first RenderFlow, where a recording command list is available.
+    flow_.Initialize(device_.Get(), queue_.Get(), fence_.Get());
+
     // Everything above is the session's, not the level's. The scene geometry, the
     // font atlas and the reflection probe come up in LoadScene, so a level can be
     // swapped out from under all this without rebuilding the device or pipelines.
@@ -596,6 +601,10 @@ void Renderer::ReleaseScene() {
     // The GPU may still be reading this level's buffers, textures, heap or probe in
     // the frame in flight, so drain it before any of these ComPtrs let go.
     FlushGpu();
+
+    // A level swap runs through here; empty the Flow grid so a plume lit in one yard does
+    // not hang in the air of the next. The grid's allocation is kept for the next level.
+    flow_.Clear();
 
     // Everything CreateSceneGeometry and CaptureReflectionProbe built. The shared
     // heap is torn down whole -- the font atlas and shadow-map SRVs live in it too,
@@ -3552,12 +3561,98 @@ void Renderer::DrawOutlines(std::span<const MeshInstance> instances,
     }
 }
 
+void Renderer::RenderFlow(const XMMATRIX& view, const XMMATRIX& projection, float dt,
+                          std::span<const FlowEmitter> emitters) {
+    // Hand Flow our HDR scene buffer as its composite target and our scene depth for the
+    // ray-march's depth test. Both are described explicitly because Flow re-creates the
+    // views on its side; the states named here are the ones the world pass left them in at
+    // this point -- HDR a render target, depth a depth target -- which is exactly what Flow
+    // expects (it issues its own transitions to read depth and restores them).
+    FlowTarget target = {};
+
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE hdr_rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                static_cast<INT>(kHdrRtvIndex), rtv_size_);
+    target.color_resource = hdr_target_.Get();
+    target.color_rtv = hdr_rtv;
+    target.color_rtv_desc.Format = kHdrFormat;
+    target.color_rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+
+    target.depth_resource = depth_stencil_.Get();
+    target.depth_dsv = dsv_heap_->GetCPUDescriptorHandleForHeapStart();
+    target.depth_dsv_desc.Format = kDepthFormat;
+    target.depth_dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+
+    target.depth_srv_desc.Format = kDepthSrvFormat;
+    target.depth_srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    target.depth_srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    target.depth_srv_desc.Texture2D.MipLevels = 1;
+
+    target.viewport = viewport_;
+    target.scissor = scissor_;
+
+    // The fence values that bracket this frame's command list: the queue's completed value
+    // now, and the value it will be signalled with once this list retires (MoveToNextFrame
+    // signals fence_values_[frame_index_] before bumping it). Flow frees internal buffers
+    // whose release value has passed the completed one.
+    const UINT64 last_fence_completed = fence_->GetCompletedValue();
+    const UINT64 next_fence_value = fence_values_[frame_index_];
+
+    // Bridging enhanced barriers (this renderer) to legacy ones (Flow's internals) has two
+    // rules to satisfy at once. First, D3D12 forbids a legacy barrier on a resource an
+    // enhanced barrier last moved unless it is parked in the common layout -- so decay the
+    // HDR buffer and the scene depth to COMMON with enhanced barriers. Second, Flow assumes
+    // its render target and depth sit in *concrete* legacy states, not COMMON: a COMMON
+    // resource is implicitly promoted on first access, after which Flow's own before=COMMON
+    // barrier mismatches. So immediately re-transition, with legacy barriers, into the
+    // render-target and depth-write states Flow's demo hands it. The whole thing reverses
+    // after the call.
+    TextureBarrier(command_list_.Get(), hdr_target_.Get(), D3D12_BARRIER_SYNC_RENDER_TARGET,
+                   D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+                   D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_LAYOUT_COMMON);
+    TextureBarrier(command_list_.Get(), depth_stencil_.Get(), D3D12_BARRIER_SYNC_DEPTH_STENCIL,
+                   D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
+                   D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_LAYOUT_COMMON);
+
+    const D3D12_RESOURCE_BARRIER to_flow[] = {
+        CD3DX12_RESOURCE_BARRIER::Transition(hdr_target_.Get(), D3D12_RESOURCE_STATE_COMMON,
+                                             D3D12_RESOURCE_STATE_RENDER_TARGET),
+        CD3DX12_RESOURCE_BARRIER::Transition(depth_stencil_.Get(), D3D12_RESOURCE_STATE_COMMON,
+                                             D3D12_RESOURCE_STATE_DEPTH_WRITE),
+    };
+    command_list_->ResourceBarrier(_countof(to_flow), to_flow);
+
+    flow_.Render(command_list_.Get(), last_fence_completed, next_fence_value, dt, emitters, target,
+                 view, projection);
+
+    // Flow leaves the resources in the concrete states it was told (its transitions restore
+    // to currentState). Return them to COMMON with legacy barriers, then promote back to the
+    // working layouts with enhanced barriers for the cloud pass and arms that follow.
+    const D3D12_RESOURCE_BARRIER from_flow[] = {
+        CD3DX12_RESOURCE_BARRIER::Transition(hdr_target_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                             D3D12_RESOURCE_STATE_COMMON),
+        CD3DX12_RESOURCE_BARRIER::Transition(depth_stencil_.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                                             D3D12_RESOURCE_STATE_COMMON),
+    };
+    command_list_->ResourceBarrier(_countof(from_flow), from_flow);
+
+    TextureBarrier(command_list_.Get(), hdr_target_.Get(), D3D12_BARRIER_SYNC_ALL,
+                   D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_LAYOUT_COMMON,
+                   D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                   D3D12_BARRIER_LAYOUT_RENDER_TARGET);
+    TextureBarrier(command_list_.Get(), depth_stencil_.Get(), D3D12_BARRIER_SYNC_ALL,
+                   D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_LAYOUT_COMMON,
+                   D3D12_BARRIER_SYNC_DEPTH_STENCIL, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+                   D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE);
+}
+
 void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                       std::span<const MeshInstance> held_props, const XMMATRIX& view_projection,
                       XMFLOAT3 camera_position, std::string_view hud_prompt,
                       std::span<const std::string> debug_lines,
-                      std::span<const OrderCard> orders, std::span<const MeatCard> meats) {
+                      std::span<const OrderCard> orders, std::span<const MeatCard> meats,
+                      const XMMATRIX& view, const XMMATRIX& projection, float flow_dt,
+                      std::span<const FlowEmitter> flow_emitters) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
@@ -3664,6 +3759,19 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
         command_list_->SetGraphicsRootSignature(root_signature_.Get());
         DrawInstances(highlight, view_projection, sun, 1.0f, true);
     }
+
+    // The grill's fire and smoke, stepped and ray-marched into the HDR buffer while the
+    // scene depth still holds the yard (the arms clear it below) so the plume is occluded by
+    // the grill and the world. Flow records into this command list and leaves its own heap,
+    // root signature, PSO and render targets bound, so the scene's are restored right after.
+    RenderFlow(view, projection, flow_dt, flow_emitters);
+    ID3D12DescriptorHeap* post_flow_heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(post_flow_heaps), post_flow_heaps);
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    command_list_->SetPipelineState(pipeline_state_.Get());
+    command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, &dsv);
+    command_list_->RSSetViewports(1, &viewport_);
+    command_list_->RSSetScissorRects(1, &scissor_);
 
     // The volumetric clouds, composited over the sky *before* the arms are drawn --
     // crucially while the depth buffer still holds the yard, so the world occludes
@@ -4104,6 +4212,8 @@ void Renderer::Shutdown() {
     if (initialized_) {
         FlushGpu();
     }
+    // With the GPU idle, release the Flow objects before the device goes away.
+    flow_.Shutdown();
     if (fence_event_) {
         CloseHandle(fence_event_);
         fence_event_ = nullptr;
