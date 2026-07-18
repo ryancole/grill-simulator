@@ -2,6 +2,7 @@
 
 #include "collision.hpp"
 #include "cook_information.hpp"
+#include "flow_volume.hpp"
 #include "heat_source.hpp"
 #include "ignitable_requirements.hpp"
 #include "rigid_body.hpp"
@@ -80,6 +81,13 @@ public:
     // glowing outline so the player sees which one an E press would grab. Empty
     // while carrying, since nothing is being aimed at then.
     std::span<const MeshInstance> HighlightInstances() const { return highlight_; }
+
+    // The fire/smoke sources the burning props hand to NVIDIA Flow this frame -- one per
+    // ignitable carryable that has caught (a lit log), rooted at its top surface. The lighter
+    // is not here: its little pilot tongue stays the CPU Flame, so Flow is only the fuller
+    // fires. Empty when nothing ignitable is alight. Rebuilt each Update; the caller merges
+    // it with the furniture's grate fire before handing the lot to the renderer.
+    std::span<const FlowEmitter> FlowEmitters() const { return flow_emitters_; }
 
     // The HUD hint for what the E key would do right now: "[E] Pick up tongs"
     // when a loose object is in reach and looked at, "[E] Drop" while carrying,
@@ -334,4 +342,7 @@ private:
     std::vector<MeshInstance> world_;
     std::vector<MeshInstance> held_;
     std::vector<MeshInstance> highlight_;
+    // Rebuilt each Update: a Flow fire/smoke source for every ignitable carryable currently
+    // alight. See FlowEmitters().
+    std::vector<FlowEmitter> flow_emitters_;
 };

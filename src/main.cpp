@@ -796,11 +796,19 @@ int Run(HINSTANCE instance, int show_command) {
         const std::span<const MeshInstance> flame = game.flame.Instances();
         world_instances.insert(world_instances.end(), flame.begin(), flame.end());
 
-        // Phase-1 vertical slice: one always-on fire source over the backyard grill grate,
-        // so Flow's smoke can be seen and the pipeline exercised before the emitters are
-        // driven from the real burning-things state (grill HeatSources / caught logs).
-        const FlowEmitter grill_fire{{0.0f, 0.7f, 5.0f}, 0.3f, 3.0f, 1.0f, 1.0f, 2.0f};
-        const FlowEmitter flow_emitters[] = {grill_fire};
+        // The frame's fire/smoke sources for NVIDIA Flow: the grate of any lit furniture
+        // (the grill, hot from the start) plus every burning log the props report. Merged
+        // into the one list the renderer steps the sim from.
+        std::vector<FlowEmitter> flow_emitters;
+        for (const HeatSource& hot : game.world->furniture().HeatSources()) {
+            if (hot.IsOn()) {
+                const XMFLOAT3 o = hot.Origin();
+                // Sit the fire just above the grate so it rises off the bars, not inside.
+                flow_emitters.push_back({{o.x, o.y + 0.1f, o.z}, 0.35f, 3.0f, 1.0f, 1.0f, 2.0f});
+            }
+        }
+        const std::span<const FlowEmitter> log_fires = props.FlowEmitters();
+        flow_emitters.insert(flow_emitters.end(), log_fires.begin(), log_fires.end());
 
         game.renderer.Render(game.world->scene(), world_instances, highlights,
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),

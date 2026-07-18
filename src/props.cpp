@@ -551,6 +551,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     // muzzle, a log's middle. A caught log burns bigger than the lighter's pilot tongue, so
     // its flame is scaled up. Emitting is all this does -- Flame::Update ages and draws the
     // specks, and the heat that cooks and spreads is the HeatSource, already handled.
+    flow_emitters_.clear();
     if (flame != nullptr) {
         for (const Item& item : items_) {
             if (!item.heat || !item.heat->IsOn()) {
@@ -568,6 +569,13 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
             }
             const float scale = item.ignitable ? kIgnitedFlameScale : 1.0f;
             flame->Emit(origin, dt, scale);
+
+            // The same burning things feed NVIDIA Flow's volumetric smoke, but only the
+            // ignitable ones (a lit log): the fuller fire is Flow's, while the lighter's
+            // pilot tongue stays the cheap CPU Flame above. Rooted at the same lifted origin.
+            if (item.ignitable) {
+                flow_emitters_.push_back({origin, 0.35f, 3.0f, 1.2f, 1.0f, 2.5f});
+            }
         }
     }
 
