@@ -24,6 +24,9 @@ enum class Action {
     MoveRight,
     Jump,
     Sprint,
+    // Held to crouch: shrinks the player -- capsule and eyeline both drop -- for as
+    // long as it is down, and slows the walk while shrunk. A hold, not a toggle.
+    Crouch,
     Interact,
     // The main action, on the left mouse button by default. Triggers the ability of
     // whatever carryable the player is holding -- different per item, defined by the

@@ -72,6 +72,10 @@ private:
     DirectX::XMFLOAT2 velocity_{0.0f, 0.0f};
     // Metres per second, positive up. Gravity owns this between jumps.
     float vertical_speed_ = 0.0f;
+    // How far into a crouch the body is: 0 stands at full height, 1 is fully
+    // crouched. Eased toward the held/released crouch action each frame, so both
+    // the capsule and the eyeline slide between the two statures rather than snap.
+    float crouch_ = 0.0f;
     // Whether the player was standing on something at the end of the last frame,
     // which is the only state a jump is allowed to start from.
     bool grounded_ = true;
