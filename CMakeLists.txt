@@ -46,6 +46,7 @@ add_executable(grill WIN32
   src/flame.cpp
   src/fluid.cpp
   src/heat_source.cpp
+  src/ignitable_requirements.cpp
   src/image.cpp
   src/input.cpp
   src/level.cpp

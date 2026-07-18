@@ -517,21 +517,27 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     //
     // After the origin refresh above (so every source is where it is this frame) and before
     // the cook below, so a log that catches this frame warms the food over it this frame.
-    // Fire spreads because a lit log is just another source the next one reads -- a stack
-    // can chain in a single pass, which is what a well-built fire should do.
+    // Fire still spreads -- a lit log is a heat source the next one reads -- but no longer
+    // in a single pass: each log has to heat through to its own ignition temperature first
+    // (see IgnitableRequirements), so a stack catches progressively over seconds rather
+    // than flashing over the instant the first log lights.
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
         Item& item = items_[i];
         if (!item.ignitable || !item.heat || item.heat->IsOn()) {
             continue;
         }
-        // Ask at the item's own heat centre -- the middle of the round, which the origin
-        // refresh above has already placed in the world. The point that will radiate once
-        // it catches is the point that has to get hot, which is both the symmetric rule and
-        // the fair one: an item's model origin sits on its *underside*, so asking there
-        // would measure the air at the spot furthest from a flame held over it.
+        // Warm it toward the air at its own heat centre -- the middle of the round, which
+        // the origin refresh above has already placed in the world. The point that will
+        // radiate once it catches is the point that has to get hot, which is both the
+        // symmetric rule and the fair one: an item's model origin sits on its *underside*,
+        // so asking there would measure the air at the spot furthest from a flame held
+        // over it. It catches once its own temperature has climbed past the threshold, not
+        // the instant the air does -- so the flame has to be held on it, and a flame taken
+        // away too soon lets it cool back down.
         const XMFLOAT3 hot_centre = item.heat->Origin();
         const XMVECTOR point = XMLoadFloat3(&hot_centre);
-        if (item.ignitable->MetBy(AmbientAt(point, heat_sources))) {
+        item.ignitable->Update(AmbientAt(point, heat_sources), dt);
+        if (item.ignitable->Ignited()) {
             item.heat->SetOn(true);
         }
     }

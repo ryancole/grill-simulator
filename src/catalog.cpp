@@ -131,7 +131,11 @@ std::optional<IgnitableRequirements> ReadIgnitable(const toml::table& entry,
     if (!temp) {
         return std::nullopt;
     }
-    return IgnitableRequirements(static_cast<float>(AsDouble(*temp.node(), path, "ignite_temp")));
+    const float ignite_temp = static_cast<float>(AsDouble(*temp.node(), path, "ignite_temp"));
+    // How slowly it heats through to that (default matches the struct's own): a couple of
+    // these seconds of a flame held on it before it catches. Absent leaves the default.
+    const float tau = NumberOr(entry["ignite_tau"], 3.0f, path, "ignite_tau");
+    return IgnitableRequirements(ignite_temp, tau);
 }
 
 // The model name a type must name, or a catalog error.

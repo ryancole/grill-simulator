@@ -32,11 +32,17 @@
 #       heat               -- air temperature in F this radiates once lit, with the same
 #                             `heat_reach`/`heat_offset`/`heat_starts_on` a prop takes
 #                             (below). A carryable may be hot too: the firewood log.
-#       ignite_temp        -- air temperature in F that sets this alight. Reaching it
+#       ignite_temp        -- temperature in F this must heat through to before it catches.
+#                             It does not light the instant the air is this hot: its own
+#                             temperature eases toward the surrounding air (see ignite_tau)
+#                             and it catches only once that crosses the threshold, then
 #                             switches the type's own `heat` on -- so an ignitable type
 #                             wants a `heat` with `heat_starts_on = false` beside it, or
 #                             it catches and radiates nothing. Omit and it never burns.
 #                             Catching is one-way; nothing puts it out.
+#       ignite_tau         -- how slowly it heats through, a time constant in seconds
+#                             (default 3): bigger = it must be held in the flame longer to
+#                             catch, and cools back faster if the flame leaves too soon.
 #
 #   [tool.<name>]  -- a carryable that does not cook (the tongs, the serving tray). Same
 #       fields as a food minus the cook profile, plus:
@@ -235,12 +241,19 @@ heat = 500.0
 heat_reach = 1.6
 heat_offset = [0.0, 0.2, 0.0]
 heat_starts_on = false
-# ...and `ignite_temp` is what switches it on: hold air this hot around the log and it
-# catches. 450F is chosen against the two things that must and must not light it. The
-# lighter's flame imposes about 510F on something held under it at arm's length (the muzzle
-# cannot get closer than ~0.55m to the ground), so this has to sit under that or the lighter
-# could never light a fire at all. The lit grill's grate is 425F, so a log left leaning on
-# the barbecue does *not* go up. It also sets how fire spreads: a lit log is itself 500F,
-# which clears this out to about a third of a metre, so a stacked pile catches from its
-# neighbours and a log dropped across the clearing does not.
+# ...and `ignite_temp` is the temperature it must heat through to before it catches -- it
+# does not light the instant the air is that hot, but warms toward the air over `ignite_tau`
+# seconds and catches when its own temperature crosses this. 450F is chosen against the two
+# things that must and must not light it. The lighter's flame imposes about 510F on
+# something held under it at arm's length (the muzzle cannot get closer than ~0.55m to the
+# ground), so this has to sit under that or the lighter could never light a fire at all. The
+# lit grill's grate is 425F, so a log left leaning on the barbecue does *not* go up. It also
+# sets how fire spreads: a lit log is itself 500F, which clears this out to about a third of
+# a metre, so a stacked pile catches from its neighbours and a log dropped across the
+# clearing does not.
 ignite_temp = 450.0
+# How slowly it heats through to that. At 3s a log held right in the lighter's ~560F flame
+# takes about four seconds to catch -- a deliberate hold, not a tap -- and a log warmed by a
+# neighbour's cooler 500F fire takes longer still, so a stack lights one at a time rather
+# than all at once. Take the flame away early and it cools back toward room air.
+ignite_tau = 3.0
