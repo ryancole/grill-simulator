@@ -3,6 +3,7 @@
 #include "collision.hpp"
 #include "cook_information.hpp"
 #include "heat_source.hpp"
+#include "ignitable_requirements.hpp"
 #include "rigid_body.hpp"
 #include "scene.hpp"
 #include "serve_zone.hpp"
@@ -16,6 +17,7 @@
 #include <vector>
 
 class Actions;
+class Flame;
 class Fluid;
 class Objectives;
 class Physics;
@@ -55,12 +57,16 @@ public:
     // cook frozen at that band. The judging happens later: `turn_in` is the level's
     // static delivery zone (null on a sandbox level), and pressing Interact while
     // carrying the loaded tray inside it hands every stuck meat to `objectives` at once
-    // and ends the level -- see TurnedIn. `fluid` is the session's GPU fluid: the
-    // lighter-fluid can sprays into it while the primary action is held, and droplets
-    // pooling inside `fire_pit` prime the pit until the stacked logs light.
+    // and ends the level -- see TurnedIn. `fire_pit` is the level's fire-pit zone (null on
+    // a level without one): a log held over it is stacked onto it by the primary action.
+    // `fluid` is the session's GPU fluid, which the lighter-fluid can sprays into while the
+    // primary action is held; the fluid has no consequence beyond the spray itself today.
+    // `flame` is the session's flame effect, which the lighter burns at its muzzle for as
+    // long as the primary action is held -- and which is what makes the lighter hot.
+    // Nothing lights the fire pit yet.
     void Update(const DirectX::XMMATRIX& camera_to_world, const Actions& actions, float dt,
                 std::span<const HeatSource> heat_sources, const ServeZone* turn_in,
-                const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid);
+                const ServeZone* fire_pit, Objectives& objectives, Fluid* fluid, Flame* flame);
 
     // The objects resting in the yard, drawn in the world pass under the world's
     // sun. Excludes whatever is currently carried.
@@ -170,6 +176,12 @@ private:
         std::optional<HeatSource> heat;
         DirectX::XMFLOAT3 heat_offset{0.0f, 0.0f, 0.0f};
 
+        // Set only on a carryable that can be set alight (the firewood log): what the air
+        // around it has to do to light it. Empty -- the meats, the tools -- and it simply
+        // never catches. There is no "is it lit" flag beside this: an ignited item is one
+        // whose own `heat` is switched on, which is the whole point of catching fire.
+        std::optional<IgnitableRequirements> ignitable;
+
         // Set once a meat has been delivered onto a tray. A served meat is done with
         // play: its cook is frozen at the band it was served in and its body stays out
         // of the simulation. It is not a static display -- it is stuck to the tray it
@@ -203,7 +215,12 @@ private:
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
              float knock_rating, ImpactSound impact_sound, std::optional<CookProfile> cook,
              std::optional<ServeDef> serve, Ability ability, std::optional<HeatSource> heat,
-             DirectX::XMFLOAT3 heat_offset);
+             DirectX::XMFLOAT3 heat_offset, std::optional<IgnitableRequirements> ignitable);
+    // The air temperature imposed on `point` by everything hot this frame: the level's
+    // furniture heat (the grill's grate) and every carryable's own (a lit log, a struck
+    // lighter), whichever is hottest, or room air when nothing reaches. The one place the
+    // "how hot is it here?" question is answered -- the cook and the ignition both ask it.
+    float AmbientAt(DirectX::FXMVECTOR point, std::span<const HeatSource> heat_sources) const;
     // Fills an item's box shape (half_extents, com_offset) from the union of its
     // model's primitive bounds. PhysX derives the mass and inertia from the shape.
     static void DeriveBodyShape(Item& item, const Model& model);
@@ -261,6 +278,14 @@ private:
     // now: the held pose while carried, otherwise its resting pose. Used to place a
     // tray's serve zone and to hang served meat off it, resting or in hand.
     DirectX::XMMATRIX CurrentPose(int index, DirectX::FXMMATRIX camera_to_world) const;
+    // Where the lighter's flame stands, in the item's own model space: the far face of
+    // its box down the model's Z. Derived from the box rather than authored in the
+    // catalog because two things need the very same point -- the flame is emitted here
+    // and the lighter's heat radiates from here -- and a fire whose heat came from
+    // somewhere else would be a lie. Only meaningful for a Flame item: the lighter is a
+    // long-barrelled utility one, modelled lying down its Z with the grip at the origin,
+    // so its far Z face is the muzzle (its Y is the barrel's centimetre of thickness).
+    DirectX::XMVECTOR NozzleLocal(const Item& item) const;
     // Takes item `index`'s body out of the physics scene -- the "held in hand /
     // done with play" state. The GPU-safe replacement for eDISABLE_SIMULATION;
     // ReleaseBody is the inverse.
@@ -303,11 +328,6 @@ private:
     // carried so a fast frame still spits a steady stream. Reset the moment the button
     // is up, so a new hold never starts with a stale fraction.
     float spray_carry_ = 0.0f;
-    // How soaked the fire pit is: the count of fluid droplets inside the pit column,
-    // integrated over seconds. Crossing the lighting threshold latches pit_lit_ and
-    // switches on every stacked log's heat; per-level state, reset with Props.
-    float pit_wetness_ = 0.0f;
-    bool pit_lit_ = false;
 
     // Rebuilt each Update: every resting item, the carried one, and the one the
     // outline glows around.

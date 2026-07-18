@@ -95,6 +95,8 @@ Scene::Scene(const LevelDef& level) {
             spawn.heat.emplace(def.heat->temp_f, def.heat->reach, def.heat->starts_on);
             spawn.heat_offset = def.heat->offset;
         }
+        // What lights it, if anything does -- pure data, so it rides along as it is.
+        spawn.ignitable = def.ignitable;
         carryables_.push_back(std::move(spawn));
     }
 }

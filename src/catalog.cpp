@@ -101,8 +101,9 @@ Ability AbilityOr(const toml::node_view<const toml::node>& view, Ability fallbac
     if (*name == "grip_meat") return Ability::GripMeat;
     if (*name == "stack_in_fire_pit") return Ability::StackInFirePit;
     if (*name == "spray_fluid") return Ability::SprayFluid;
+    if (*name == "flame") return Ability::Flame;
     Fail(path, "unknown ability '" + *name +
-                   "' (want none, grip_meat, stack_in_fire_pit or spray_fluid)");
+                   "' (want none, grip_meat, stack_in_fire_pit, spray_fluid or flame)");
 }
 
 // The optional heat a type radiates, read from its `heat` (centre temperature) and the
@@ -119,6 +120,22 @@ std::optional<HeatDef> ReadHeat(const toml::table& entry, const std::filesystem:
     h.offset = Vec3Or(entry["heat_offset"], h.offset, path, "heat_offset");
     h.starts_on = entry["heat_starts_on"].value_or(h.starts_on);
     return h;
+}
+
+// What it takes to light a type, read from its `ignite_temp` (the air temperature that
+// sets it alight). Absent, the type simply never catches. A carryable field: nothing
+// among the props is ignitable yet.
+std::optional<IgnitableRequirements> ReadIgnitable(const toml::table& entry,
+                                                   const std::filesystem::path& path) {
+    const toml::node_view<const toml::node> temp = entry["ignite_temp"];
+    if (!temp) {
+        return std::nullopt;
+    }
+    const float ignite_temp = static_cast<float>(AsDouble(*temp.node(), path, "ignite_temp"));
+    // How slowly it heats through to that (default matches the struct's own): a couple of
+    // these seconds of a flame held on it before it catches. Absent leaves the default.
+    const float tau = NumberOr(entry["ignite_tau"], 3.0f, path, "ignite_tau");
+    return IgnitableRequirements(ignite_temp, tau);
 }
 
 // The model name a type must name, or a catalog error.
@@ -248,6 +265,8 @@ void ReadCarryables(const toml::table& root, const char* section, bool is_food,
         def.ability = AbilityOr((*entry)["ability"], def.ability, path);
         // A carryable may radiate heat too (the firewood log). Same spelling as a prop's.
         def.heat = ReadHeat(*entry, path);
+        // ...and may be lightable, which is what switches that heat on in play.
+        def.ignitable = ReadIgnitable(*entry, path);
         out.emplace(name, std::move(def));
     }
 }

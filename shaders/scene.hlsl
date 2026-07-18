@@ -32,8 +32,11 @@ cbuffer Constants : register(b0) {
     // metallic-roughness map. Padded out to a full row to match the C++ mirror.
     float g_metallic;
     float g_roughness;
+    // How much light this surface gives off on its own, as a multiple of its base
+    // colour added on top of the shading. Zero for the whole yard; the lighter's
+    // flame drives it above one so it survives the tonemap and blooms.
+    float g_emissive;
     float g_pad0;
-    float g_pad1;
 };
 
 // Per-frame, shared by every scene draw: the sun's world-to-clip matrix, the one
@@ -355,7 +358,14 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     const float3 fill = SrgbToLinear(g_sky_ambient) * saturate(dot(normal, -g_sun_direction)) *
                         g_fill_strength * diffuse_color;
 
-    const float3 lit = ambient + sun + fill;
+    // What the surface gives off on its own, on top of what falls on it. Added before
+    // the fog so a flame seen across the yard still dissolves into the distance rather
+    // than burning through it, and left in the same linear light as the rest -- an
+    // emissive above one simply lands in the HDR buffer's headroom, where the bloom's
+    // bright-pass finds it.
+    const float3 emissive = base_color * g_emissive;
+
+    const float3 lit = ambient + sun + fill + emissive;
 
     // Fade into the very sky drawn behind this pixel, sampled along the view ray,
     // so distant geometry dissolves into the gradient rather than into a flat tone
