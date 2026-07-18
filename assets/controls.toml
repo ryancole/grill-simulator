@@ -27,6 +27,7 @@ move_left    = "A"
 move_right   = "D"
 jump         = "Space"
 sprint       = "Shift"
+crouch       = "Ctrl"
 interact     = "E"
 # The main action, on left mouse. Triggers the ability of the held item (see the
 # per-carryable `ability` in catalog.toml); does nothing empty-handed.

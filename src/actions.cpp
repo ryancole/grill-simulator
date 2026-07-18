@@ -42,6 +42,7 @@ constexpr ActionSpec kSpecs[] = {
     {Action::MoveRight, "move_right", "D", "Move Right", true},
     {Action::Jump, "jump", "Space", "Jump", true},
     {Action::Sprint, "sprint", "Shift", "Sprint", true},
+    {Action::Crouch, "crouch", "Ctrl", "Crouch", true},
     {Action::Interact, "interact", "E", "Interact", true},
     {Action::PrimaryAction, "primary_action", "Mouse1", "Primary Action", true},
     {Action::ReloadLevel, "reload_level", "R", "Reload Level", false},

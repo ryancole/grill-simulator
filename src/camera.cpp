@@ -26,6 +26,18 @@ constexpr float kEyeHeight = kBodyHeight - kEyeDrop; // 1.6 m eyeline
 constexpr float kWalkSpeed = 3.4f;   // metres per second
 constexpr float kSprintSpeed = 6.4f; // metres per second
 
+// Crouching: while the crouch action is held the whole body shrinks from its full
+// stature to this, feet planted, so the eyeline drops and the capsule ducks under a
+// low overhang. The crown always sits kEyeDrop above the eye, standing or crouched.
+constexpr float kCrouchHeight = 1.0f; // foot to crown when fully crouched, ~3'3"
+// A crouch is a smaller, slower shuffle -- fraction of the walk/sprint speed applied
+// once fully down, ramped with the crouch as it sinks.
+constexpr float kCrouchSpeedScale = 0.5f;
+// How fast the body sinks into and rises out of the crouch, as a 1/seconds rate for
+// the same 1 - e^(-rate*dt) convergence the walk uses: quick enough to feel like a
+// duck, soft enough that the eyeline glides rather than snaps.
+constexpr float kCrouchResponse = 14.0f;
+
 // The capsule: a 0.35 m radius cylinder segment capped by two hemispheres, sized so
 // foot-to-crown is the full body height. The eye then rides kEyeDrop below the crown.
 //   total height = kCapsuleHeight + 2*radius = 1.0 + 0.7 = 1.7 = kBodyHeight
@@ -198,6 +210,10 @@ void Camera::Respawn(XMFLOAT3 foot, float facing_degrees) {
     velocity_ = {0.0f, 0.0f};
     vertical_speed_ = 0.0f;
     grounded_ = true;
+    // Stand up out of any crouch on a (re)spawn, capsule and all, so the player
+    // never re-enters a level still ducked from before the reload.
+    crouch_ = 0.0f;
+    controller_->resize(kCapsuleHeight);
     // The eye rides an eye-height above the feet; setFootPosition places the
     // capsule's underside, and the controller carries the eye back up next Update.
     position_ = {foot.x, foot.y + kEyeHeight, foot.z};
@@ -214,6 +230,18 @@ void Camera::Look(float dx, float dy) {
 }
 
 void Camera::Update(const Actions& actions, float dt) {
+    // Ease the crouch toward whatever the action asks for this frame, then derive the
+    // body height from it: full stature at crouch_ == 0, kCrouchHeight fully down. The
+    // capsule is resized to match (feet stay planted) so the player physically ducks,
+    // and the eye then rides on its new crown below.
+    const float crouch_target = actions.IsActive(Action::Crouch) ? 1.0f : 0.0f;
+    crouch_ += (crouch_target - crouch_) * (1.0f - std::exp(-kCrouchResponse * dt));
+    const float body_height = kBodyHeight + (kCrouchHeight - kBodyHeight) * crouch_;
+    const float eye_height = body_height - kEyeDrop;
+    // resize() takes the cylinder segment between the two hemisphere caps and keeps
+    // the foot fixed, which is exactly the duck we want.
+    controller_->resize(body_height - 2.0f * kBodyRadius);
+
     if (grounded_ && actions.IsActive(Action::Jump)) {
         vertical_speed_ = kJumpSpeed;
         grounded_ = false;
@@ -237,7 +265,10 @@ void Camera::Update(const Actions& actions, float dt) {
         // Normalising keeps a diagonal from being faster than a straight line.
         const XMVECTOR direction = XMVector3Normalize(
             XMVectorAdd(XMVectorScale(forward, ahead), XMVectorScale(right, side)));
-        const float speed = actions.IsActive(Action::Sprint) ? kSprintSpeed : kWalkSpeed;
+        float speed = actions.IsActive(Action::Sprint) ? kSprintSpeed : kWalkSpeed;
+        // Shrinking the player shrinks their stride: scale the target speed down as
+        // the crouch deepens, so a full crouch shuffles at kCrouchSpeedScale.
+        speed *= 1.0f + (kCrouchSpeedScale - 1.0f) * crouch_;
         wanted = XMVectorScale(direction, speed);
     }
 
@@ -277,8 +308,9 @@ void Camera::Update(const Actions& actions, float dt) {
         controller_->move(displacement, 0.001f, dt, PxControllerFilters());
     const PxExtendedVec3 after = controller_->getFootPosition();
 
-    // Ride the eye on the capsule's crown, foot plus eye height.
-    position_ = {static_cast<float>(after.x), static_cast<float>(after.y) + kEyeHeight,
+    // Ride the eye on the capsule's crown, foot plus the current (crouch-aware) eye
+    // height, so ducking lowers the view along with the body.
+    position_ = {static_cast<float>(after.x), static_cast<float>(after.y) + eye_height,
                  static_cast<float>(after.z)};
 
     // A contact below is ground: stop falling and allow the next jump. A contact
