@@ -22,3 +22,6 @@ controls.user.toml
 # tools/gen_models.py is a script, not a package, but importing it to poke at a
 # texture leaves this behind.
 __pycache__/
+
+# Personal Claude Code settings (permissions, etc.)
+.claude/settings.local.json
