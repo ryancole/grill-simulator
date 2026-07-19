@@ -56,14 +56,6 @@ constexpr float kSpraySpeed = 7.5f; // m/s out of the nozzle.
 constexpr float kWetRadius = 0.3f;
 constexpr float kWetPerDropletSecond = 0.02f;
 
-// How much a full soaking of lighter fluid accelerates a log's catch. It scales the
-// ignition heat-through rate (see IgnitableRequirements::Update) up to 1 + this at full
-// saturation, so a drenched log reaches a held flame's heat several times faster -- the
-// whoomph -- while a barely-damp one is only nudged. It changes only the speed of a catch,
-// never whether one happens (a soaked log by a too-cool grate still never lights), so this
-// can be turned up for drama without breaking the ignite-temperature balance.
-constexpr float kFluidAccelerant = 3.0f;
-
 // A lit log's tint: multiplied into the log model's own browns, it pushes the wood
 // toward glowing ember orange -- the visible difference between a cold stack and a
 // burning one. The red channel rides above one so the HDR pipeline blooms it a touch.
@@ -612,19 +604,24 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         // away too soon lets it cool back down.
         const XMFLOAT3 hot_centre = item.heat->Origin();
         const XMVECTOR point = XMLoadFloat3(&hot_centre);
-        // Lighter fluid soaked in is an accelerant: it rushes the heat-through in proportion
-        // to how drenched the log is, so a doused log catches in a whoomph while a dry one
-        // takes its deliberate few seconds. It speeds the catch only -- the air temperature
-        // the log heats toward is unchanged -- so a soaked log by a too-cool grate still
-        // never lights. Water, when it exists, would read the same wetness and slow instead.
-        float heat_rate_scale = 1.0f;
-        if (item.wetness && item.wetness->IsWet() &&
-            item.wetness->Agent() == WetAgent::LighterFluid) {
-            heat_rate_scale = 1.0f + kFluidAccelerant * item.wetness->Wetness();
-        }
-        item.ignitable->Update(AmbientAt(point, heat_sources), dt, heat_rate_scale);
-        if (item.ignitable->Ignited()) {
+        const float ambient = AmbientAt(point, heat_sources);
+        // Lighter fluid soaked in is an accelerant with no patience: the instant a flame hot
+        // enough to catch this wood reaches a doused log, it goes up at once -- no slow
+        // heat-through -- and straight to a full flame, skipping the ember-to-fire build-up
+        // (burn_time below), the way fluid-soaked wood whooshes alight. It still only lights
+        // off heat genuinely hot enough to catch it (ambient at or past the ignite temp), so
+        // a soaked log by the too-cool grate still never catches and nothing self-ignites.
+        // Water, when it exists, would read the same wetness and slow the catch instead.
+        const bool fluid_soaked = item.wetness && item.wetness->IsWet() &&
+                                  item.wetness->Agent() == WetAgent::LighterFluid;
+        if (fluid_soaked && ambient >= item.ignitable->IgniteTempF()) {
             item.heat->SetOn(true);
+            item.burn_time = kFireBuildupSeconds; // full flame from frame one, no build-up
+        } else {
+            item.ignitable->Update(ambient, dt);
+            if (item.ignitable->Ignited()) {
+                item.heat->SetOn(true);
+            }
         }
     }
 

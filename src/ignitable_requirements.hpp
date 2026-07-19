@@ -44,17 +44,7 @@ public:
     // Newton's law of heating, the very easing a cooking core follows -- so it warms
     // toward a flame held on it and drifts back down when the flame is taken away before
     // it caught. Reversible, exactly like an internal cook temperature; catching is not.
-    //
-    // `heat_rate_scale` accelerates the heat-through without changing what it heats toward:
-    // it multiplies how fast the temperature closes its gap to the air this frame (1 is the
-    // plain rate). An accelerant soaked into the surface -- lighter fluid on a log -- carries
-    // the flame's heat into the wood faster, so a doused thing catches in a whoomph rather
-    // than over seconds. Crucially it only ever changes *how fast* the object reaches the
-    // surrounding temperature, never *what* that temperature is: a soaked log beside a grate
-    // too cool to light it still eases toward that same too-cool air and never catches, so
-    // the accelerant can rush a real flame's catch but cannot conjure one from sub-threshold
-    // heat. Defaults to 1, so the grate ignition and every other caller are unchanged.
-    void Update(float ambient_f, float dt, float heat_rate_scale = 1.0f);
+    void Update(float ambient_f, float dt);
 
     // Whether it has now reached its ignition temperature. Once it has, the caller lights
     // it and stops heating it (its heat switches on and this is not asked again), so the
