@@ -6,6 +6,8 @@
 
 #include <PxPhysicsAPI.h>
 
+#include <algorithm>
+
 // Furniture now pulls in <PxPhysicsAPI.h>: righting the grill sweeps the scene along
 // the gaze and rewrites the base body's pose directly, so it touches PhysX itself.
 // Everything else still holds each actor as an opaque handle through its RigidBody.
@@ -86,10 +88,14 @@ Furniture::Furniture(Scene& scene, Physics& physics) : scene_(&scene), physics_(
 
         // A body that radiates heat contributes a HeatSource, paired with the index
         // of the body whose pose moves it and the grate offset in that body's space.
-        // Update places the origin every frame; it is left unset until then.
+        // Update places the origin every frame; it is left unset until then. Its ignition
+        // requirements ride a parallel slot -- present on the grill's grate (which starts
+        // cold and is lit in play), empty on a source authored already-on -- so
+        // UpdateIgnition can warm it toward a held flame and switch it on when it catches.
         if (body.heat) {
             heat_sources_.push_back(*body.heat);
             heat_drives_.push_back({index, body.heat_offset});
+            heat_ignitables_.push_back(body.ignitable);
         }
     }
 }
@@ -110,6 +116,33 @@ void Furniture::Update() {
         const DirectX::XMVECTOR origin =
             DirectX::XMVector3Transform(DirectX::XMLoadFloat3(&drive.local_offset), pose);
         heat_sources_[i].SetOrigin(origin);
+    }
+}
+
+void Furniture::UpdateIgnition(std::span<const HeatSource> external_heats, float dt) {
+    // Light any grate the player is holding a flame to. Mirrors Props' log ignition: warm
+    // the thing toward the air around it and switch its heat on once its own temperature
+    // has climbed past the threshold, so a flame has to be held on it a moment and one
+    // taken away too soon lets it cool back. The air here is the hottest *carryable* flame
+    // reaching the grate -- the lit lighter, a burning log -- and nothing else: a grate
+    // never lights itself, and there is no other furniture heat in the yard to light it.
+    for (std::size_t i = 0; i < heat_sources_.size(); ++i) {
+        std::optional<IgnitableRequirements>& ignitable = heat_ignitables_[i];
+        if (!ignitable || heat_sources_[i].IsOn()) {
+            continue;
+        }
+        // The hot centre Update placed this frame is the point that must get hot -- the
+        // same point that will radiate once it catches, which is the fair place to ask.
+        const XMFLOAT3 hot_centre = heat_sources_[i].Origin();
+        const XMVECTOR origin = XMLoadFloat3(&hot_centre);
+        float ambient_f = CookInformation::kRoomTempF;
+        for (const HeatSource& flame : external_heats) {
+            ambient_f = std::max(ambient_f, flame.TemperatureAt(origin));
+        }
+        ignitable->Update(ambient_f, dt);
+        if (ignitable->Ignited()) {
+            heat_sources_[i].SetOn(true);
+        }
     }
 }
 

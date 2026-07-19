@@ -105,6 +105,11 @@ struct DynamicBody {
     // separately from the HeatSource because it is fixed body-space data Furniture
     // transforms through the pose to place the source's world origin each frame.
     DirectX::XMFLOAT3 heat_offset{0.0f, 0.0f, 0.0f};
+    // What it takes to set this body's heat alight, if it can be (the grill's grate,
+    // which starts cold and is lit in play). Empty on the cooler. Copied straight from
+    // the catalog -- pure requirements, no runtime state to build. Furniture warms it
+    // toward a held flame each frame and switches the heat on when it catches.
+    std::optional<IgnitableRequirements> ignitable;
 };
 
 // The runtime side of a level: it takes a LevelDef (pure data -- see level.hpp)
@@ -161,7 +166,8 @@ private:
     void AddDynamicInstance(std::uint32_t model, DirectX::FXMMATRIX transform,
                             DirectX::XMFLOAT3 tint, float mass, float knock_rating,
                             ImpactSound impact_sound, std::optional<HeatSource> heat,
-                            DirectX::XMFLOAT3 heat_offset);
+                            DirectX::XMFLOAT3 heat_offset,
+                            std::optional<IgnitableRequirements> ignitable);
 
     std::vector<Model> models_;
     std::vector<MeshInstance> instances_;

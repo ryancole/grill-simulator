@@ -58,7 +58,7 @@ Scene::Scene(const LevelDef& level) {
                 offset = def.heat->offset;
             }
             AddDynamicInstance(model, transform, kWhite, def.mass, def.knock_rating,
-                               def.impact_sound, heat, offset);
+                               def.impact_sound, heat, offset, def.ignitable);
         } else {
             AddInstance(model, transform, kWhite);
         }
@@ -133,7 +133,8 @@ void Scene::AddInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
 
 void Scene::AddDynamicInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint,
                                float mass, float knock_rating, ImpactSound impact_sound,
-                               std::optional<HeatSource> heat, XMFLOAT3 heat_offset) {
+                               std::optional<HeatSource> heat, XMFLOAT3 heat_offset,
+                               std::optional<IgnitableRequirements> ignitable) {
     DynamicBody body{};
     body.instance = static_cast<std::uint32_t>(instances_.size());
     XMStoreFloat4x4(&body.initial_transform, transform);
@@ -142,6 +143,7 @@ void Scene::AddDynamicInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT
     body.impact_sound = impact_sound;
     body.heat = heat;
     body.heat_offset = heat_offset;
+    body.ignitable = ignitable;
 
     MeshInstance instance{};
     instance.model = model;

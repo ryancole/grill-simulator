@@ -95,6 +95,14 @@ public:
     // inside a box drawn around the pit. Read once on level load.
     std::vector<DirectX::XMFLOAT3> IgnitablePositions() const;
 
+    // The heat the carryables radiate this frame -- a lit log, the struck lighter's flame
+    // -- each already placed at its current hot centre by this frame's Update. Handed to
+    // Furniture so the grill's grate, held under the lighter, can catch from the same flame
+    // that lights the logs: the furniture lights its own bodies against these the way Props
+    // lights its items against the furniture's heat. Rebuilt each Update; empty when nothing
+    // carryable is hot.
+    std::span<const HeatSource> ItemHeats() const { return item_heats_; }
+
     // The HUD hint for what the E key would do right now: "[E] Pick up tongs"
     // when a loose object is in reach and looked at, "[E] Drop" while carrying,
     // or empty when E would do nothing. Recomputed each Update.
@@ -356,4 +364,8 @@ private:
     // Rebuilt each Update: a Flow fire/smoke source for every ignitable carryable currently
     // alight. See FlowEmitters().
     std::vector<FlowEmitter> flow_emitters_;
+    // Rebuilt each Update: every carryable's live heat source, each with its hot centre
+    // already placed for this frame. Handed to Furniture (see ItemHeats()) so a held flame
+    // can light the grill as well as a log. A plain snapshot -- ownership stays with the items.
+    std::vector<HeatSource> item_heats_;
 };

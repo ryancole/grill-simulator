@@ -68,8 +68,9 @@ box = [
 
 prop = [
   # The charcoal grill base topples; the cooler is heavier and low, so it mostly slides.
-  # The base's heat lives on the "charcoal_grill" type in catalog.toml. Its lid is a
-  # carryable, placed below with the tongs -- lift it off the grate to cook.
+  # The base's heat lives on the "charcoal_grill" type in catalog.toml -- and starts cold:
+  # light the grate with the lighter (below) before it cooks. Its lid is a carryable, also
+  # placed below with the tongs -- lift it off the grate to light it and cook.
   {type = "charcoal_grill",     pos = [0.0, 0.0, 5.0]},
   {type = "bench",  pos = [-4.5, 0.0, 1.5]},
   # The pass: carry the loaded tray here and press E to turn it in (see turn_in below).
@@ -94,6 +95,10 @@ carryable = [
   # physics drops them onto it. They are not served, so they merely rest there -- lift the
   # tray and they slide off. All in view from the spawn.
   {type = "tongs", pos = [1.15, 0.05, 4.45], yaw = 25.0},
+  # The lighter, on the patio beside the tongs -- the grill starts cold, so pick this up,
+  # lift the lid off the grate and hold the flame (left mouse) to the grate to light it,
+  # just as it lights the campsite logs. A hair above the slab (top 0.06) so it settles flat.
+  {type = "lighter", pos = [1.75, 0.10, 4.05], yaw = -30.0},
   # The grill lid starts resting on the base's bowl rim; lift it off to expose the grate.
   # Its y rests it on the rim -- nudge it if it floats or sinks in-game.
   {type = "lid", pos = [0.0, 0.72, 5.0]},

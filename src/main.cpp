@@ -727,6 +727,12 @@ int Run(HINSTANCE instance, int show_command) {
                                    game.world->furniture().HeatSources(),
                                    game.world->turn_in_zone(), game.world->fire_pit_zone(),
                                    game.world->objectives(), &game.fluid, &game.flame);
+        // Light the grill from a held flame: warm its grate toward the lighter (or a lit
+        // log) the player holds to it and switch it on when it catches -- the same ignition
+        // that lights the logs, now for the furniture. After the props update so the flame
+        // sits where it does this frame, and before the Flow fires below so a grate that
+        // just caught shows fire this frame.
+        game.world->furniture().UpdateIgnition(game.world->props().ItemHeats(), dt);
 
         // Turning the loaded tray in at the delivery zone ends the level: Props latches it
         // during the Update above. Drop the mouse look and raise the results screen, whose
@@ -833,8 +839,8 @@ int Run(HINSTANCE instance, int show_command) {
         world_instances.insert(world_instances.end(), flame.begin(), flame.end());
 
         // The frame's fire/smoke sources for NVIDIA Flow: the grate of any lit furniture
-        // (the grill, hot from the start) plus every burning log the props report. Merged
-        // into the one list the renderer steps the sim from.
+        // (the grill, once the player has lit it) plus every burning log the props report.
+        // Merged into the one list the renderer steps the sim from.
         std::vector<FlowEmitter> flow_emitters;
         for (const HeatSource& hot : game.world->furniture().HeatSources()) {
             if (hot.IsOn()) {
