@@ -845,10 +845,13 @@ int Run(HINSTANCE instance, int show_command) {
         for (const HeatSource& hot : game.world->furniture().HeatSources()) {
             if (hot.IsOn()) {
                 const XMFLOAT3 o = hot.Origin();
-                // A flat, wide box just above the grate -- a bed of coals, not a ball of fire.
+                // A small, low coal bed seated down inside the grill bowl (below the grate
+                // origin), so the flames rise up out of the pit rather than sitting on top of
+                // it as a bright block. Kept modest -- a bed of coals, not a bonfire -- and in
+                // the ballpark of a single lit log so it reads as cooking heat, not a pyre.
                 XMFLOAT4X4 grate;
-                XMStoreFloat4x4(&grate, XMMatrixTranslation(o.x, o.y + 0.1f, o.z));
-                flow_emitters.push_back({grate, {0.35f, 0.08f, 0.35f}, 3.0f, 1.0f, 1.0f, 2.0f});
+                XMStoreFloat4x4(&grate, XMMatrixTranslation(o.x, o.y - 0.02f, o.z));
+                flow_emitters.push_back({grate, {0.17f, 0.07f, 0.17f}, 0.70f, 0.11f, 0.13f, 0.58f});
             }
         }
         const std::span<const FlowEmitter> log_fires = props.FlowEmitters();
