@@ -65,9 +65,12 @@ public:
     // level survives into the next.
     void Clear();
 
-    // The live droplets as draw instances -- little tinted cubes of the shared
-    // unit-cube model -- for the renderer's world pass. Rebuilt by Update.
-    std::span<const MeshInstance> Instances() const { return instances_; }
+    // The live droplets as screen-space impostor points: xyz the world-space
+    // centre, w the sphere radius in metres. The renderer's fluid pass billboards
+    // each into a camera-facing quad and carves it into a lit, rounded droplet, so
+    // the spray reads as beaded liquid rather than the cubes it once drew. Rebuilt
+    // by Update.
+    std::span<const DirectX::XMFLOAT4> Points() const { return points_; }
 
 private:
     // Pins slot `i` at its parking spot: zero inverse mass far under the world.
@@ -100,6 +103,7 @@ private:
     // paths, so an arbitrarily seeded engine is fine.
     std::minstd_rand rng_{20260716u};
 
-    // Rebuilt by Update for the renderer.
-    std::vector<MeshInstance> instances_;
+    // Rebuilt by Update for the renderer: one impostor point (xyz centre, w radius)
+    // per live droplet.
+    std::vector<DirectX::XMFLOAT4> points_;
 };

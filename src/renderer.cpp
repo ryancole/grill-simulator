@@ -213,6 +213,39 @@ constexpr UINT kCloudConstantDwords = sizeof(CloudConstants) / sizeof(UINT);
 static_assert(kCloudConstantDwords + 1 <= 64,
               "A root signature holds at most 64 DWORDs in total");
 
+// Mirrors the FluidConstants cbuffer in shaders/fluid.hlsl: the view and projection the
+// spray billboards and depths its droplets with, and the scene's own sun/ambient (sRGB,
+// with their multipliers) plus the straw tint and the view-space sun the beads shade
+// under. Each float3 opens a fresh cbuffer row and is followed by the scalar that shares
+// it, matching the HLSL with no straddle.
+struct FluidConstants {
+    XMFLOAT4X4 view;
+    XMFLOAT4X4 proj;
+    XMFLOAT3 sun_color;
+    float sun_intensity;
+    XMFLOAT3 sky_ambient;
+    float ambient_strength;
+    XMFLOAT3 tint;
+    float pad0;
+    XMFLOAT3 sun_dir_view;
+    float pad1;
+};
+
+static_assert(sizeof(FluidConstants) % sizeof(UINT) == 0);
+constexpr UINT kFluidConstantDwords = sizeof(FluidConstants) / sizeof(UINT);
+// The root constants plus the droplet buffer's root SRV (two DWORDs).
+static_assert(kFluidConstantDwords + 2 <= 64,
+              "A root signature holds at most 64 DWORDs in total");
+
+// The pale straw of naphtha the droplets take (sRGB), lit rather than flat now. Matches
+// the tint the old cube path drew.
+constexpr XMFLOAT3 kDropletTint{0.93f, 0.9f, 0.72f};
+
+// The droplet pool's ceiling, matching Fluid's kMaxDroplets: the most impostor points the
+// per-frame buffer must hold. A live spray never approaches this, but the buffer is sized
+// for the worst case so an over-long hold never overruns it.
+constexpr UINT kMaxSprayDroplets = 2048;
+
 // Mirrors the GrassConstants cbuffer in shaders/grass.hlsl: the field's placement
 // and per-blade parameters the mesh shader grows the grass from, plus the view-
 // projection and the eye. Each float3 opens a fresh cbuffer row and is followed by
@@ -570,6 +603,7 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     CreateTonemapPipeline();
     CreateLightShaftPipeline();
     CreateCloudPipeline();
+    CreateFluidPipeline();
     CreateBloomPipeline();
     // The grass pass only exists where the device grows blades in a mesh shader; on
     // hardware without the tier the pipeline is never built and RenderGrass returns
@@ -1625,6 +1659,87 @@ void Renderer::CreateCloudPipeline() {
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&cloud_pipeline_state_)),
                   "CreateGraphicsPipelineState(clouds)");
+}
+
+void Renderer::CreateFluidPipeline() {
+    // b0: the camera and lighting, as root constants. t0: the per-frame droplet buffer, a
+    // root SRV (a StructuredBuffer of world centre + radius) so it needs no descriptor
+    // heap slot, like the grass obstacles. Both the vertex shader (which fetches its
+    // droplet) and the pixel shader read root data, so no stage is denied.
+    CD3DX12_ROOT_PARAMETER parameters[2];
+    parameters[0].InitAsConstants(kFluidConstantDwords, 0);
+    parameters[1].InitAsShaderResourceView(0);
+
+    CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    root_desc.Init(_countof(parameters), parameters, 0, nullptr,
+                   D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    HRESULT hr =
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr)) {
+        std::string message = error
+                                  ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                                error->GetBufferSize())
+                                  : "unknown error";
+        throw std::runtime_error("D3D12SerializeRootSignature(fluid) failed: " + message);
+    }
+    ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                               signature->GetBufferSize(),
+                                               IID_PPV_ARGS(&fluid_root_signature_)),
+                  "CreateRootSignature(fluid)");
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "fluid.vs.cso");
+    const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "fluid.ps.cso");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.InputLayout = {nullptr, 0};  // no vertex buffer: the quad comes from SV_VertexID
+    pso.pRootSignature = fluid_root_signature_.Get();
+    pso.VS = {vs.data(), vs.size()};
+    pso.PS = {ps.data(), ps.size()};
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    // The billboard faces the camera and the pixel shader discards its corners, so there
+    // is no meaningful back face to cull.
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+    // Opaque beads: no blend. Increment one draws the droplets as lit, rounded liquid;
+    // the refractive translucency comes in a later pass.
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+
+    // Depth on: the beads test against the world's depth (a droplet behind the grill is
+    // hidden) and write their own bulged front depth (so nearer beads occlude farther).
+    pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState.DepthEnable = TRUE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    pso.DSVFormat = kDepthFormat;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = kHdrFormat;
+    pso.SampleDesc.Count = 1;
+
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&fluid_pipeline_state_)),
+                  "CreateGraphicsPipelineState(fluid)");
+
+    // One upload-heap region per frame in flight, mapped once and left mapped, rewritten
+    // with this frame's droplet points. MoveToNextFrame retires a frame before its region
+    // is reused, so the CPU never overwrites points the GPU is still reading.
+    fluid_droplets_stride_ = kMaxSprayDroplets * static_cast<UINT>(sizeof(XMFLOAT4));
+    const CD3DX12_HEAP_PROPERTIES upload_heap(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RESOURCE_DESC buffer_desc =
+        CD3DX12_RESOURCE_DESC::Buffer(static_cast<UINT64>(fluid_droplets_stride_) * kFrameCount);
+    ThrowIfFailed(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&fluid_droplets_)),
+                  "CreateCommittedResource(fluid droplets)");
+
+    void* mapped = nullptr;
+    const CD3DX12_RANGE no_read(0, 0);
+    ThrowIfFailed(fluid_droplets_->Map(0, &no_read, &mapped), "FluidDroplets::Map");
+    fluid_droplets_mapped_ = static_cast<std::byte*>(mapped);
 }
 
 void Renderer::CreateBloomPipeline() {
@@ -3692,6 +3807,45 @@ void Renderer::RenderFlow(const XMMATRIX& view, const XMMATRIX& projection, floa
                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE);
 }
 
+void Renderer::RenderFluidSpray(std::span<const XMFLOAT4> droplets, const XMMATRIX& view,
+                                const XMMATRIX& projection) {
+    if (droplets.empty()) {
+        return;
+    }
+    const UINT count = std::min(static_cast<UINT>(droplets.size()), kMaxSprayDroplets);
+
+    // This frame's slice of the droplet buffer, so the write cannot race the GPU still
+    // reading the previous frame's.
+    std::byte* region =
+        fluid_droplets_mapped_ + static_cast<size_t>(frame_index_) * fluid_droplets_stride_;
+    std::memcpy(region, droplets.data(), static_cast<size_t>(count) * sizeof(XMFLOAT4));
+    const D3D12_GPU_VIRTUAL_ADDRESS address =
+        fluid_droplets_->GetGPUVirtualAddress() +
+        static_cast<UINT64>(frame_index_) * fluid_droplets_stride_;
+
+    FluidConstants constants{};
+    XMStoreFloat4x4(&constants.view, view);
+    XMStoreFloat4x4(&constants.proj, projection);
+    constants.sun_color = environment_.sun_color;
+    constants.sun_intensity = environment_.sun_intensity;
+    constants.sky_ambient = environment_.sky_ambient;
+    constants.ambient_strength = environment_.ambient_strength;
+    constants.tint = kDropletTint;
+    // The sun rotated into view space (a direction, so translation drops out), where the
+    // pixel shader does its lighting. The view is a rigid transform, so this stays unit.
+    XMStoreFloat3(&constants.sun_dir_view,
+                  XMVector3Normalize(XMVector3TransformNormal(XMLoadFloat3(&sun_direction_), view)));
+
+    command_list_->SetGraphicsRootSignature(fluid_root_signature_.Get());
+    command_list_->SetPipelineState(fluid_pipeline_state_.Get());
+    command_list_->SetGraphicsRoot32BitConstants(0, kFluidConstantDwords, &constants, 0);
+    command_list_->SetGraphicsRootShaderResourceView(1, address);
+    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    command_list_->IASetVertexBuffers(0, 0, nullptr);
+    // Six vertices (two triangles) per droplet, built from SV_VertexID; one instance each.
+    command_list_->DrawInstanced(6, count, 0, 0);
+}
+
 void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                       std::span<const MeshInstance> held_props, const XMMATRIX& view_projection,
@@ -3699,7 +3853,8 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const std::string> debug_lines,
                       std::span<const OrderCard> orders, std::span<const MeatCard> meats,
                       const XMMATRIX& view, const XMMATRIX& projection, float flow_dt,
-                      std::span<const FlowEmitter> flow_emitters) {
+                      std::span<const FlowEmitter> flow_emitters,
+                      std::span<const XMFLOAT4> droplets) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
@@ -3789,6 +3944,16 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // outline pass early-returns with nothing highlighted and the viewmodel draw that
     // follows assumes the scene's are still in force. A no-op without mesh-shader support.
     RenderGrass(view_projection, camera_position, seconds);
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    command_list_->SetPipelineState(pipeline_state_.Get());
+
+    // The lighter-fluid spray: sphere-impostor droplets drawn into the HDR buffer and
+    // depth-tested against the yard the world pass just laid down -- a bead behind the
+    // grill is hidden, and beads in front occlude one another. It runs here, while the
+    // scene depth still holds the world and before the arms clear it. Binds its own
+    // pipeline and root signature; restore the scene's for the outline pass and the draws
+    // that follow, which assume the scene's are in force.
+    RenderFluidSpray(droplets, view, projection);
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
 

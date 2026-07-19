@@ -825,16 +825,15 @@ int Run(HINSTANCE instance, int show_command) {
         const std::span<const MeshInstance> grill_highlight = furniture.HighlightInstances();
         highlights.insert(highlights.end(), grill_highlight.begin(), grill_highlight.end());
 
-        // The world draw list: the props where they lie plus any lighter-fluid droplets
-        // in flight and the lighter's muzzle flame -- all plain mesh instances, merged here
-        // so the renderer keeps its one world span. Empty appends cost nothing. (The fuller
-        // fires -- logs, grill -- are volumetric Flow, not mesh instances; see flow_emitters
-        // below. The lighter's flame stays a CPU particle because its muzzle sits too close
-        // to the eye for the Flow pass to show.)
+        // The world draw list: the props where they lie plus the lighter's muzzle flame --
+        // plain mesh instances, merged here so the renderer keeps its one world span. Empty
+        // appends cost nothing. The lighter-fluid droplets are no longer in this list: they
+        // are screen-space sphere impostors now, drawn by the renderer's own fluid pass from
+        // fluid.Points() below, not tinted cubes. (The fuller fires -- logs, grill -- are
+        // volumetric Flow, not mesh instances; see flow_emitters below. The lighter's flame
+        // stays a CPU particle because its muzzle sits too close to the eye for Flow.)
         std::vector<MeshInstance> world_instances(props.WorldInstances().begin(),
                                                   props.WorldInstances().end());
-        const std::span<const MeshInstance> droplets = game.fluid.Instances();
-        world_instances.insert(world_instances.end(), droplets.begin(), droplets.end());
         const std::span<const MeshInstance> flame = game.flame.Instances();
         world_instances.insert(world_instances.end(), flame.begin(), flame.end());
 
@@ -861,7 +860,7 @@ int Run(HINSTANCE instance, int show_command) {
                              game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
                              view_projection, game.camera.Position(), prompt,
                              debug_lines, order_cards, meat_cards, view, projection, dt,
-                             flow_emitters);
+                             flow_emitters, game.fluid.Points());
     }
 
     game.renderer.Shutdown();
