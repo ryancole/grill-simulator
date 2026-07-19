@@ -68,6 +68,23 @@ static_assert(kBloomSrvBase + Renderer::kBloomLevels <= kEngineHeapSize,
               "engine heap too small for bloom");
 static_assert(kFluidThicknessSrvIndex < kEngineHeapSize, "engine heap too small for fluid");
 
+// The one shader-visible CBV/SRV/UAV heap the game binds. The engine block above
+// [0, kEngineHeapSize) holds the session-lifetime post-process SRVs; the per-level
+// material, font-atlas, shadow and probe descriptors follow it, starting at
+// kMaterialHeapBase. Keeping them in one heap means it is bound once and never
+// swapped mid-frame -- there is only ever one CBV/SRV/UAV heap bindable at a time,
+// and the scene pass's bindless fetches (ResourceDescriptorHeap) index whatever is
+// bound, so a single always-bound heap is what makes both the tables and the
+// bindless reads see the same descriptors. The material region is rewritten in place
+// on a level swap (descriptor writes are immediate), so the heap itself outlives every
+// level, exactly as the engine block does.
+constexpr UINT kMaterialHeapBase = kEngineHeapSize;
+// How many material/atlas/shadow/probe descriptors one level may claim. A level uses
+// two stand-ins, its glTF images, two font atlases, the shadow map and the probe --
+// a few dozen in practice; CreateSceneGeometry throws if a level ever exceeds this.
+constexpr UINT kMaterialHeapCapacity = 512;
+constexpr UINT kSrvHeapSize = kEngineHeapSize + kMaterialHeapCapacity;
+
 // The sky the fog fades into, so the horizon has no seam.
 constexpr float kSkyColor[] = {0.52f, 0.62f, 0.76f, 1.0f};
 
@@ -115,17 +132,28 @@ struct Constants {
     // How wet the surface looks, 0..1 (see MeshInstance::wetness). Rides the DWORD that
     // was only padding, so the wet sheen cost no growth in an already-full signature.
     float wetness;
+    // The material's four textures, as slots in the bound descriptor heap rather than
+    // descriptor tables: the scene pixel shader reads them through SM 6.6's
+    // ResourceDescriptorHeap[index] instead of a table bound per draw. Each is a
+    // heap slot (the white/flat-normal stand-ins for a material lacking one),
+    // written into the root constants here and indexed straight from the shader -- which
+    // is what lets DrawInstances drop the four per-draw SetGraphicsRootDescriptorTable
+    // calls. They open a fresh cbuffer row, four UINTs wide.
+    UINT base_color_index;
+    UINT normal_index;
+    UINT metallic_roughness_index;
+    UINT occlusion_index;
 };
 
 static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
-// Beyond the root constants the scene signature holds the base-colour table (1),
-// the frame constant buffer (2), the shadow-map table (1), the normal-map table
-// (1), the metallic-roughness table (1), the reflection-probe table (1) and the
-// occlusion table (1) -- eight DWORDs, which puts the signature exactly at the
-// 64-DWORD ceiling. Another per-draw texture would need the tables merged into one
-// contiguous range first.
-static_assert(kConstantDwords + 8 <= 64, "A root signature holds at most 64 DWORDs in total");
+// Beyond the root constants the scene signature now holds only the frame constant
+// buffer (2), the shadow-map table (1) and the reflection-probe table (1) -- four
+// DWORDs. The four per-draw material tables became the four texture indices folded
+// into the root constants above, so the total is unchanged but the per-draw table
+// binds are gone. Still at the 64-DWORD ceiling; freeing budget waits on the shadow
+// map and probe going bindless too (migration phase 2).
+static_assert(kConstantDwords + 4 <= 64, "A root signature holds at most 64 DWORDs in total");
 
 // The shadow map is square and this many texels on a side. Matches kShadowMapSize
 // in scene.hlsl, which sizes one texel for the PCF taps. 2048 gives the fenced
@@ -479,14 +507,17 @@ constexpr DXGI_FORMAT kProbeRtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kProbeSrvFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 constexpr UINT kProbeDsvIndex = 2;
 
-// Slot 0 of the texture heap. A material with no base colour texture points
-// here, which spares the shader a branch and the pipeline a second variant.
-constexpr UINT kWhiteTexture = 0;
+// The first material slot, at the base of the heap's per-level region (just past
+// the engine block). A material with no base colour texture points here, which
+// spares the shader a branch and the pipeline a second variant. Every other
+// per-level descriptor is placed relative to this, so moving the region is just a
+// matter of this base: CreateSceneGeometry counts up from kFlatNormalTexture + 1.
+constexpr UINT kWhiteTexture = kMaterialHeapBase + 0;
 
-// Slot 1: the flat tangent-space normal (0,0,1), encoded (128,128,255). A
+// The next slot: the flat tangent-space normal (0,0,1), encoded (128,128,255). A
 // material with no normal map points here, so the shader always samples a normal
 // map and a textureless surface simply reconstructs its geometric normal.
-constexpr UINT kFlatNormalTexture = 1;
+constexpr UINT kFlatNormalTexture = kMaterialHeapBase + 1;
 
 // One corner of a glyph quad, in the HUD text pass. Position is already in
 // normalized device coordinates, so the vertex shader is a pass-through.
@@ -700,15 +731,16 @@ void Renderer::ReleaseScene() {
     // not hang in the air of the next. The grid's allocation is kept for the next level.
     flow_.Clear();
 
-    // Everything CreateSceneGeometry and CaptureReflectionProbe built. The shared
-    // heap is torn down whole -- the font atlas and shadow-map SRVs live in it too,
-    // so the next LoadScene re-places them (the shadow map resource itself, created
-    // once in CreateShadowMap, is left standing). Descriptor slot bookkeeping is
-    // recomputed from scratch each load, so nothing here needs resetting but the
-    // resources.
+    // Everything CreateSceneGeometry and CaptureReflectionProbe built. The one SRV
+    // heap is NOT torn down -- it is persistent now and holds the engine block's
+    // post-process SRVs too, which must outlive the swap. Its per-level region (the
+    // material, atlas, shadow and probe descriptors) is simply overwritten by the
+    // next LoadScene; the slots left dangling in between are never sampled, since no
+    // frame is drawn between this release and that load (the level swap reset+emplaces
+    // the World in one step). Only the resources those descriptors named are freed
+    // here; the shadow map resource, created once in CreateShadowMap, is left standing.
     models_.clear();
     textures_.clear();
-    texture_heap_.Reset();
     atlas_texture_.Reset();
     mono_atlas_texture_.Reset();
     probe_cube_.Reset();
@@ -760,6 +792,26 @@ void Renderer::CreateDevice() {
                                             sizeof(options12))) ||
         !options12.EnhancedBarriersSupported) {
         throw std::runtime_error("This GPU or driver does not support D3D12 enhanced barriers");
+    }
+
+    // The scene pass reaches its material textures bindlessly, indexing the bound
+    // descriptor heap straight from the shader via SM 6.6's ResourceDescriptorHeap
+    // rather than binding a table per draw. That needs two things the runtime and
+    // driver must both offer: shader model 6.6 (the intrinsic itself) and resource
+    // binding tier 3 (unbounded, dynamically indexed descriptor tables). Like
+    // enhanced barriers above, on this FL 12.0 target they are effectively always
+    // present, but fail loudly rather than miscompile where they are not.
+    D3D12_FEATURE_DATA_SHADER_MODEL shader_model{D3D_SHADER_MODEL_6_6};
+    if (FAILED(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shader_model,
+                                            sizeof(shader_model))) ||
+        shader_model.HighestShaderModel < D3D_SHADER_MODEL_6_6) {
+        throw std::runtime_error("This GPU or driver does not support Shader Model 6.6");
+    }
+    D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
+    if (FAILED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options,
+                                            sizeof(options))) ||
+        options.ResourceBindingTier < D3D12_RESOURCE_BINDING_TIER_3) {
+        throw std::runtime_error("This GPU or driver does not support resource binding tier 3");
     }
 
     // Mesh shaders are optional: unlike enhanced barriers they are not assumed present
@@ -906,12 +958,14 @@ void Renderer::CreateDepthBuffer() {
 }
 
 void Renderer::CreateEngineDescriptorHeap() {
-    // Shader-visible, and -- unlike texture_heap_ -- built once and kept for the
-    // whole session, so a level swap never disturbs the SRVs of resources that
-    // outlive it. Slot 0 is the HDR scene buffer; the rest are reserved for the
-    // post-process buffers to come.
+    // The one shader-visible CBV/SRV/UAV heap, built once and kept for the whole
+    // session. The engine block [0, kEngineHeapSize) holds the post-process SRVs (HDR
+    // buffer at slot 0, then depth/shadow/bloom/fluid); the per-level material region
+    // follows it, up to kMaterialHeapCapacity descriptors, rewritten in place on each
+    // level swap. One heap means it is bound once and never swapped mid-frame, which is
+    // what the scene pass's bindless fetches need -- they index whatever heap is bound.
     D3D12_DESCRIPTOR_HEAP_DESC desc{};
-    desc.NumDescriptors = kEngineHeapSize;
+    desc.NumDescriptors = kSrvHeapSize;
     desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(device_->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&engine_heap_)),
@@ -1021,10 +1075,10 @@ void Renderer::CreateShadowMap() {
                                                static_cast<INT>(kShadowDsvIndex), dsv_size_);
     device_->CreateDepthStencilView(shadow_map_.Get(), &dsv, handle);
 
-    // A plain (non-comparison) R32 view of the map in the persistent engine heap,
-    // for the light-shaft pass to sample and compare by hand. The scene pass keeps
-    // its own comparison-sampled view in the per-level texture heap; both look at
-    // this one resource. Written once -- the map is fixed size and survives a resize.
+    // A plain (non-comparison) R32 view of the map, in the engine block of the heap,
+    // for the light-shaft pass to sample and compare by hand. The scene pass keeps its
+    // own comparison-sampled view in the heap's per-level region; both look at this one
+    // resource. Written once -- the map is fixed size and survives a resize.
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     srv.Format = kShadowSrvFormat;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -1043,36 +1097,26 @@ void Renderer::CreateShadowMap() {
 }
 
 void Renderer::CreatePipeline() {
-    // The per-draw transform and colour arrive as root constants. The one thing
-    // that cannot travel that way is the base colour texture, which needs a
-    // descriptor table, and the sampler that reads it is baked into the root
-    // signature -- every texture in the game wants the same one.
-    const CD3DX12_DESCRIPTOR_RANGE base_color_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-    // t1: the shadow map, at a fixed slot in the same heap the base colour lives
-    // in, bound once per frame rather than per draw.
+    // The per-draw transform and colour arrive as root constants, and so now do the
+    // four material texture slots: the pixel shader reads those textures bindlessly
+    // through ResourceDescriptorHeap[slot] rather than a descriptor table bound per
+    // draw. What still travels as a table is the pair bound once per pass, not per
+    // draw -- the shadow map and the reflection probe. The samplers every texture
+    // wants are baked into the signature as static samplers.
+    //
+    // t1: the shadow map, at a fixed slot in the heap the materials live in, bound
+    // once per frame.
     const CD3DX12_DESCRIPTOR_RANGE shadow_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
-    // t2, t3: the base colour's normal and metallic-roughness maps, each its own
-    // one-entry table bound per draw exactly like the base colour. Separate tables
-    // rather than one widened range, so the three need not sit next to each other
-    // in the heap.
-    const CD3DX12_DESCRIPTOR_RANGE normal_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
-    const CD3DX12_DESCRIPTOR_RANGE mr_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3);
-    // t4: the reflection probe cubemap, bound once per pass rather than per draw --
-    // one probe serves the whole yard.
+    // t4: the reflection probe cubemap, bound once per pass -- one probe serves the
+    // whole yard.
     const CD3DX12_DESCRIPTOR_RANGE probe_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);
-    // t5: the ambient-occlusion map, per draw like the other material textures.
-    const CD3DX12_DESCRIPTOR_RANGE occlusion_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5);
 
-    CD3DX12_ROOT_PARAMETER parameters[8];
+    CD3DX12_ROOT_PARAMETER parameters[4];
     parameters[0].InitAsConstants(kConstantDwords, 0);
-    parameters[1].InitAsDescriptorTable(1, &base_color_range, D3D12_SHADER_VISIBILITY_PIXEL);
     // b1: the frame constant buffer holding the sun's view-projection and the eye.
-    parameters[2].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
-    parameters[3].InitAsDescriptorTable(1, &shadow_range, D3D12_SHADER_VISIBILITY_PIXEL);
-    parameters[4].InitAsDescriptorTable(1, &normal_range, D3D12_SHADER_VISIBILITY_PIXEL);
-    parameters[5].InitAsDescriptorTable(1, &mr_range, D3D12_SHADER_VISIBILITY_PIXEL);
-    parameters[6].InitAsDescriptorTable(1, &probe_range, D3D12_SHADER_VISIBILITY_PIXEL);
-    parameters[7].InitAsDescriptorTable(1, &occlusion_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[2].InitAsDescriptorTable(1, &shadow_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    parameters[3].InitAsDescriptorTable(1, &probe_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     // s0: anisotropic because the ground and the patio are seen almost edge on,
@@ -1093,8 +1137,12 @@ void Renderer::CreatePipeline() {
     samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+    // CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED lets the shader reach the bound heap through
+    // ResourceDescriptorHeap[slot] -- the bindless path the material textures take.
+    // Without it, that intrinsic is a validation error even on tier-3 hardware.
     root_desc.Init(_countof(parameters), parameters, _countof(samplers), samplers,
                    D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                       D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
@@ -2453,8 +2501,8 @@ ComPtr<ID3D12Resource> Renderer::UploadTexture(const Image& image, UINT descript
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = mip_levels;
 
-    const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(texture_heap_->GetCPUDescriptorHandleForHeapStart(),
-                                               static_cast<INT>(descriptor), texture_size_);
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                               static_cast<INT>(descriptor), engine_heap_size_);
     device_->CreateShaderResourceView(texture.Get(), &srv, handle);
 
     staging.push_back(std::move(upload));
@@ -2462,8 +2510,8 @@ ComPtr<ID3D12Resource> Renderer::UploadTexture(const Image& image, UINT descript
 }
 
 D3D12_GPU_DESCRIPTOR_HANDLE Renderer::TextureHandle(UINT descriptor) const {
-    return CD3DX12_GPU_DESCRIPTOR_HANDLE(texture_heap_->GetGPUDescriptorHandleForHeapStart(),
-                                         static_cast<INT>(descriptor), texture_size_);
+    return CD3DX12_GPU_DESCRIPTOR_HANDLE(engine_heap_->GetGPUDescriptorHandleForHeapStart(),
+                                         static_cast<INT>(descriptor), engine_heap_size_);
 }
 
 void Renderer::CreateSceneGeometry(const Scene& scene) {
@@ -2474,17 +2522,17 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
         image_count += static_cast<UINT>(model.images.size());
     }
 
-    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
     // The white texture and the flat normal, then every model image, then the two
     // HUD font atlases (Inter + monospace), the sun's shadow map, and the reflection
-    // probe cubemap last.
-    heap_desc.NumDescriptors = 2 + image_count + 2 + 1 + 1;
-    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    ThrowIfFailed(device_->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&texture_heap_)),
-                  "CreateDescriptorHeap(SRV)");
-    texture_size_ =
-        device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    // probe cubemap last. These no longer get a heap of their own: they are written
+    // into the per-level region of the one persistent heap (from kMaterialHeapBase),
+    // which was already created at startup. Fail loudly if a level's materials would
+    // overrun that region rather than silently scribbling past it into nothing.
+    const UINT material_descriptors = 2 + image_count + 2 + 1 + 1;
+    if (material_descriptors > kMaterialHeapCapacity) {
+        throw std::runtime_error(
+            "Level needs more material descriptors than the SRV heap reserves");
+    }
 
     ThrowIfFailed(allocators_[frame_index_]->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocators_[frame_index_].Get(), nullptr),
@@ -2591,10 +2639,13 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
                     occlusion_descriptor = descriptors[material.occlusion_image];
                 }
             }
-            draw.base_color_texture = TextureHandle(descriptor);
-            draw.normal_texture = TextureHandle(normal_descriptor);
-            draw.metallic_roughness_texture = TextureHandle(mr_descriptor);
-            draw.occlusion_texture = TextureHandle(occlusion_descriptor);
+            // The scene pixel shader indexes these straight out of the bound heap
+            // (ResourceDescriptorHeap[slot]), so the slot is what the draw carries --
+            // no conversion to a bound GPU handle as the per-draw tables once needed.
+            draw.base_color_texture = descriptor;
+            draw.normal_texture = normal_descriptor;
+            draw.metallic_roughness_texture = mr_descriptor;
+            draw.occlusion_texture = occlusion_descriptor;
 
             gpu.primitives.push_back(draw);
         }
@@ -2617,8 +2668,8 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     shadow_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     shadow_srv.Texture2D.MipLevels = 1;
     const CD3DX12_CPU_DESCRIPTOR_HANDLE shadow_handle(
-        texture_heap_->GetCPUDescriptorHandleForHeapStart(),
-        static_cast<INT>(shadow_descriptor_), texture_size_);
+        engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+        static_cast<INT>(shadow_descriptor_), engine_heap_size_);
     device_->CreateShaderResourceView(shadow_map_.Get(), &shadow_srv, shadow_handle);
 
     // The reflection probe's cube SRV takes the descriptor after the shadow map.
@@ -2702,8 +2753,8 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.TextureCube.MipLevels = 1;
-    const CD3DX12_CPU_DESCRIPTOR_HANDLE srv_handle(texture_heap_->GetCPUDescriptorHandleForHeapStart(),
-                                                   static_cast<INT>(probe_descriptor_), texture_size_);
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE srv_handle(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                   static_cast<INT>(probe_descriptor_), engine_heap_size_);
     device_->CreateShaderResourceView(probe_cube_.Get(), &srv, srv_handle);
 
     // The capture is lit from the eye at the probe centre; write that into frame
@@ -2744,7 +2795,7 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
     ThrowIfFailed(command_list_->Reset(allocators_[frame_index_].Get(), nullptr),
                   "CommandList::Reset");
 
-    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    ID3D12DescriptorHeap* heaps[] = {engine_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
 
     const CD3DX12_VIEWPORT viewport(0.0f, 0.0f, static_cast<float>(kProbeSize),
@@ -3677,16 +3728,18 @@ void Renderer::DrawKeybinds(std::string_view title, std::span<const std::string>
 void Renderer::DrawInstances(std::span<const MeshInstance> instances,
                              const XMMATRIX& view_projection, XMFLOAT3 sun_direction,
                              float shadow_receive, bool bind_probe) {
-    // The per-pass bindings the scene signature adds beyond the per-draw tables:
-    // the frame constants (sun matrix + eye), the shadow map, and the reflection
-    // probe. Bound here, at the top of every batch, so they survive the
-    // root-signature switch the outline pass makes -- setting a root signature
-    // clears every argument bound under the old one. The probe is skipped for the
-    // capture pass, which is filling that cube and whose shader never reads it.
-    command_list_->SetGraphicsRootConstantBufferView(2, frame_constants_address_);
-    command_list_->SetGraphicsRootDescriptorTable(3, TextureHandle(shadow_descriptor_));
+    // The per-pass bindings the scene signature holds beyond the per-draw root
+    // constants: the frame constants (sun matrix + eye) at b1, the shadow map, and
+    // the reflection probe. Bound here, at the top of every batch, so they survive
+    // the root-signature switch the outline pass makes -- setting a root signature
+    // clears every argument bound under the old one. The material textures no longer
+    // ride tables here; each draw carries their heap slots in its root constants and
+    // the shader indexes them bindlessly. The probe is skipped for the capture pass,
+    // which is filling that cube and whose shader never reads it.
+    command_list_->SetGraphicsRootConstantBufferView(1, frame_constants_address_);
+    command_list_->SetGraphicsRootDescriptorTable(2, TextureHandle(shadow_descriptor_));
     if (bind_probe) {
-        command_list_->SetGraphicsRootDescriptorTable(6, TextureHandle(probe_descriptor_));
+        command_list_->SetGraphicsRootDescriptorTable(3, TextureHandle(probe_descriptor_));
     }
 
     for (const MeshInstance& instance : instances) {
@@ -3725,12 +3778,15 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
             constants.roughness = primitive.roughness;
             constants.emissive = instance.emissive;
             constants.wetness = instance.wetness;
+            // The material's four textures as heap slots the pixel shader indexes
+            // through ResourceDescriptorHeap -- what used to be four per-draw table
+            // binds is now four DWORDs in the root constants below.
+            constants.base_color_index = primitive.base_color_texture;
+            constants.normal_index = primitive.normal_texture;
+            constants.metallic_roughness_index = primitive.metallic_roughness_texture;
+            constants.occlusion_index = primitive.occlusion_texture;
 
             command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
-            command_list_->SetGraphicsRootDescriptorTable(1, primitive.base_color_texture);
-            command_list_->SetGraphicsRootDescriptorTable(4, primitive.normal_texture);
-            command_list_->SetGraphicsRootDescriptorTable(5, primitive.metallic_roughness_texture);
-            command_list_->SetGraphicsRootDescriptorTable(7, primitive.occlusion_texture);
             command_list_->DrawIndexedInstanced(primitive.index_count, 1, primitive.first_index, 0,
                                                 0);
         }
@@ -3843,8 +3899,8 @@ void Renderer::RenderGrass(const XMMATRIX& view_projection, XMFLOAT3 camera_posi
     // The same per-frame lighting buffer the scene pass binds, for the pixel shader's
     // sun, sky, fog and shadow matrix.
     command_list_->SetGraphicsRootConstantBufferView(1, frame_constants_address_);
-    // The sun's shadow map (bound from the texture heap, live as a shader resource by
-    // now), so a blade can tell whether the sun reaches it.
+    // The sun's shadow map (its SRV in the heap's per-level region, live as a shader
+    // resource by now), so a blade can tell whether the sun reaches it.
     command_list_->SetGraphicsRootDescriptorTable(2, TextureHandle(shadow_descriptor_));
     // The obstacle footprints, so the field keeps clear of the patio, benches and props.
     command_list_->SetGraphicsRootConstantBufferView(3, grass_obstacles_address_);
@@ -4117,8 +4173,8 @@ void Renderer::RenderFluidSpray(std::span<const XMFLOAT4> droplets, const XMMATR
     // --- Pass 2: separable bilateral blur, horizontal then vertical, ping-ponging between
     // the depth and its blur target so the smoothed depth ends back in fluid_depth_. Beads
     // in a tight cluster melt into one surface; the bilateral weighting keeps blobs apart. ---
-    ID3D12DescriptorHeap* engine_heaps[] = {engine_heap_.Get()};
-    command_list_->SetDescriptorHeaps(_countof(engine_heaps), engine_heaps);
+    // The one SRV heap is already bound (Render binds it for the whole frame), so this pass
+    // just swaps its root signature and reads its targets straight out of it.
     command_list_->SetGraphicsRootSignature(fluid_blur_root_signature_.Get());
     command_list_->SetPipelineState(fluid_blur_pipeline_.Get());
 
@@ -4176,10 +4232,9 @@ void Renderer::RenderFluidSpray(std::span<const XMFLOAT4> droplets, const XMMATR
     command_list_->SetGraphicsRootDescriptorTable(1, engine_srv(kFluidDepthSrvIndex));
     command_list_->DrawInstanced(3, 1, 0, 0);
 
-    // Leave the world pass as it was found: the scene's texture heap and the HDR target with
-    // its depth bound. The caller restores the scene root signature and pipeline.
-    ID3D12DescriptorHeap* scene_heaps[] = {texture_heap_.Get()};
-    command_list_->SetDescriptorHeaps(_countof(scene_heaps), scene_heaps);
+    // Leave the world pass as it was found: the HDR target with its depth bound. The one SRV
+    // heap stays bound throughout the frame, so there is nothing to restore there; the caller
+    // restores the scene root signature and pipeline.
     command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, &dsv);
 }
 
@@ -4219,7 +4274,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
 
     // The only heap the game binds, and it must be bound before any root
     // descriptor table that points into it.
-    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    ID3D12DescriptorHeap* heaps[] = {engine_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
 
     command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -4289,8 +4344,8 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // thickness (depth-tested against the yard the world pass just laid down, so the world
     // occludes them), bilaterally smooths the depth, and composites the lit surface -- all
     // here, while the scene depth still holds the world and before the arms clear it. It
-    // rebinds the scene's texture heap and render targets on the way out; restore the scene
-    // root signature and pipeline for the outline pass and the draws that follow.
+    // restores the HDR target and depth on the way out (the one SRV heap stays bound all
+    // frame); restore the scene root signature and pipeline for the passes that follow.
     RenderFluidSpray(droplets, view, projection);
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
@@ -4323,8 +4378,6 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_SYNC_PIXEL_SHADING,
                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
     command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, nullptr);
-    ID3D12DescriptorHeap* cloud_heaps[] = {engine_heap_.Get()};
-    command_list_->SetDescriptorHeaps(_countof(cloud_heaps), cloud_heaps);
     command_list_->SetGraphicsRootSignature(cloud_root_signature_.Get());
     command_list_->SetPipelineState(cloud_pipeline_state_.Get());
     CloudConstants cloud{};
@@ -4341,17 +4394,15 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     command_list_->IASetVertexBuffers(0, 0, nullptr);
     command_list_->DrawInstanced(3, 1, 0, 0);
 
-    // Depth back to a write target, and the scene pipeline the arms draw with. The
-    // cloud pass swapped the engine heap in for its depth SRV; rebind the texture heap
-    // the scene's draws sample, or the arms would read their materials from the wrong
-    // heap.
+    // Depth back to a write target, and the scene pipeline the arms draw with. The one
+    // SRV heap the cloud pass read its depth SRV from is the very heap the arms sample
+    // their materials from, so there is no heap to rebind here -- only the root signature
+    // and pipeline the cloud pass swapped away.
     TextureBarrier(command_list_.Get(), depth_stencil_.Get(), D3D12_BARRIER_SYNC_PIXEL_SHADING,
                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
                    D3D12_BARRIER_SYNC_DEPTH_STENCIL, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE);
     command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, &dsv);
-    ID3D12DescriptorHeap* scene_heaps[] = {texture_heap_.Get()};
-    command_list_->SetDescriptorHeaps(_countof(scene_heaps), scene_heaps);
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
 
@@ -4359,9 +4410,11 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // plume rising against the sky stands in front of them, not behind -- but before the arms
     // clear depth, while the scene depth still holds the yard so the world occludes the smoke.
     // Flow leaves its own heap, root signature, PSO and targets bound, so restore the scene's
-    // for the arms that follow.
+    // for the arms that follow. This is the one place a heap rebind is still needed: Flow is
+    // the only pass that binds a descriptor heap other than ours, so everywhere else the one
+    // heap bound at the top of the frame simply stays bound.
     RenderFlow(view, projection, flow_dt, flow_emitters);
-    ID3D12DescriptorHeap* post_flow_heaps[] = {texture_heap_.Get()};
+    ID3D12DescriptorHeap* post_flow_heaps[] = {engine_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(post_flow_heaps), post_flow_heaps);
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
@@ -4393,10 +4446,9 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
 
     command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, nullptr);
-    // The shaft pass reads the depth and shadow SRVs from the persistent engine heap,
-    // which the tonemap pass below also binds -- so it stays bound through both.
-    ID3D12DescriptorHeap* engine_heaps[] = {engine_heap_.Get()};
-    command_list_->SetDescriptorHeaps(_countof(engine_heaps), engine_heaps);
+    // The shaft pass reads the depth and shadow SRVs from the one persistent heap,
+    // which has been bound since the top of the frame -- so there is nothing to bind
+    // here, just its own root signature and pipeline below.
 
     command_list_->SetGraphicsRootSignature(light_shaft_root_signature_.Get());
     command_list_->SetPipelineState(light_shaft_pipeline_state_.Get());
@@ -4463,10 +4515,8 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     command_list_->DrawInstanced(3, 1, 0, 0);
 
     // The HUD goes on last, blended over the resolved frame in display space -- so
-    // it is deliberately not tonemapped. It samples the font atlas from the
-    // per-level texture heap, so bind that back before drawing.
-    ID3D12DescriptorHeap* text_heaps[] = {texture_heap_.Get()};
-    command_list_->SetDescriptorHeaps(_countof(text_heaps), text_heaps);
+    // it is deliberately not tonemapped. Its font atlas SRV lives in the one heap that
+    // has been bound all frame, so it draws with no rebind.
     DrawHud(hud_prompt, debug_lines, orders, meats);
 
     // The frame is complete; hand the swapchain buffer back for presentation.
@@ -4491,10 +4541,10 @@ void Renderer::RenderMenu(std::string_view title, std::span<const std::string> e
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
 
-    // The font atlas SRV lives in the per-level texture heap; the menu text samples
-    // it, so bind that heap. A level is loaded behind the menu (its geometry just is
-    // not drawn), so the heap and the atlas are present.
-    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    // The font atlas SRV lives in the one persistent heap; the menu text samples it,
+    // so bind that heap for this frame's command list. A level is loaded behind the
+    // menu (its geometry just is not drawn), so the atlas is present.
+    ID3D12DescriptorHeap* heaps[] = {engine_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
 
     command_list_->RSSetViewports(1, &viewport_);
@@ -4536,10 +4586,10 @@ void Renderer::RenderLoading(std::string_view title, std::string_view subtitle) 
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
 
-    // Same setup as RenderMenu: the font atlas rides the per-level texture heap (the
+    // Same setup as RenderMenu: the font atlas rides the one persistent heap (the
     // outgoing level is still resident), so bind it, then own the swapchain buffer from
     // clear to present over the menu backdrop.
-    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    ID3D12DescriptorHeap* heaps[] = {engine_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
 
     command_list_->RSSetViewports(1, &viewport_);
@@ -4579,9 +4629,9 @@ void Renderer::RenderResults(std::string_view title, bool passed,
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
 
-    // Same setup as RenderMenu: the font atlas rides the per-level texture heap, so bind
+    // Same setup as RenderMenu: the font atlas rides the one persistent heap, so bind
     // it, then own the swapchain buffer from clear to present over the menu backdrop.
-    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    ID3D12DescriptorHeap* heaps[] = {engine_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
 
     command_list_->RSSetViewports(1, &viewport_);
@@ -4620,9 +4670,9 @@ void Renderer::RenderKeybinds(std::string_view title, std::span<const std::strin
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
 
-    // Same setup as RenderMenu: the font atlas rides the per-level texture heap, so bind
+    // Same setup as RenderMenu: the font atlas rides the one persistent heap, so bind
     // it, then own the swapchain buffer from clear to present.
-    ID3D12DescriptorHeap* heaps[] = {texture_heap_.Get()};
+    ID3D12DescriptorHeap* heaps[] = {engine_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
 
     command_list_->RSSetViewports(1, &viewport_);
