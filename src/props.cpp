@@ -494,6 +494,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     // current pose (held, or its resting/stacked pose) times the offset up into the log --
     // so the warm zone rides the log as it is carried, set down or stacked in the pit. Like
     // the furniture's grill, done before the cook loop so meats read this frame's positions.
+    item_heats_.clear();
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
         if (items_[i].heat) {
             const XMMATRIX pose = CurrentPose(i, camera_to_world);
@@ -505,6 +506,9 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
                                        ? NozzleLocal(items_[i])
                                        : XMLoadFloat3(&items_[i].heat_offset);
             items_[i].heat->SetOrigin(XMVector3Transform(local, pose));
+            // Snapshot it, hot centre and all, for Furniture to light the grill against
+            // (see ItemHeats()) -- the same flame that catches a log catches the grate.
+            item_heats_.push_back(*items_[i].heat);
         }
     }
 

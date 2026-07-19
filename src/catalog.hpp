@@ -109,6 +109,12 @@ struct PropDef {
     float knock_rating = 1.0f;
     ImpactSound impact_sound = ImpactSound::None;
     std::optional<HeatDef> heat;
+    // What it takes to set this prop alight, if it can be lit at all (the grill, whose
+    // grate starts cold and is lit in play). Empty on every other prop, which never
+    // catches. Pairs with `heat` exactly as a carryable's does -- igniting switches the
+    // prop's own heat on -- so an ignitable prop wants a `heat` with `starts_on = false`
+    // beside it, or it catches and radiates nothing. Takes effect on a dynamic prop only.
+    std::optional<IgnitableRequirements> ignitable;
 };
 
 // The whole catalog: the game's object archetypes, keyed by the name a level places

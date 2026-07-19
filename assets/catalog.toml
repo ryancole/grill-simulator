@@ -188,8 +188,8 @@ heat_starts_on = false
 
 # The charcoal grill base: a dynamic body that radiates heat from its grate. Its lid is
 # not furniture -- it is a carryable ([tool.lid] above) that rests on this base and
-# can be lifted off. `heat_offset` lifts the hot centre up off the feet. These three are
-# the cook's placement-independent tuning knobs (the per-food ones are on the foods above).
+# can be lifted off. `heat_offset` lifts the hot centre up off the feet. These are the
+# cook's placement-independent tuning knobs (the per-food ones are on the foods above).
 [prop.charcoal_grill]
 model = "charcoal-grill-base.glb"
 dynamic = true
@@ -199,6 +199,18 @@ sound = "grill_base"
 heat = 425.0
 heat_reach = 1.0
 heat_offset = [0.0, 0.62, 0.0]
+# The grate starts cold: `heat_starts_on = false` leaves it radiating nothing until the
+# player lights it, exactly like the firewood logs. Lift the lid off and hold the lighter's
+# flame to the grate and it catches -- `ignite_temp` is the temperature it must heat through
+# to before it does. 450F is the same threshold the logs use, and for the same reasons: the
+# lighter's ~1300F flame clears it easily when held to the grate at arm's length, while
+# nothing else in the yard comes near (there is no other heat source out here to light it by
+# accident). Once caught the grate switches its own `heat` on -- 425F of grill -- and cooks.
+# Catching is one-way; nothing puts it out. `ignite_tau` is how slowly it heats through: at
+# 3s the flame must be held on it a few seconds, a deliberate light rather than a tap.
+heat_starts_on = false
+ignite_temp = 450.0
+ignite_tau = 3.0
 
 [prop.cooler]
 model = "cooler-basic.glb"

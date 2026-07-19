@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -47,6 +48,17 @@ public:
     // advances the simulation and before the frame is drawn -- and before Props
     // updates, so the meats cook against this frame's heat, not last frame's.
     void Update();
+
+    // Warms every ignitable furniture heat source (the grill's grate) toward the
+    // hottest carryable flame reaching it -- `external_heats` are Props::ItemHeats(),
+    // the lit logs and the struck lighter, each already at its hot centre this frame --
+    // and switches the heat on the moment it catches, exactly as Props lights a log. An
+    // already-lit or non-ignitable source is left untouched, and catching is one-way, so
+    // nothing here puts the grill out. Call after Props::Update (so the flame's position
+    // is this frame's) and before the frame's Flow fires are gathered, so a grate that
+    // catches this frame both cooks and shows fire this frame. A no-op on a level whose
+    // furniture is not ignitable.
+    void UpdateIgnition(std::span<const HeatSource> external_heats, float dt);
 
     // The heat the furniture radiates this frame -- the grill's grate, its origin
     // already placed at wherever the grill has ended up. Handed to Props so the meats
@@ -103,6 +115,12 @@ private:
     std::vector<Body> bodies_;
     std::vector<HeatSource> heat_sources_;
     std::vector<HeatDrive> heat_drives_;
+    // What it takes to light each heat source, parallel to heat_sources_ (empty entry =
+    // a source that is simply always on, like a lit grill authored that way). The running
+    // heat-through state lives here; UpdateIgnition eases it toward a held flame and flips
+    // the matching source on when it catches. Kept out of HeatSource on purpose -- see
+    // IgnitableRequirements: a source's on/off flag is the one truth of "is this burning".
+    std::vector<std::optional<IgnitableRequirements>> heat_ignitables_;
 
     // The bodies_ index of the grill base -- the one dynamic body the player can stand
     // back up -- or -1 on a level without one. Found in the constructor as the body

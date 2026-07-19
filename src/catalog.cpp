@@ -123,8 +123,8 @@ std::optional<HeatDef> ReadHeat(const toml::table& entry, const std::filesystem:
 }
 
 // What it takes to light a type, read from its `ignite_temp` (the air temperature that
-// sets it alight). Absent, the type simply never catches. A carryable field: nothing
-// among the props is ignitable yet.
+// sets it alight). Absent, the type simply never catches. Shared by carryables (the log)
+// and props (the grill's grate), which spell ignition the same way.
 std::optional<IgnitableRequirements> ReadIgnitable(const toml::table& entry,
                                                    const std::filesystem::path& path) {
     const toml::node_view<const toml::node> temp = entry["ignite_temp"];
@@ -310,6 +310,10 @@ Catalog Load(const std::filesystem::path& path) {
             def.knock_rating = NumberOr((*entry)["knock"], def.knock_rating, path, "knock");
             def.impact_sound = SoundOr((*entry)["sound"], def.impact_sound, path);
             def.heat = ReadHeat(*entry, path);
+            // ...and may be lightable, which is what switches that heat on in play (the
+            // grill's grate, lit with the flame like a log). Only takes effect on a
+            // dynamic prop -- Furniture, which owns the bodies, is what ticks it.
+            def.ignitable = ReadIgnitable(*entry, path);
             out.props.emplace(name, std::move(def));
         }
     }
