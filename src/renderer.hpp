@@ -737,6 +737,13 @@ private:
     // BLASes it references live on the GpuModels.
     ComPtr<ID3D12Resource> tlas_;
     UINT tlas_descriptor_ = 0;
+    // The two structured buffers the reflection hit shader reads to shade what a ray
+    // hits: per-instance geometry+tint info and per-primitive index-range+colour info,
+    // with their shader-visible SRV slots. Built alongside the TLAS, freed on a swap.
+    ComPtr<ID3D12Resource> rt_instance_info_;
+    ComPtr<ID3D12Resource> rt_prim_info_;
+    UINT rt_instance_info_descriptor_ = 0;
+    UINT rt_prim_info_descriptor_ = 0;
 
     ComPtr<ID3D12Fence> fence_;
     HANDLE fence_event_ = nullptr;

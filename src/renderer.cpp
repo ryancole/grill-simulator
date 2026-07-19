@@ -226,9 +226,39 @@ struct FrameConstants {
     // The TLAS's heap slot, so the scene pixel shader can fetch it and trace reflection
     // rays. Reuses what was a pad DWORD (mirrors g_tlas_index in scene.hlsl / grass.hlsl).
     UINT tlas_index;
+    // A fresh row: the heap slots of the two structured buffers the reflection hit shader
+    // reads to shade what it hits -- the per-instance geometry/tint info and the per-
+    // primitive index-range/base-colour info. Two spare DWORDs pad the row.
+    UINT instance_info_index;
+    UINT prim_info_index;
+    UINT frame_pad0;
+    UINT frame_pad1;
 };
 
-static_assert(sizeof(FrameConstants) == 208, "FrameConstants must mirror the HLSL cbuffer rows");
+static_assert(sizeof(FrameConstants) == 224, "FrameConstants must mirror the HLSL cbuffer rows");
+
+// One entry per raytracing instance, read by the reflection hit shader: the bindless
+// byte-address SRV slots of the hit model's vertex and index buffers, the base of its
+// primitives in the RtPrimInfo array, and the instance's colour tint. 32 bytes so the
+// tint float3 lands on a 16-byte boundary and the StructuredBuffer layout is unambiguous.
+struct RtInstanceInfo {
+    UINT vb_srv;
+    UINT ib_srv;
+    UINT prim_base;
+    UINT pad0;
+    XMFLOAT3 tint;
+    float pad1;
+};
+// One entry per model-primitive: where its triangles begin in its model's shared index
+// buffer, and its base-colour factor. Indexed by prim_base + the hit's geometry index.
+struct RtPrimInfo {
+    UINT first_index;
+    UINT pad0;
+    UINT pad1;
+    UINT pad2;
+    XMFLOAT3 base_color;
+    float pad3;
+};
 
 // Mirrors the LightShaftConstants cbuffer in shaders/lightshafts.hlsl: the inverse
 // view-projection that rebuilds a pixel's world point from depth, the sun's view-
@@ -780,6 +810,8 @@ void Renderer::ReleaseScene() {
     // here; the shadow map resource, created once in CreateShadowMap, is left standing.
     models_.clear();  // frees each GpuModel's BLAS along with its buffers
     tlas_.Reset();
+    rt_instance_info_.Reset();
+    rt_prim_info_.Reset();
     textures_.clear();
     atlas_texture_.Reset();
     mono_atlas_texture_.Reset();
@@ -2553,11 +2585,14 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
 
     // The white texture and the flat normal, then every model image, then the two
     // HUD font atlases (Inter + monospace), the sun's shadow map, and the reflection
-    // probe cubemap last. These no longer get a heap of their own: they are written
-    // into the per-level region of the one persistent heap (from kMaterialHeapBase),
-    // which was already created at startup. Fail loudly if a level's materials would
-    // overrun that region rather than silently scribbling past it into nothing.
-    const UINT material_descriptors = 2 + image_count + 2 + 1 + 1;
+    // probe cubemap. Then, past the probe, BuildAccelerationStructures adds two
+    // byte-address SRVs per model (its vertex + index buffers, for the reflection hit
+    // shader) and two structured-buffer SRVs (the instance + primitive info). These no
+    // longer get a heap of their own: they are written into the per-level region of the
+    // one persistent heap (from kMaterialHeapBase), created at startup. Fail loudly if a
+    // level would overrun that region rather than silently scribbling past it.
+    const UINT material_descriptors =
+        2 + image_count + 2 + 1 + 1 + 2 * static_cast<UINT>(models.size()) + 2;
     if (material_descriptors > kMaterialHeapCapacity) {
         throw std::runtime_error(
             "Level needs more material descriptors than the SRV heap reserves");
@@ -2931,11 +2966,47 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
         std::memcpy(out, rows, sizeof(rows));
     };
 
+    // Reflection hit shading reaches the hit model's geometry and material through bindless
+    // views: collect, per model, the heap slots of its vertex and index buffers (as
+    // byte-address SRVs) and the base of its primitives in the flat RtPrimInfo array. Slots
+    // are handed out past the reflection probe, the last thing CreateSceneGeometry placed.
+    UINT next_slot = probe_descriptor_ + 1;
+    std::vector<UINT> model_vb_srv(models_.size());
+    std::vector<UINT> model_ib_srv(models_.size());
+    std::vector<UINT> model_prim_base(models_.size());
+    std::vector<RtPrimInfo> prim_infos;
+    auto raw_srv = [&](ID3D12Resource* buffer, UINT bytes) -> UINT {
+        const UINT slot = next_slot++;
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Format = DXGI_FORMAT_R32_TYPELESS;
+        srv.Buffer.NumElements = bytes / 4;
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE h(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                              static_cast<INT>(slot), engine_heap_size_);
+        device_->CreateShaderResourceView(buffer, &srv, h);
+        return slot;
+    };
+
     // --- One bottom-level AS per model, a geometry per primitive so each bakes in its
     // own model-space placement (the flattened glTF node transform) via Transform3x4. ---
-    for (GpuModel& model : models_) {
+    for (size_t m = 0; m < models_.size(); ++m) {
+        GpuModel& model = models_[m];
         const UINT vertex_count =
             model.vertex_buffer_view.SizeInBytes / model.vertex_buffer_view.StrideInBytes;
+
+        // This model's primitives, flattened into the shared RtPrimInfo array, plus its
+        // vertex/index byte-address SRVs the hit shader fetches triangles from.
+        model_prim_base[m] = static_cast<UINT>(prim_infos.size());
+        for (const DrawPrimitive& prim : model.primitives) {
+            RtPrimInfo pi{};
+            pi.first_index = prim.first_index;
+            pi.base_color = prim.base_color;
+            prim_infos.push_back(pi);
+        }
+        model_vb_srv[m] = raw_srv(model.vertex_buffer.Get(), model.vertex_buffer_view.SizeInBytes);
+        model_ib_srv[m] = raw_srv(model.index_buffer.Get(), model.index_buffer_view.SizeInBytes);
 
         std::vector<float> transforms(model.primitives.size() * 12);
         for (size_t p = 0; p < model.primitives.size(); ++p) {
@@ -3005,15 +3076,18 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
                       D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
                       D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
                       D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ);
-        // The buffers back to their render access for the frames to come.
+        // The buffers back to their render access for the frames to come -- now as BOTH
+        // the vertex/index buffer they are drawn from AND a shader resource, since the
+        // reflection hit shader also fetches their triangles bindlessly. Enhanced barriers
+        // let a buffer carry both read accesses at once.
         BufferBarrier(command_list_.Get(), model.vertex_buffer.Get(),
                       D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
                       D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_SYNC_DRAW,
-                      D3D12_BARRIER_ACCESS_VERTEX_BUFFER);
+                      D3D12_BARRIER_ACCESS_VERTEX_BUFFER | D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
         BufferBarrier(command_list_.Get(), model.index_buffer.Get(),
                       D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
                       D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_SYNC_DRAW,
-                      D3D12_BARRIER_ACCESS_INDEX_BUFFER);
+                      D3D12_BARRIER_ACCESS_INDEX_BUFFER | D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
     }
 
     // --- One top-level AS over the yard's static instances, each pointing at its model's
@@ -3077,6 +3151,43 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
     const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
                                                static_cast<INT>(tlas_descriptor_), engine_heap_size_);
     device_->CreateShaderResourceView(nullptr, &srv, handle);
+
+    // The per-instance info the reflection hit shader looks up by hit instance index: the
+    // hit model's vertex/index SRV slots, the base of its primitives, and the instance's
+    // colour tint.
+    std::vector<RtInstanceInfo> instance_infos(instances.size());
+    for (size_t i = 0; i < instances.size(); ++i) {
+        RtInstanceInfo& ii = instance_infos[i];
+        ii.vb_srv = model_vb_srv[instances[i].model];
+        ii.ib_srv = model_ib_srv[instances[i].model];
+        ii.prim_base = model_prim_base[instances[i].model];
+        ii.tint = instances[i].tint;
+    }
+    // Both info buffers live in video memory, read every frame by the reflection shader, so
+    // they are staged into the default heap (the copy rides this command list). Their SRVs
+    // are structured-buffer views past the vertex/index SRVs above.
+    rt_instance_info_ =
+        UploadBuffer(instance_infos.data(), instance_infos.size() * sizeof(RtInstanceInfo),
+                     D3D12_BARRIER_ACCESS_SHADER_RESOURCE, keepalive);
+    rt_prim_info_ = UploadBuffer(prim_infos.data(), prim_infos.size() * sizeof(RtPrimInfo),
+                                 D3D12_BARRIER_ACCESS_SHADER_RESOURCE, keepalive);
+    auto structured_srv = [&](ID3D12Resource* buffer, UINT count, UINT stride) -> UINT {
+        const UINT slot = next_slot++;
+        D3D12_SHADER_RESOURCE_VIEW_DESC info_srv{};
+        info_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        info_srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        info_srv.Format = DXGI_FORMAT_UNKNOWN;
+        info_srv.Buffer.NumElements = count;
+        info_srv.Buffer.StructureByteStride = stride;
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE h(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                              static_cast<INT>(slot), engine_heap_size_);
+        device_->CreateShaderResourceView(buffer, &info_srv, h);
+        return slot;
+    };
+    rt_instance_info_descriptor_ = structured_srv(
+        rt_instance_info_.Get(), static_cast<UINT>(instance_infos.size()), sizeof(RtInstanceInfo));
+    rt_prim_info_descriptor_ = structured_srv(rt_prim_info_.Get(),
+                                              static_cast<UINT>(prim_infos.size()), sizeof(RtPrimInfo));
 
     ThrowIfFailed(command_list_->Close(), "CommandList::Close");
     ID3D12CommandList* lists[] = {command_list_.Get()};
@@ -4512,8 +4623,11 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     frame.light_view_projection = light_view_projection_;
     frame.camera_position = camera_position;
     frame.time = seconds;
-    // The TLAS slot the scene pixel shader traces its reflection rays against.
+    // The TLAS slot the scene pixel shader traces its reflection rays against, and the two
+    // info buffers it shades a hit from.
     frame.tlas_index = tlas_descriptor_;
+    frame.instance_info_index = rt_instance_info_descriptor_;
+    frame.prim_info_index = rt_prim_info_descriptor_;
     ApplyEnvironment(frame, environment_);
     std::memcpy(frame_region, &frame, sizeof(frame));
     frame_constants_address_ =

@@ -98,8 +98,13 @@ cbuffer FrameConstants : register(b1) {
     float g_fog_start;
     float g_fog_end;
     // The TLAS's slot in the bound heap, so the shade can trace reflection rays against
-    // the yard (see TraceReflection). Reuses what was a pad DWORD.
+    // the yard (see SpecularEnvironment). Reuses what was a pad DWORD.
     uint g_tlas_index;
+    // A fresh row: the slots of the two structured buffers the reflection hit shading
+    // reads -- per-instance geometry/tint info and per-primitive index-range/colour info.
+    uint g_instance_info_index;
+    uint g_prim_info_index;
+    uint2 g_frame_pad;
 };
 
 // The material's four textures -- base colour, tangent-space normal, metallic-
@@ -266,6 +271,26 @@ float3 PrefilteredSky(float3 r, float roughness) {
     return lerp(SampleSky(r, g_sky), SkyAverage(), roughness);
 }
 
+// Mirrors RtInstanceInfo / RtPrimInfo in renderer.cpp -- the per-instance and per-
+// primitive data the reflection hit shading reads to shade what a ray strikes. Padding
+// keeps the float3s on 16-byte boundaries so the C++ and HLSL layouts agree.
+struct RtInstanceInfo {
+    uint vb_srv;
+    uint ib_srv;
+    uint prim_base;
+    uint pad0;
+    float3 tint;
+    float pad1;
+};
+struct RtPrimInfo {
+    uint first_index;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+    float3 base_color;
+    float pad3;
+};
+
 // The specular environment along a reflection vector `r` from world point `origin`.
 // On the on-screen pass a hardware ray traces the reflection against the yard's TLAS
 // (inline RayQuery, no ray pipeline): a miss reflects the analytic sky, blurred toward
@@ -288,7 +313,43 @@ float3 SpecularEnvironment(float3 origin, float3 r, float roughness, bool use_pr
         query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
         query.Proceed(); // All geometry is opaque, so one step resolves the traversal.
         if (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-            return float3(0.02f, 0.02f, 0.03f);
+            // Shade the hit: look up the hit instance and primitive, fetch the struck
+            // triangle's three vertices from the model's bindless vertex/index buffers,
+            // interpolate the surface normal, and light it with the sun and sky. No
+            // texture, no shadow ray yet -- a lit, flat-coloured reflection of the yard.
+            const StructuredBuffer<RtInstanceInfo> instance_infos =
+                ResourceDescriptorHeap[g_instance_info_index];
+            const StructuredBuffer<RtPrimInfo> prim_infos =
+                ResourceDescriptorHeap[g_prim_info_index];
+            const RtInstanceInfo inst = instance_infos[query.CommittedInstanceIndex()];
+            const RtPrimInfo prim = prim_infos[inst.prim_base + query.CommittedGeometryIndex()];
+
+            const ByteAddressBuffer index_buffer = ResourceDescriptorHeap[inst.ib_srv];
+            const ByteAddressBuffer vertex_buffer = ResourceDescriptorHeap[inst.vb_srv];
+            const uint tri = prim.first_index + query.CommittedPrimitiveIndex() * 3;
+            const uint i0 = index_buffer.Load(tri * 4);
+            const uint i1 = index_buffer.Load((tri + 1) * 4);
+            const uint i2 = index_buffer.Load((tri + 2) * 4);
+            // Vertex is 48 bytes: position at 0, normal at 12 (see Vertex in model.hpp).
+            const float3 n0 = asfloat(vertex_buffer.Load3(i0 * 48 + 12));
+            const float3 n1 = asfloat(vertex_buffer.Load3(i1 * 48 + 12));
+            const float3 n2 = asfloat(vertex_buffer.Load3(i2 * 48 + 12));
+            const float2 bary = query.CommittedTriangleBarycentrics();
+            const float3 object_normal =
+                n0 * (1.0f - bary.x - bary.y) + n1 * bary.x + n2 * bary.y;
+            // Object -> world for the normal. The yard's boxes have axis-aligned faces and
+            // scale, so the 3x3 (translation dropped) plus a normalize is exact enough here.
+            float3 hit_normal = normalize(mul((float3x3)query.CommittedObjectToWorld3x4(),
+                                              object_normal));
+            if (dot(hit_normal, r) > 0.0f) {
+                hit_normal = -hit_normal; // face the incoming ray
+            }
+            const float3 albedo = SrgbToLinear(prim.base_color * inst.tint);
+            const float n_dot_l = saturate(dot(hit_normal, g_sun_direction));
+            const float3 sun =
+                SrgbToLinear(g_sun_color) * g_sun_intensity * n_dot_l * (1.0f / kPi);
+            const float3 ambient = SrgbToLinear(g_sky_ambient) * g_ambient_strength;
+            return albedo * (sun + ambient);
         }
     }
     return PrefilteredSky(r, roughness);
