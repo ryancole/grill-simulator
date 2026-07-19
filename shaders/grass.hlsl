@@ -63,6 +63,9 @@ cbuffer GrassConstants : register(b0) {
     // pass passes these all huge, so it keeps every blade -- popping in a shadow reads
     // worse than the fill cost of drawing it.
     float4 g_lod;
+    // The slot of the sun's shadow-map SRV in the one bound heap, fetched bindlessly by
+    // the pixel shader rather than through a table (the shadow pass leaves it unread).
+    uint g_shadow_index;
 };
 
 // The same per-frame lighting the scene pass reads, bound from the same buffer, so
@@ -94,10 +97,9 @@ cbuffer GrassObstacles : register(b2) {
     float4 g_obstacles[MAX_GRASS_OBSTACLES];
 };
 
-// The sun's depth buffer from the shadow pass, sampled so a blade knows whether the
-// sun reaches it. Only the on-screen pixel shader reads it; the shadow-cast pass has
-// no pixel shader. Bound at the same fixed slot the scene pass uses.
-Texture2D<float> g_grass_shadow_map : register(t0);
+// The sun's depth buffer from the shadow pass is fetched bindlessly by g_shadow_index
+// inside GrassSunVisibility, so a blade knows whether the sun reaches it. Only the
+// on-screen pixel shader reads it; the shadow-cast pass has no pixel shader.
 SamplerComparisonState g_grass_shadow_sampler : register(s0);
 
 static const float kPi = 3.14159265f;
@@ -367,6 +369,7 @@ void MSMain(uint gtid : SV_GroupThreadID, uint3 gid : SV_GroupID, in payload Pay
 // blade sits in the same shadows as the ground it grows from and blades shade one
 // another through the very map they cast into.
 float GrassSunVisibility(float3 world, float3 normal) {
+    const Texture2D<float> g_grass_shadow_map = ResourceDescriptorHeap[g_shadow_index];
     const float4 light_clip = mul(float4(world + normal * 0.02f, 1.0f), g_light_view_projection);
     const float3 ndc = light_clip.xyz / light_clip.w;
     const float2 uv = ndc.xy * float2(0.5f, -0.5f) + 0.5f;

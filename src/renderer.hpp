@@ -453,7 +453,6 @@ private:
     // and plain _UNORM for data textures (normal, metallic-roughness, atlas).
     ComPtr<ID3D12Resource> UploadTexture(const Image& image, UINT descriptor, DXGI_FORMAT format,
                                          std::vector<ComPtr<ID3D12Resource>>& staging);
-    D3D12_GPU_DESCRIPTOR_HANDLE TextureHandle(UINT descriptor) const;
 
     // One draw per primitive of each instance's model, each under its own root
     // constants. `shadow_receive` is 1 for the world, which is shadowed by the
@@ -555,8 +554,8 @@ private:
     // session SRVs (HDR buffer, depth, shadow, bloom, fluid) in its front block, the
     // per-level material/atlas/shadow/probe descriptors after them. See
     // CreateEngineDescriptorHeap and the kMaterialHeapBase / kSrvHeapSize constants in
-    // the .cpp. TextureHandle indexes it; a level swap overwrites the per-level region
-    // rather than rebuilding the heap.
+    // the .cpp. Shaders index it directly (ResourceDescriptorHeap); a level swap
+    // overwrites the per-level region rather than rebuilding the heap.
     ComPtr<ID3D12DescriptorHeap> engine_heap_;
     UINT engine_heap_size_ = 0;
 

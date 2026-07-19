@@ -33,14 +33,15 @@ cbuffer CloudConstants : register(b0) {
     float g_ambient_strength;
     // How hard the higher-frequency noise erodes the cloud edges into billows.
     float g_cloud_detail;
-    float g_pad;
+    // The slot of the scene depth SRV in the one bound descriptor heap: the clouds fetch
+    // it bindlessly (ResourceDescriptorHeap) rather than through a table. Reuses the DWORD
+    // that was only padding.
+    uint g_depth_index;
     // The shared sky atmosphere: SampleSky's colours plus the cloud coverage/scale/
     // softness/wind the 2D layer uses, reused here for the horizontal shape.
     SkyEnvironment g_sky;
 };
 
-// The scene depth (R32 view of the typeless depth buffer). A sky pixel reads 1.
-Texture2D<float> g_depth : register(t0);
 SamplerState g_sampler : register(s0);
 
 // The view ray is marched in this many steps through the slab; the light march
@@ -179,7 +180,9 @@ float LightMarch(float3 pos) {
 
 float4 PSMain(VSOutput input) : SV_TARGET {
     // Only the open sky carries clouds: where the world stands, the depth is nearer
-    // than the far plane, and the pass leaves that pixel untouched (transparent).
+    // than the far plane, and the pass leaves that pixel untouched (transparent). The
+    // scene depth is fetched from the bound heap by the slot the draw handed over.
+    const Texture2D<float> g_depth = ResourceDescriptorHeap[g_depth_index];
     const float depth = g_depth.SampleLevel(g_sampler, input.uv, 0.0f);
     if (depth < 1.0f) {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);

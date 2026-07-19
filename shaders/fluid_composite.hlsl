@@ -39,10 +39,13 @@ cbuffer FluidCompositeConstants : register(b0) {
     // centimetre of fluid barely tints and a deep pool goes amber.
     float3 g_absorption;
     float g_absorption_strength;
+
+    // The slots of the blurred surface depth and the accumulated thickness in the one
+    // bound heap, fetched bindlessly rather than through a table.
+    uint g_depth_index;
+    uint g_thickness_index;
 };
 
-Texture2D<float> g_depth : register(t0);      // blurred surface depth (view space z)
-Texture2D<float> g_thickness : register(t1);  // accumulated fluid thickness (metres)
 SamplerState g_sampler : register(s0);
 
 float3 SrgbToLinear(float3 c) {
@@ -75,6 +78,10 @@ struct PSOut {
 PSOut PSMain(VSOut input) {
     PSOut output;
 
+    // The blurred surface depth and the thickness, fetched from the bound heap by the
+    // slots the draw handed over.
+    const Texture2D<float> g_depth = ResourceDescriptorHeap[g_depth_index];
+    const Texture2D<float> g_thickness = ResourceDescriptorHeap[g_thickness_index];
     const float z = g_depth.SampleLevel(g_sampler, input.uv, 0);
     // No fluid: leave the background exactly as it is (add nothing, absorb nothing).
     if (z >= g_sentinel * 0.5) {

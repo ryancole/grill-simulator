@@ -49,6 +49,13 @@ cbuffer Constants : register(b0) {
     uint g_normal_index;
     uint g_metallic_roughness_index;
     uint g_occlusion_index;
+    // The sun's shadow map and the reflection probe cubemap, also fetched bindlessly.
+    // These are per-pass rather than per-material (the same for every draw in a batch),
+    // but riding the root constants keeps the scene pass free of descriptor tables
+    // entirely. The probe slot is only read on the on-screen path (use_probe); the
+    // capture pass leaves it unused.
+    uint g_shadow_index;
+    uint g_probe_index;
 };
 
 // Per-frame, shared by every scene draw: the sun's world-to-clip matrix, the one
@@ -100,15 +107,12 @@ cbuffer FrameConstants : register(b1) {
 // material lacking a given map is pointed at the shared 1x1 white (or flat-normal)
 // stand-in, so there is still no branch and no second pipeline state.
 //
-// The sun's depth buffer from the shadow pass: one channel, the light-space depth of
-// the nearest caster at each texel. Bound once per pass, so it stays a plain table.
-Texture2D<float> g_shadow_map : register(t1);
-// The reflection probe: the yard captured into a cubemap once at startup, so a
-// metal reflects the fence and the trees, not just the analytic sky. Sampled by
-// PSMain; PSMainCapture, which fills this very cube, must not read it, so the
-// sample is behind a compile-time flag that folds away for the capture variant.
-// Bound once per pass, so it too stays a table.
-TextureCube<float4> g_reflection_probe : register(t4);
+// The sun's depth buffer (one channel, the light-space depth of the nearest caster)
+// and the reflection probe cubemap (the yard captured once at startup, so a metal
+// reflects the fence and trees, not just the analytic sky) are fetched bindlessly from
+// the bound heap by g_shadow_index / g_probe_index -- see SunVisibility and
+// SpecularEnvironment. The probe is read only on the on-screen path; PSMainCapture,
+// which fills that cube, takes use_probe = false and never fetches it.
 SamplerState g_sampler : register(s0);
 // Hardware PCF. SampleCmp compares the receiver's depth against the stored one
 // and bilinearly filters the 0/1 results, so a single tap already softens across
@@ -179,6 +183,7 @@ PSInput VSMain(VSInput input) {
 // falling outside the map -- the far grass -- reads as lit rather than clamped
 // dark at the border.
 float SunVisibility(float3 world, float3 normal) {
+    const Texture2D<float> g_shadow_map = ResourceDescriptorHeap[g_shadow_index];
     const float4 light_clip =
         mul(float4(world + normal * kNormalOffset, 1.0f), g_light_view_projection);
     // Orthographic, so w is 1; the divide is a formality kept for clarity.
@@ -266,6 +271,7 @@ float3 PrefilteredSky(float3 r, float roughness) {
 // its reflection toward the sky average, the same floor PrefilteredSky uses.
 float3 SpecularEnvironment(float3 r, float roughness, bool use_probe) {
     if (use_probe) {
+        const TextureCube<float4> g_reflection_probe = ResourceDescriptorHeap[g_probe_index];
         const float3 sharp = g_reflection_probe.SampleLevel(g_sampler, r, 0.0f).rgb;
         return lerp(sharp, SkyAverage(), roughness);
     }

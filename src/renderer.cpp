@@ -143,17 +143,22 @@ struct Constants {
     UINT normal_index;
     UINT metallic_roughness_index;
     UINT occlusion_index;
+    // The shadow map and reflection probe, as heap slots the shader fetches bindlessly.
+    // Per-pass rather than per-material, but folding them into the root constants lets the
+    // scene signature drop its last two descriptor tables (mirrors g_shadow_index /
+    // g_probe_index in scene.hlsl).
+    UINT shadow_index;
+    UINT probe_index;
 };
 
 static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
-// Beyond the root constants the scene signature now holds only the frame constant
-// buffer (2), the shadow-map table (1) and the reflection-probe table (1) -- four
-// DWORDs. The four per-draw material tables became the four texture indices folded
-// into the root constants above, so the total is unchanged but the per-draw table
-// binds are gone. Still at the 64-DWORD ceiling; freeing budget waits on the shadow
-// map and probe going bindless too (migration phase 2).
-static_assert(kConstantDwords + 4 <= 64, "A root signature holds at most 64 DWORDs in total");
+// The scene signature now holds no descriptor tables at all -- every texture, including
+// the shadow map and probe, is fetched bindlessly from the root-constant slots above.
+// Beyond the root constants it holds only the frame constant buffer (2 DWORDs). The two
+// former table DWORDs became the two index DWORDs, so the total is unchanged, still at
+// the 64-DWORD ceiling.
+static_assert(kConstantDwords + 2 <= 64, "A root signature holds at most 64 DWORDs in total");
 
 // The shadow map is square and this many texels on a side. Matches kShadowMapSize
 // in scene.hlsl, which sizes one texel for the PCF taps. 2048 gives the fenced
@@ -225,18 +230,22 @@ struct LightShaftConstants {
     XMFLOAT4X4 inv_view_projection;
     XMFLOAT4X4 light_view_projection;
     XMFLOAT3 camera_position;
-    float pad0;
+    // The old pad DWORD now carries the scene depth SRV's heap slot, fetched bindlessly
+    // (mirrors g_depth_index in lightshafts.hlsl).
+    UINT depth_index;
     XMFLOAT3 sun_direction;
     // The old second pad DWORD now carries the shaft intensity; the colour and
     // asymmetry follow in a fresh row. Matches LightShaftConstants in lightshafts.hlsl.
     float shaft_intensity;
     XMFLOAT3 shaft_color;
     float shaft_g;
+    // The shadow map's plain-view heap slot, fetched bindlessly (mirrors g_shadow_index).
+    UINT shadow_index;
 };
 
 static_assert(sizeof(LightShaftConstants) % sizeof(UINT) == 0);
 constexpr UINT kLightShaftConstantDwords = sizeof(LightShaftConstants) / sizeof(UINT);
-static_assert(kLightShaftConstantDwords + 1 <= 64,
+static_assert(kLightShaftConstantDwords <= 64,
               "A root signature holds at most 64 DWORDs in total");
 
 // Mirrors the CloudConstants cbuffer in shaders/clouds.hlsl: the inverse view-
@@ -258,13 +267,15 @@ struct CloudConstants {
     float sun_intensity;
     float ambient_strength;
     float cloud_detail;
-    float pad;
+    // The slot of the scene depth SRV in the bound heap; the pixel shader fetches it
+    // bindlessly. Reuses what was a pad DWORD (mirrors g_depth_index in clouds.hlsl).
+    UINT depth_index;
     SkyEnvironment sky;
 };
 
 static_assert(sizeof(CloudConstants) % sizeof(UINT) == 0);
 constexpr UINT kCloudConstantDwords = sizeof(CloudConstants) / sizeof(UINT);
-static_assert(kCloudConstantDwords + 1 <= 64,
+static_assert(kCloudConstantDwords <= 64,
               "A root signature holds at most 64 DWORDs in total");
 
 // Mirrors the FluidConstants cbuffer in shaders/fluid.hlsl: just the view and projection
@@ -287,6 +298,9 @@ struct FluidBlurConstants {
     XMFLOAT2 texel_step;
     float sentinel;
     float depth_threshold;
+    // The slot of the depth to smooth in the bound heap; the shader fetches it bindlessly
+    // (mirrors g_depth_index in fluid_blur.hlsl). Ping-pongs between the two fluid depths.
+    UINT depth_index;
 };
 
 static_assert(sizeof(FluidBlurConstants) % sizeof(UINT) == 0);
@@ -311,11 +325,15 @@ struct FluidCompositeConstants {
     float gloss;
     XMFLOAT3 absorption;
     float absorption_strength;
+    // The slots of the blurred depth and the thickness in the bound heap; the shader
+    // fetches them bindlessly (mirror g_depth_index / g_thickness_index in the shader).
+    UINT depth_index;
+    UINT thickness_index;
 };
 
 static_assert(sizeof(FluidCompositeConstants) % sizeof(UINT) == 0);
 constexpr UINT kFluidCompositeConstantDwords = sizeof(FluidCompositeConstants) / sizeof(UINT);
-static_assert(kFluidCompositeConstantDwords + 1 <= 64,
+static_assert(kFluidCompositeConstantDwords <= 64,
               "A root signature holds at most 64 DWORDs in total");
 
 // The pale straw of naphtha the fluid's body takes (sRGB).
@@ -354,13 +372,17 @@ struct GrassConstants {
     // Level-of-detail distances from the eye, in metres: (full within x, half within
     // y, quarter beyond, cull past z). Mirrors g_lod in grass.hlsl; w is padding.
     XMFLOAT4 lod;
+    // The slot of the sun's shadow-map SRV in the bound heap; the pixel shader fetches it
+    // bindlessly (mirrors g_shadow_index in grass.hlsl). What was a per-draw table.
+    UINT shadow_index;
 };
 
 static_assert(sizeof(GrassConstants) % sizeof(UINT) == 0);
 constexpr UINT kGrassConstantDwords = sizeof(GrassConstants) / sizeof(UINT);
 // The root constants plus the frame constant buffer and the obstacle buffer (two root
-// CBVs, two DWORDs each) and the shadow-map table (one DWORD).
-static_assert(kGrassConstantDwords + 5 <= 64, "A root signature holds at most 64 DWORDs in total");
+// CBVs, two DWORDs each). The shadow map is no longer a table -- its slot rides the root
+// constants above and the pixel shader fetches it bindlessly.
+static_assert(kGrassConstantDwords + 4 <= 64, "A root signature holds at most 64 DWORDs in total");
 
 // The world size of one grass cell -- one mesh-shader group's patch of ground. A
 // group grows up to BLADES_PER_GROUP blades (see grass.hlsl), so this sets the peak
@@ -427,6 +449,9 @@ struct BloomConstants {
     XMFLOAT2 src_texel;
     float param0;
     float param1;
+    // The slot of the source texture in the bound heap; the shader fetches it bindlessly
+    // (mirrors g_source_index in bloom.hlsl). Changes each pass as the pyramid is walked.
+    UINT source_index;
 };
 
 static_assert(sizeof(BloomConstants) % sizeof(UINT) == 0);
@@ -536,6 +561,9 @@ struct TextConstants {
     // >0.5 fills the quad flat with `color` instead of sampling the atlas -- the
     // panel behind the debug overlay. Zero-initialised, so the glyph draws leave it 0.
     float solid = 0.0f;
+    // The slot of this run's atlas in the bound heap; the shader fetches it bindlessly
+    // (mirrors g_atlas_index in text.hlsl). Set per run from the face being drawn.
+    UINT atlas_index = 0;
 };
 
 static_assert(sizeof(TextConstants) % sizeof(UINT) == 0);
@@ -1097,26 +1125,16 @@ void Renderer::CreateShadowMap() {
 }
 
 void Renderer::CreatePipeline() {
-    // The per-draw transform and colour arrive as root constants, and so now do the
-    // four material texture slots: the pixel shader reads those textures bindlessly
-    // through ResourceDescriptorHeap[slot] rather than a descriptor table bound per
-    // draw. What still travels as a table is the pair bound once per pass, not per
-    // draw -- the shadow map and the reflection probe. The samplers every texture
-    // wants are baked into the signature as static samplers.
-    //
-    // t1: the shadow map, at a fixed slot in the heap the materials live in, bound
-    // once per frame.
-    const CD3DX12_DESCRIPTOR_RANGE shadow_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
-    // t4: the reflection probe cubemap, bound once per pass -- one probe serves the
-    // whole yard.
-    const CD3DX12_DESCRIPTOR_RANGE probe_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);
-
-    CD3DX12_ROOT_PARAMETER parameters[4];
+    // The per-draw transform and colour arrive as root constants, and so now do every
+    // texture the pass reads as a heap slot: the four material textures, plus the shadow
+    // map and the reflection probe. The pixel shader fetches all of them bindlessly
+    // through ResourceDescriptorHeap[slot], so the scene signature carries no descriptor
+    // tables at all -- only the root constants and the frame constant buffer. The samplers
+    // every texture wants are baked into the signature as static samplers.
+    CD3DX12_ROOT_PARAMETER parameters[2];
     parameters[0].InitAsConstants(kConstantDwords, 0);
     // b1: the frame constant buffer holding the sun's view-projection and the eye.
     parameters[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
-    parameters[2].InitAsDescriptorTable(1, &shadow_range, D3D12_SHADER_VISIBILITY_PIXEL);
-    parameters[3].InitAsDescriptorTable(1, &probe_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     // s0: anisotropic because the ground and the patio are seen almost edge on,
@@ -1219,19 +1237,18 @@ void Renderer::CreatePipeline() {
 
 void Renderer::CreateGrassPipeline() {
     // Three root parameters: the field and per-blade constants the amplification and
-    // mesh shaders grow the grass from (b0), the shared frame constant buffer (b1) the
-    // pixel shader lights against -- the very buffer the scene pass reads, so the grass
-    // takes the level's sun, sky, fog and shadow matrix with no plumbing of its own --
-    // and the sun's shadow map (t0), so a blade knows whether the sun reaches it. No
+    // mesh shaders grow the grass from (b0) -- which now also carry the slot of the sun's
+    // shadow map, fetched bindlessly by the pixel shader so a blade knows whether the sun
+    // reaches it -- the shared frame constant buffer (b1) the pixel shader lights against
+    // (the very buffer the scene pass reads, so the grass takes the level's sun, sky, fog
+    // and shadow matrix with no plumbing of its own), and the obstacle rectangles (b2). No
     // input layout: the blades are generated on the GPU, not fetched from a buffer.
-    const CD3DX12_DESCRIPTOR_RANGE shadow_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-    CD3DX12_ROOT_PARAMETER parameters[4];
+    CD3DX12_ROOT_PARAMETER parameters[3];
     parameters[0].InitAsConstants(kGrassConstantDwords, 0);
     parameters[1].InitAsConstantBufferView(1);
-    parameters[2].InitAsDescriptorTable(1, &shadow_range, D3D12_SHADER_VISIBILITY_PIXEL);
     // b2: the obstacle rectangles. Read by the amplification shader (whole-cell cull) and
     // the mesh shader (per-blade), so it stays visible to all stages.
-    parameters[3].InitAsConstantBufferView(2);
+    parameters[2].InitAsConstantBufferView(2);
 
     // The shadow comparison sampler, same as the scene's: linear comparison for 2x2 PCF
     // within a tap, white border so a blade sampling off the map's edge reads lit.
@@ -1249,7 +1266,8 @@ void Renderer::CreateGrassPipeline() {
     // arguments, so none of them is denied.
     CD3DX12_ROOT_SIGNATURE_DESC root_desc;
     root_desc.Init(_countof(parameters), parameters, 1, &sampler,
-                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                   D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
@@ -1534,17 +1552,12 @@ void Renderer::CreateOutlinePipeline() {
 }
 
 void Renderer::CreateTonemapPipeline() {
-    // b0: the exposure and bloom-intensity scalars, as root constants. t0: the HDR
-    // scene buffer, read by integer Load (the resolve is 1:1). t1: the bloom top mip,
-    // in its own table since it is not contiguous with t0 in the engine heap, and
-    // sampled through s0 so the hardware upscales it from half resolution.
-    const CD3DX12_DESCRIPTOR_RANGE hdr_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-    const CD3DX12_DESCRIPTOR_RANGE bloom_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
-
-    CD3DX12_ROOT_PARAMETER parameters[3];
-    parameters[0].InitAsConstants(2, 0);
-    parameters[1].InitAsDescriptorTable(1, &hdr_range, D3D12_SHADER_VISIBILITY_PIXEL);
-    parameters[2].InitAsDescriptorTable(1, &bloom_range, D3D12_SHADER_VISIBILITY_PIXEL);
+    // b0: the exposure and bloom-intensity scalars plus the heap slots of the two SRVs,
+    // as root constants -- the HDR scene buffer (read by integer Load, the resolve is
+    // 1:1) and the bloom top mip (sampled through s0 so the hardware upscales it from
+    // half resolution), both fetched bindlessly rather than through tables.
+    CD3DX12_ROOT_PARAMETER parameters[1];
+    parameters[0].InitAsConstants(4, 0);
 
     CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
                                         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
@@ -1554,7 +1567,8 @@ void Renderer::CreateTonemapPipeline() {
 
     CD3DX12_ROOT_SIGNATURE_DESC root_desc;
     root_desc.Init(_countof(parameters), parameters, 1, &sampler,
-                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                   D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
@@ -1605,15 +1619,12 @@ void Renderer::CreateTonemapPipeline() {
 }
 
 void Renderer::CreateLightShaftPipeline() {
-    // b0: the camera and light matrices, the eye and the sun, as root constants.
-    // t0, t1: the scene depth and the shadow map, one two-entry table into the
-    // engine heap. s0: a point clamp sampler -- the march reads raw stored depths,
-    // so there is nothing to filter.
-    const CD3DX12_DESCRIPTOR_RANGE srv_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
-
-    CD3DX12_ROOT_PARAMETER parameters[2];
+    // b0: the camera and light matrices, the eye and the sun, as root constants --
+    // which now also carry the heap slots of the scene depth and the shadow map, both
+    // fetched bindlessly rather than through a table. s0: a point clamp sampler -- the
+    // march reads raw stored depths, so there is nothing to filter.
+    CD3DX12_ROOT_PARAMETER parameters[1];
     parameters[0].InitAsConstants(kLightShaftConstantDwords, 0);
-    parameters[1].InitAsDescriptorTable(1, &srv_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_POINT,
                                         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
@@ -1623,7 +1634,8 @@ void Renderer::CreateLightShaftPipeline() {
 
     CD3DX12_ROOT_SIGNATURE_DESC root_desc;
     root_desc.Init(_countof(parameters), parameters, 1, &sampler,
-                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                   D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
@@ -1688,15 +1700,12 @@ void Renderer::CreateLightShaftPipeline() {
 }
 
 void Renderer::CreateCloudPipeline() {
-    // b0: the camera, the sun and the sky, as root constants. t0: the scene depth, a
-    // one-entry table into the engine heap -- the clouds need no shadow map, only the
-    // depth that stops them behind the world. s0: a point clamp sampler, since the
-    // march reads the raw stored depth.
-    const CD3DX12_DESCRIPTOR_RANGE srv_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-
-    CD3DX12_ROOT_PARAMETER parameters[2];
+    // b0: the camera, the sun and the sky, as root constants -- which now also carry the
+    // heap slot of the scene depth SRV, fetched bindlessly by the pixel shader rather than
+    // through a table (the clouds need no shadow map, only the depth that stops them behind
+    // the world). s0: a point clamp sampler, since the march reads the raw stored depth.
+    CD3DX12_ROOT_PARAMETER parameters[1];
     parameters[0].InitAsConstants(kCloudConstantDwords, 0);
-    parameters[1].InitAsDescriptorTable(1, &srv_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_POINT,
                                         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
@@ -1706,7 +1715,8 @@ void Renderer::CreateCloudPipeline() {
 
     CD3DX12_ROOT_SIGNATURE_DESC root_desc;
     root_desc.Init(_countof(parameters), parameters, 1, &sampler,
-                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                   D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
@@ -1872,15 +1882,15 @@ void Renderer::CreateFluidPipeline() {
 
     // --- Pass 2: the separable bilateral depth blur ---
     {
-        // b0: the blur axis/sentinel/threshold. t0: the depth to smooth (one engine-heap
-        // table). s0: a point clamp sampler -- the blur reads exact stored depths.
-        const CD3DX12_DESCRIPTOR_RANGE srv_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-        CD3DX12_ROOT_PARAMETER parameters[2];
+        // b0: the blur axis/sentinel/threshold plus the heap slot of the depth to smooth,
+        // fetched bindlessly rather than through a table. s0: a point clamp sampler -- the
+        // blur reads exact stored depths.
+        CD3DX12_ROOT_PARAMETER parameters[1];
         parameters[0].InitAsConstants(kFluidBlurConstantDwords, 0);
-        parameters[1].InitAsDescriptorTable(1, &srv_range, D3D12_SHADER_VISIBILITY_PIXEL);
         CD3DX12_ROOT_SIGNATURE_DESC root_desc;
         root_desc.Init(_countof(parameters), parameters, 1, &point_clamp,
-                       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                           D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
                            D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                            D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
                            D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
@@ -1913,15 +1923,15 @@ void Renderer::CreateFluidPipeline() {
 
     // --- Pass 3: the dual-source composite into the HDR buffer ---
     {
-        // b0: the reconstruction/lighting/absorption constants. t0..t1: the blurred depth
-        // and the thickness (one two-entry engine-heap table). s0: a point clamp sampler.
-        const CD3DX12_DESCRIPTOR_RANGE srv_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
-        CD3DX12_ROOT_PARAMETER parameters[2];
+        // b0: the reconstruction/lighting/absorption constants plus the heap slots of the
+        // blurred depth and the thickness, both fetched bindlessly rather than through a
+        // table. s0: a point clamp sampler.
+        CD3DX12_ROOT_PARAMETER parameters[1];
         parameters[0].InitAsConstants(kFluidCompositeConstantDwords, 0);
-        parameters[1].InitAsDescriptorTable(1, &srv_range, D3D12_SHADER_VISIBILITY_PIXEL);
         CD3DX12_ROOT_SIGNATURE_DESC root_desc;
         root_desc.Init(_countof(parameters), parameters, 1, &point_clamp,
-                       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                       D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                           D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
                            D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                            D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
                            D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
@@ -2024,14 +2034,12 @@ void Renderer::CreateFluidTargets() {
 }
 
 void Renderer::CreateBloomPipeline() {
-    // b0: the source texel size and the two pass parameters, as root constants. t0:
-    // the source texture (the HDR buffer or a bloom mip), one table into the engine
-    // heap. s0: a linear clamp sampler -- the filters lean on bilinear taps.
-    const CD3DX12_DESCRIPTOR_RANGE src_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-
-    CD3DX12_ROOT_PARAMETER parameters[2];
+    // b0: the source texel size and the two pass parameters, as root constants -- which
+    // now also carry the heap slot of the source texture (the HDR buffer or a bloom mip),
+    // fetched bindlessly rather than through a table. s0: a linear clamp sampler -- the
+    // filters lean on bilinear taps.
+    CD3DX12_ROOT_PARAMETER parameters[1];
     parameters[0].InitAsConstants(kBloomConstantDwords, 0);
-    parameters[1].InitAsDescriptorTable(1, &src_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
                                         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
@@ -2041,7 +2049,8 @@ void Renderer::CreateBloomPipeline() {
 
     CD3DX12_ROOT_SIGNATURE_DESC root_desc;
     root_desc.Init(_countof(parameters), parameters, 1, &sampler,
-                   D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                   D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
@@ -2113,11 +2122,9 @@ void Renderer::RenderBloom() {
     command_list_->SetGraphicsRootSignature(bloom_root_signature_.Get());
     command_list_->IASetVertexBuffers(0, 0, nullptr);
 
-    const D3D12_GPU_DESCRIPTOR_HANDLE engine_base =
-        engine_heap_->GetGPUDescriptorHandleForHeapStart();
-    const auto srv = [&](UINT slot) {
-        return CD3DX12_GPU_DESCRIPTOR_HANDLE(engine_base, static_cast<INT>(slot), engine_heap_size_);
-    };
+    // The source textures are now reached bindlessly by the slot each pass writes into
+    // its root constants (see the source_index assignments below), so this pass binds no
+    // descriptor tables -- only its render target and root constants change per level.
     const auto set_target = [&](UINT level) {
         const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
                                                 static_cast<INT>(kBloomRtvBase + level), rtv_size_);
@@ -2152,18 +2159,20 @@ void Renderer::RenderBloom() {
                                    1.0f / static_cast<float>(height_)};
             constants.param0 = environment_.bloom_threshold;
             constants.param1 = environment_.bloom_knee;
+            // The HDR scene buffer feeds the top of the pyramid.
+            constants.source_index = kHdrSrvIndex;
         } else {
             constants.src_texel = {1.0f / static_cast<float>(bloom_targets_[i - 1].width),
                                    1.0f / static_cast<float>(bloom_targets_[i - 1].height)};
             constants.param0 = 0.0f; // No threshold past the first level.
             constants.param1 = 0.0f;
+            // Each deeper level downsamples the one above it.
+            constants.source_index = kBloomSrvBase + i - 1;
         }
 
         to_rt(i);
         set_target(i);
         command_list_->SetGraphicsRoot32BitConstants(0, kBloomConstantDwords, &constants, 0);
-        command_list_->SetGraphicsRootDescriptorTable(1, i == 0 ? srv(kHdrSrvIndex)
-                                                                 : srv(kBloomSrvBase + i - 1));
         command_list_->DrawInstanced(3, 1, 0, 0);
         to_srv(i);
     }
@@ -2178,11 +2187,12 @@ void Renderer::RenderBloom() {
                                1.0f / static_cast<float>(bloom_targets_[i + 1].height)};
         constants.param0 = kBloomUpsampleRadius;
         constants.param1 = 0.0f;
+        // The smaller mip below is summed into this one.
+        constants.source_index = kBloomSrvBase + i + 1;
 
         to_rt(static_cast<UINT>(i));
         set_target(static_cast<UINT>(i));
         command_list_->SetGraphicsRoot32BitConstants(0, kBloomConstantDwords, &constants, 0);
-        command_list_->SetGraphicsRootDescriptorTable(1, srv(kBloomSrvBase + i + 1));
         command_list_->DrawInstanced(3, 1, 0, 0);
         to_srv(static_cast<UINT>(i));
     }
@@ -2507,11 +2517,6 @@ ComPtr<ID3D12Resource> Renderer::UploadTexture(const Image& image, UINT descript
 
     staging.push_back(std::move(upload));
     return texture;
-}
-
-D3D12_GPU_DESCRIPTOR_HANDLE Renderer::TextureHandle(UINT descriptor) const {
-    return CD3DX12_GPU_DESCRIPTOR_HANDLE(engine_heap_->GetGPUDescriptorHandleForHeapStart(),
-                                         static_cast<INT>(descriptor), engine_heap_size_);
 }
 
 void Renderer::CreateSceneGeometry(const Scene& scene) {
@@ -2874,13 +2879,11 @@ void Renderer::LoadFontAtlas(std::vector<ComPtr<ID3D12Resource>>& staging) {
 }
 
 void Renderer::CreateTextPipeline() {
-    // b0: the root constants shared by both stages. t0: the atlas, in the same
-    // shader-visible heap the scene binds. s0: a linear clamp sampler, baked in.
-    const CD3DX12_DESCRIPTOR_RANGE atlas_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-
-    CD3DX12_ROOT_PARAMETER parameters[2];
+    // b0: the root constants shared by both stages, which now also carry the slot of the
+    // run's atlas -- fetched bindlessly from the one bound heap rather than through a
+    // table. s0: a linear clamp sampler, baked in.
+    CD3DX12_ROOT_PARAMETER parameters[1];
     parameters[0].InitAsConstants(kTextConstantDwords, 0);
-    parameters[1].InitAsDescriptorTable(1, &atlas_range, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
                                         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
@@ -2891,6 +2894,7 @@ void Renderer::CreateTextPipeline() {
     CD3DX12_ROOT_SIGNATURE_DESC root_desc;
     root_desc.Init(_countof(parameters), parameters, 1, &sampler,
                    D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                       D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
                        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
@@ -3050,7 +3054,8 @@ void Renderer::BindTextPipeline() {
     command_list_->SetPipelineState(text_pipeline_state_.Get());
     command_list_->SetGraphicsRootSignature(text_root_signature_.Get());
     command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    command_list_->SetGraphicsRootDescriptorTable(1, TextureHandle(atlas_descriptor_));
+    // No atlas table to bind: each run carries its atlas slot in its root constants and
+    // the pixel shader fetches it bindlessly from the one bound heap.
 
     // The whole frame region, so a run drawn from any start vertex is in bounds.
     D3D12_VERTEX_BUFFER_VIEW vbv{};
@@ -3066,11 +3071,11 @@ void Renderer::DrawTextRun(const FontFace& face, UINT first, UINT count, XMFLOAT
         return;
     }
 
-    // This run's glyphs come from `face`'s atlas, so bind it and size the distance
-    // field to its dimensions -- the two faces' atlases differ in size.
-    command_list_->SetGraphicsRootDescriptorTable(1, TextureHandle(face.atlas_descriptor));
-
+    // This run's glyphs come from `face`'s atlas: carry its heap slot in the constants
+    // (the shader fetches it bindlessly) and size the distance field to its dimensions --
+    // the two faces' atlases differ in size.
     TextConstants constants{};
+    constants.atlas_index = face.atlas_descriptor;
     constants.unit_range = {kDistanceRange / static_cast<float>(face.atlas_width),
                             kDistanceRange / static_cast<float>(face.atlas_height)};
 
@@ -3126,6 +3131,9 @@ void Renderer::DrawSolidRun(UINT first, UINT count, XMFLOAT4 color) {
     TextConstants constants{};
     constants.color = color;
     constants.solid = 1.0f;
+    // The solid path never samples the atlas, but keep the index at a valid slot so the
+    // shader's ResourceDescriptorHeap handle is well-formed.
+    constants.atlas_index = atlas_descriptor_;
     command_list_->SetGraphicsRoot32BitConstants(0, kTextConstantDwords, &constants, 0);
     command_list_->DrawInstanced(count, 1, first, 0);
 }
@@ -3728,19 +3736,15 @@ void Renderer::DrawKeybinds(std::string_view title, std::span<const std::string>
 void Renderer::DrawInstances(std::span<const MeshInstance> instances,
                              const XMMATRIX& view_projection, XMFLOAT3 sun_direction,
                              float shadow_receive, bool bind_probe) {
-    // The per-pass bindings the scene signature holds beyond the per-draw root
-    // constants: the frame constants (sun matrix + eye) at b1, the shadow map, and
-    // the reflection probe. Bound here, at the top of every batch, so they survive
-    // the root-signature switch the outline pass makes -- setting a root signature
-    // clears every argument bound under the old one. The material textures no longer
-    // ride tables here; each draw carries their heap slots in its root constants and
-    // the shader indexes them bindlessly. The probe is skipped for the capture pass,
-    // which is filling that cube and whose shader never reads it.
+    // The only per-pass binding the scene signature holds beyond the per-draw root
+    // constants: the frame constants (sun matrix + eye) at b1. Bound here, at the top of
+    // every batch, so it survives the root-signature switch the outline pass makes --
+    // setting a root signature clears every argument bound under the old one. Every
+    // texture, including the shadow map and the probe, now rides the per-draw root
+    // constants as a heap slot the shader fetches bindlessly, so there are no tables to
+    // bind. The probe slot is zeroed for the capture pass (bind_probe false), whose shader
+    // never reads it.
     command_list_->SetGraphicsRootConstantBufferView(1, frame_constants_address_);
-    command_list_->SetGraphicsRootDescriptorTable(2, TextureHandle(shadow_descriptor_));
-    if (bind_probe) {
-        command_list_->SetGraphicsRootDescriptorTable(3, TextureHandle(probe_descriptor_));
-    }
 
     for (const MeshInstance& instance : instances) {
         const GpuModel& model = models_[instance.model];
@@ -3785,6 +3789,11 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
             constants.normal_index = primitive.normal_texture;
             constants.metallic_roughness_index = primitive.metallic_roughness_texture;
             constants.occlusion_index = primitive.occlusion_texture;
+            // The shadow map and the probe, likewise as heap slots. The same for every
+            // draw in the batch, but riding the per-draw constants keeps the pass free of
+            // tables. The capture pass (no probe read) zeroes the probe slot.
+            constants.shadow_index = shadow_descriptor_;
+            constants.probe_index = bind_probe ? probe_descriptor_ : 0;
 
             command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
             command_list_->DrawIndexedInstanced(primitive.index_count, 1, primitive.first_index, 0,
@@ -3892,6 +3901,10 @@ void Renderer::RenderGrass(const XMMATRIX& view_projection, XMFLOAT3 camera_posi
     // the fog has all but swallowed the field anyway. The amplification shader reads
     // these to pick each cell's blade count and to drop the far ones.
     constants.lod = {10.0f, 28.0f, 60.0f, 0.0f};
+    // The sun's shadow-map slot (its SRV in the heap's per-level region, live as a shader
+    // resource by now), which the pixel shader fetches bindlessly so a blade can tell
+    // whether the sun reaches it.
+    constants.shadow_index = shadow_descriptor_;
 
     command_list_->SetGraphicsRootSignature(grass_root_signature_.Get());
     command_list_->SetPipelineState(grass_pipeline_state_.Get());
@@ -3899,11 +3912,8 @@ void Renderer::RenderGrass(const XMMATRIX& view_projection, XMFLOAT3 camera_posi
     // The same per-frame lighting buffer the scene pass binds, for the pixel shader's
     // sun, sky, fog and shadow matrix.
     command_list_->SetGraphicsRootConstantBufferView(1, frame_constants_address_);
-    // The sun's shadow map (its SRV in the heap's per-level region, live as a shader
-    // resource by now), so a blade can tell whether the sun reaches it.
-    command_list_->SetGraphicsRootDescriptorTable(2, TextureHandle(shadow_descriptor_));
     // The obstacle footprints, so the field keeps clear of the patio, benches and props.
-    command_list_->SetGraphicsRootConstantBufferView(3, grass_obstacles_address_);
+    command_list_->SetGraphicsRootConstantBufferView(2, grass_obstacles_address_);
 
     // One amplification group per pack of kGrassAsGroup cells; each culls its cells and
     // launches a mesh group for every survivor.
@@ -3949,8 +3959,9 @@ void Renderer::RenderGrassShadow(float time) {
     command_list_->SetPipelineState(grass_shadow_pipeline_state_.Get());
     command_list_->SetGraphicsRoot32BitConstants(0, kGrassConstantDwords, &constants, 0);
     // The amplification shader reads the obstacle footprints to skip cells under models;
-    // the depth-only pass has no pixel shader, so it binds no shadow map or frame buffer.
-    command_list_->SetGraphicsRootConstantBufferView(3, grass_obstacles_address_);
+    // the depth-only pass has no pixel shader, so it needs no shadow slot or frame buffer
+    // (constants.shadow_index is left 0 and never fetched).
+    command_list_->SetGraphicsRootConstantBufferView(2, grass_obstacles_address_);
 
     const UINT as_groups = (cells_x * cells_z + kGrassAsGroup - 1) / kGrassAsGroup;
     command_list_->DispatchMesh(as_groups, 1, 1);
@@ -4126,10 +4137,6 @@ void Renderer::RenderFluidSpray(std::span<const XMFLOAT4> droplets, const XMMATR
     const CD3DX12_CPU_DESCRIPTOR_HANDLE hdr_rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
                                                 static_cast<INT>(kHdrRtvIndex), rtv_size_);
     const CD3DX12_CPU_DESCRIPTOR_HANDLE dsv(dsv_heap_->GetCPUDescriptorHandleForHeapStart());
-    auto engine_srv = [&](UINT slot) {
-        return CD3DX12_GPU_DESCRIPTOR_HANDLE(engine_heap_->GetGPUDescriptorHandleForHeapStart(),
-                                             static_cast<INT>(slot), engine_heap_size_);
-    };
 
     // --- Pass 1: surface depth + thickness. The impostors draw into the two offscreen
     // targets, depth-tested read-only against the world so the yard occludes them; MIN
@@ -4189,8 +4196,9 @@ void Renderer::RenderFluidSpray(std::span<const XMFLOAT4> droplets, const XMMATR
         blur_constants.texel_step = texel_step;
         blur_constants.sentinel = kFluidSentinel;
         blur_constants.depth_threshold = kFluidBlurDepthThreshold;
+        // The source depth's slot in the bound heap; the shader fetches it bindlessly.
+        blur_constants.depth_index = src_srv_slot;
         command_list_->SetGraphicsRoot32BitConstants(0, kFluidBlurConstantDwords, &blur_constants, 0);
-        command_list_->SetGraphicsRootDescriptorTable(1, engine_srv(src_srv_slot));
         command_list_->DrawInstanced(3, 1, 0, 0);
         TextureBarrier(command_list_.Get(), dst, D3D12_BARRIER_SYNC_RENDER_TARGET,
                        D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
@@ -4228,8 +4236,11 @@ void Renderer::RenderFluidSpray(std::span<const XMFLOAT4> droplets, const XMMATR
     composite.gloss = kFluidGloss;
     composite.absorption = kFluidAbsorption;
     composite.absorption_strength = kFluidAbsorptionStrength;
+    // The blurred depth (back in fluid_depth_ after the vertical blur) and the thickness,
+    // as heap slots the pixel shader fetches bindlessly.
+    composite.depth_index = kFluidDepthSrvIndex;
+    composite.thickness_index = kFluidThicknessSrvIndex;
     command_list_->SetGraphicsRoot32BitConstants(0, kFluidCompositeConstantDwords, &composite, 0);
-    command_list_->SetGraphicsRootDescriptorTable(1, engine_srv(kFluidDepthSrvIndex));
     command_list_->DrawInstanced(3, 1, 0, 0);
 
     // Leave the world pass as it was found: the HDR target with its depth bound. The one SRV
@@ -4385,12 +4396,10 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     cloud.camera_position = camera_position;
     cloud.time = seconds;
     cloud.sun_direction = sun_direction_;
+    // The scene depth SRV's slot in the bound heap; the pixel shader fetches it bindlessly.
+    cloud.depth_index = kDepthSrvIndex;
     ApplyEnvironment(cloud, environment_);
     command_list_->SetGraphicsRoot32BitConstants(0, kCloudConstantDwords, &cloud, 0);
-    const CD3DX12_GPU_DESCRIPTOR_HANDLE cloud_depth_srv(
-        engine_heap_->GetGPUDescriptorHandleForHeapStart(), static_cast<INT>(kDepthSrvIndex),
-        engine_heap_size_);
-    command_list_->SetGraphicsRootDescriptorTable(1, cloud_depth_srv);
     command_list_->IASetVertexBuffers(0, 0, nullptr);
     command_list_->DrawInstanced(3, 1, 0, 0);
 
@@ -4458,12 +4467,12 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     shaft.light_view_projection = light_view_projection_;
     shaft.camera_position = camera_position;
     shaft.sun_direction = sun_direction_;
+    // The scene depth and shadow-map slots in the bound heap; the pixel shader fetches
+    // them bindlessly.
+    shaft.depth_index = kDepthSrvIndex;
+    shaft.shadow_index = kShaftShadowSrvIndex;
     ApplyEnvironment(shaft, environment_);
     command_list_->SetGraphicsRoot32BitConstants(0, kLightShaftConstantDwords, &shaft, 0);
-    const CD3DX12_GPU_DESCRIPTOR_HANDLE shaft_srv(
-        engine_heap_->GetGPUDescriptorHandleForHeapStart(), static_cast<INT>(kDepthSrvIndex),
-        engine_heap_size_);
-    command_list_->SetGraphicsRootDescriptorTable(1, shaft_srv);
     command_list_->IASetVertexBuffers(0, 0, nullptr);
     command_list_->DrawInstanced(3, 1, 0, 0);
 
@@ -4500,17 +4509,16 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // triangle comes from SV_VertexID, so no vertex buffer.
     command_list_->SetGraphicsRootSignature(tonemap_root_signature_.Get());
     command_list_->SetPipelineState(tonemap_pipeline_state_.Get());
-    const float tonemap_constants[] = {environment_.exposure, environment_.bloom_intensity};
-    command_list_->SetGraphicsRoot32BitConstants(0, _countof(tonemap_constants), tonemap_constants,
-                                                 0);
-    const D3D12_GPU_DESCRIPTOR_HANDLE engine_base =
-        engine_heap_->GetGPUDescriptorHandleForHeapStart();
-    command_list_->SetGraphicsRootDescriptorTable(
-        1, CD3DX12_GPU_DESCRIPTOR_HANDLE(engine_base, static_cast<INT>(kHdrSrvIndex),
-                                         engine_heap_size_));
-    command_list_->SetGraphicsRootDescriptorTable(
-        2, CD3DX12_GPU_DESCRIPTOR_HANDLE(engine_base, static_cast<INT>(kBloomSrvBase),
-                                         engine_heap_size_));
+    // The two scalars plus the heap slots of the HDR buffer and the bloom top mip, which
+    // the pixel shader fetches bindlessly. Both SRVs live in the one bound heap; no tables.
+    struct {
+        float exposure;
+        float bloom_intensity;
+        UINT hdr_index;
+        UINT bloom_index;
+    } tonemap_constants{environment_.exposure, environment_.bloom_intensity, kHdrSrvIndex,
+                        kBloomSrvBase};
+    command_list_->SetGraphicsRoot32BitConstants(0, 4, &tonemap_constants, 0);
     command_list_->IASetVertexBuffers(0, 0, nullptr);
     command_list_->DrawInstanced(3, 1, 0, 0);
 
