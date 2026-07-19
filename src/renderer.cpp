@@ -112,7 +112,9 @@ struct Constants {
     // an emissive colour, say, rather than a strength on the tint -- would not fit
     // without merging the descriptor tables.
     float emissive;
-    float pad0;
+    // How wet the surface looks, 0..1 (see MeshInstance::wetness). Rides the DWORD that
+    // was only padding, so the wet sheen cost no growth in an already-full signature.
+    float wetness;
 };
 
 static_assert(sizeof(Constants) % sizeof(UINT) == 0);
@@ -3722,6 +3724,7 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
             constants.metallic = primitive.metallic;
             constants.roughness = primitive.roughness;
             constants.emissive = instance.emissive;
+            constants.wetness = instance.wetness;
 
             command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
             command_list_->SetGraphicsRootDescriptorTable(1, primitive.base_color_texture);

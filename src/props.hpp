@@ -8,6 +8,7 @@
 #include "rigid_body.hpp"
 #include "scene.hpp"
 #include "serve_zone.hpp"
+#include "wetness_information.hpp"
 
 #include <DirectXMath.h>
 
@@ -204,6 +205,15 @@ private:
         // whose own `heat` is switched on, which is the whole point of catching fire.
         std::optional<IgnitableRequirements> ignitable;
 
+        // Set on whatever can be soaked -- today the same ignitable logs, since the only
+        // liquid in play (lighter fluid) matters by helping wood catch. Empty on the meats
+        // and tools, which nothing wets yet. The spray deposits into this from the droplets
+        // that land near the log (see Props::Update), it dries on its own each frame, and
+        // the ignition loop reads it to rush a soaked log's catch. Presence marks a thing as
+        // wettable, exactly as `ignitable` marks one as lightable; broaden the set by giving
+        // more items one.
+        std::optional<WetnessInformation> wetness;
+
         // Seconds this item has been alight, aged each frame while its heat is on. Drives the
         // Flow fire's build-up: a freshly caught log starts as a small flame and grows to a
         // full one over the first few seconds rather than flaring up at full size at once.
@@ -262,6 +272,10 @@ private:
     // The colour to draw an item under: a cooking meat browns with its doneness,
     // everything else stays white (its model's own colours, unchanged).
     static DirectX::XMFLOAT3 ItemTint(const Item& item);
+    // How wet an item looks, 0 (dry) to 1 (soaked): its wetness saturation if it can be
+    // doused, else zero. The draw passes hand this to the instance so a soaked log shows
+    // the wet sheen (see MeshInstance::wetness and scene.hlsl).
+    static float ItemWetness(const Item& item);
     // The model to draw this frame: the cook stage with the highest `from` band the
     // item has reached (the base while raw, or for a non-food that never cooks). So a
     // chicken shows its raw model until it hits medium, then its cooked one.

@@ -62,6 +62,7 @@ add_executable(grill WIN32
   src/furniture.cpp
   src/rigid_body.cpp
   src/viewmodel.cpp
+  src/wetness_information.cpp
   src/font.cpp
   src/world.cpp
   src/renderer.cpp

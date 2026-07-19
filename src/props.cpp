@@ -46,6 +46,16 @@ constexpr float kThrowSpin = 2.5f;   // rad/s of forward tumble.
 constexpr float kSprayPerSecond = 260.0f;
 constexpr float kSpraySpeed = 7.5f; // m/s out of the nozzle.
 
+// How the sprayed fluid soaks what it lands on. A droplet counts as wetting an ignitable
+// when its centre falls within kWetRadius metres of that thing's hot centre -- roughly a
+// log's own girth, so the stream has to actually be on the log, not merely in the yard.
+// Every such droplet deposits kWetPerDropletSecond of saturation per second it lingers
+// there, so a stream held on a log soaks it over a second or two while a glancing pass
+// barely dampens it; WetnessInformation caps the total at fully soaked. Tuning-sensitive
+// against the spray rate and droplet lifetime -- a feel pass will want to revisit both.
+constexpr float kWetRadius = 0.3f;
+constexpr float kWetPerDropletSecond = 0.02f;
+
 // A lit log's tint: multiplied into the log model's own browns, it pushes the wood
 // toward glowing ember orange -- the visible difference between a cold stack and a
 // burning one. The red channel rides above one so the HDR pipeline blooms it a touch.
@@ -101,12 +111,14 @@ XMMATRIX HoldFor(HoldStyle hold) {
     return FlatInHand();
 }
 
-MeshInstance MakeInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint = kWhite) {
+MeshInstance MakeInstance(std::uint32_t model, FXMMATRIX transform, XMFLOAT3 tint = kWhite,
+                          float wetness = 0.0f) {
     MeshInstance instance{};
     instance.model = model;
     XMStoreFloat4x4(&instance.transform, transform);
     instance.tint = tint;
     instance.checker = 0.0f;
+    instance.wetness = wetness;
     return instance;
 }
 
@@ -245,6 +257,10 @@ XMFLOAT3 Props::ItemTint(const Item& item) {
     return item.cook ? item.cook->SurfaceTint() : kWhite;
 }
 
+float Props::ItemWetness(const Item& item) {
+    return item.wetness ? item.wetness->Wetness() : 0.0f;
+}
+
 std::uint32_t Props::CurrentModel(const Item& item) {
     // Pick the stage with the highest `from` band the cook has reached. A non-food has
     // no cook, so it reads as Raw and shows its single base stage. The scan does not
@@ -281,6 +297,11 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
     item.heat = heat;
     item.heat_offset = heat_offset;
     item.ignitable = ignitable;
+    // A thing that can be lit can be doused: give every ignitable a wetness so the spray has
+    // something to soak and the ignition below has something to read. It starts bone dry.
+    if (ignitable) {
+        item.wetness.emplace();
+    }
     DeriveBodyShape(item, base_model);
 
     // Seed the body so the model origin lands at `position`, yawed -- the same
@@ -512,6 +533,50 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     }
 
+    // Soak whatever the spray is landing on, and dry everything wet a little. A droplet wets
+    // an ignitable when it comes to rest near that thing's hot centre -- the same point the
+    // ignition below warms -- so aiming the stream at a log is what douses it, and where the
+    // fluid actually falls is what gets wet (a stream that overshoots into the dirt soaks
+    // nothing). Drying runs every frame regardless of the spray, so a volatile puddle left
+    // unlit evaporates on its own. Placed after the hot-centre refresh above, so the target
+    // point is where the log sits this frame, and before the ignition below, so this frame's
+    // soaking feeds this frame's catch.
+    const std::span<const XMFLOAT4> droplets =
+        (fluid != nullptr && fluid->Active()) ? fluid->Points() : std::span<const XMFLOAT4>{};
+    const float wet_radius_sq = kWetRadius * kWetRadius;
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        Item& item = items_[i];
+        if (!item.wetness) {
+            continue;
+        }
+        // Dry first, then take this frame's deposit, so a droplet arriving now is not
+        // evaporated the instant it lands.
+        item.wetness->Update(dt);
+        if (droplets.empty()) {
+            continue;
+        }
+        // The wet centre is the log's hot centre when it has one (already placed this frame),
+        // else its body origin -- so this holds for anything wettable, not just the logs.
+        XMVECTOR centre;
+        if (item.heat) {
+            const XMFLOAT3 origin = item.heat->Origin();
+            centre = XMLoadFloat3(&origin);
+        } else {
+            centre = CurrentPose(i, camera_to_world).r[3];
+        }
+        int nearby = 0;
+        for (const XMFLOAT4& drop : droplets) {
+            const XMVECTOR delta = XMVectorSubtract(XMVectorSet(drop.x, drop.y, drop.z, 0.0f), centre);
+            if (XMVectorGetX(XMVector3LengthSq(delta)) <= wet_radius_sq) {
+                ++nearby;
+            }
+        }
+        if (nearby > 0) {
+            item.wetness->Wet(WetAgent::LighterFluid,
+                              kWetPerDropletSecond * static_cast<float>(nearby) * dt);
+        }
+    }
+
     // Light anything ignitable the air has got hot enough around: hold the lighter's flame
     // to a log and it catches, and once caught it is a heat source itself -- which is the
     // whole point, since that is what cooks the food over it and what lights the next log.
@@ -539,9 +604,24 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         // away too soon lets it cool back down.
         const XMFLOAT3 hot_centre = item.heat->Origin();
         const XMVECTOR point = XMLoadFloat3(&hot_centre);
-        item.ignitable->Update(AmbientAt(point, heat_sources), dt);
-        if (item.ignitable->Ignited()) {
+        const float ambient = AmbientAt(point, heat_sources);
+        // Lighter fluid soaked in is an accelerant with no patience: the instant a flame hot
+        // enough to catch this wood reaches a doused log, it goes up at once -- no slow
+        // heat-through -- and straight to a full flame, skipping the ember-to-fire build-up
+        // (burn_time below), the way fluid-soaked wood whooshes alight. It still only lights
+        // off heat genuinely hot enough to catch it (ambient at or past the ignite temp), so
+        // a soaked log by the too-cool grate still never catches and nothing self-ignites.
+        // Water, when it exists, would read the same wetness and slow the catch instead.
+        const bool fluid_soaked = item.wetness && item.wetness->IsWet() &&
+                                  item.wetness->Agent() == WetAgent::LighterFluid;
+        if (fluid_soaked && ambient >= item.ignitable->IgniteTempF()) {
             item.heat->SetOn(true);
+            item.burn_time = kFireBuildupSeconds; // full flame from frame one, no build-up
+        } else {
+            item.ignitable->Update(ambient, dt);
+            if (item.ignitable->Ignited()) {
+                item.heat->SetOn(true);
+            }
         }
     }
 
@@ -627,12 +707,12 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
             continue;
         }
         world_.push_back(MakeInstance(CurrentModel(items_[i]), XMLoadFloat4x4(&items_[i].resting),
-                                      ItemTint(items_[i])));
+                                      ItemTint(items_[i]), ItemWetness(items_[i])));
     }
     if (carried_ >= 0) {
         held_.push_back(MakeInstance(CurrentModel(items_[carried_]),
                                      XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world,
-                                     ItemTint(items_[carried_])));
+                                     ItemTint(items_[carried_]), ItemWetness(items_[carried_])));
         // The plate of food on a carried tray: each stuck meat's resting was set above to
         // its pose on the (held) tray, so it draws in the hand right where it sits.
         for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
@@ -721,6 +801,12 @@ std::string Props::PromptText() const {
         if (item.cook) {
             return "[E] Pick up " + item.name + " (" +
                    std::string(item.cook->DonenessLabel()) + ")";
+        }
+        // A doused log reads its soaking, so the player can see the spray took before they
+        // bring a flame to it: "[E] Pick up log (soaked in lighter fluid)".
+        if (item.wetness && item.wetness->IsWet()) {
+            return "[E] Pick up " + item.name + " (soaked in " +
+                   std::string(WetAgentInfo(item.wetness->Agent()).name) + ")";
         }
         return "[E] Pick up " + item.name;
     }
