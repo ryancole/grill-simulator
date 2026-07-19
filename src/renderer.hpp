@@ -289,12 +289,17 @@ private:
     // where the scene depth is the far plane. Its own root signature (the camera and
     // sky, and the scene depth SRV) and a premultiplied-over blended PSO.
     void CreateCloudPipeline();
-    // The lighter-fluid spray pass: its root signature (the camera and lighting as root
-    // constants, plus a root SRV for the per-frame droplet buffer) and PSO. The PSO
-    // billboards each droplet point into a camera-facing quad and carves it into a lit
-    // sphere, depth-tested and depth-writing against the scene so the beads occlude the
-    // world and each other. Also creates the per-frame droplet upload buffer.
+    // The lighter-fluid spray's three pipelines and their root signatures: the impostor
+    // surface pass (nearest eye-depth + thickness, MRT), the separable bilateral depth
+    // blur, and the dual-source composite into the HDR buffer. Also creates the per-frame
+    // droplet upload buffer (a root SRV). The offscreen targets it draws into are made by
+    // CreateFluidTargets, which is window-sized and so runs again on resize.
     void CreateFluidPipeline();
+    // The screen-space fluid's offscreen render targets, recreated on resize like the HDR
+    // buffer and the bloom mips: the surface depth, its blurred copy and the thickness,
+    // each with a render-target view in rtv_heap_ and a shader-resource view in
+    // engine_heap_.
+    void CreateFluidTargets();
     // The bloom pyramid's textures: kBloomLevels HDR targets, each half the size of
     // the one above, with their RTVs and SRVs. Recreated on resize like the HDR
     // buffer, since the sizes follow the window.
@@ -577,13 +582,24 @@ private:
     ComPtr<ID3D12RootSignature> cloud_root_signature_;
     ComPtr<ID3D12PipelineState> cloud_pipeline_state_;
 
-    // The lighter-fluid spray pass: sphere-impostor droplets drawn into the HDR buffer,
-    // depth-tested against the scene. The droplet buffer is one upload-heap region per
-    // frame in flight, kept mapped and rewritten with this frame's droplet points (world
-    // centre + radius), bound as a root SRV. No descriptor heap slot -- like the grass
+    // The lighter-fluid spray, a screen-space fluid pipeline in three passes. Pass 1
+    // billboards the droplets and writes nearest surface depth + accumulated thickness to
+    // fluid_depth_/fluid_thickness_; pass 2 bilaterally smooths the depth into
+    // fluid_depth_blur_; pass 3 reconstructs the surface and composites it into the HDR
+    // buffer with a dual-source blend. The offscreen targets are window-sized (recreated on
+    // resize) and their SRVs live in the persistent engine heap.
+    ComPtr<ID3D12RootSignature> fluid_surface_root_signature_;
+    ComPtr<ID3D12PipelineState> fluid_surface_pipeline_;
+    ComPtr<ID3D12RootSignature> fluid_blur_root_signature_;
+    ComPtr<ID3D12PipelineState> fluid_blur_pipeline_;
+    ComPtr<ID3D12RootSignature> fluid_composite_root_signature_;
+    ComPtr<ID3D12PipelineState> fluid_composite_pipeline_;
+    ComPtr<ID3D12Resource> fluid_depth_;
+    ComPtr<ID3D12Resource> fluid_depth_blur_;
+    ComPtr<ID3D12Resource> fluid_thickness_;
+    // The per-frame droplet buffer (world centre + radius), one mapped upload-heap region
+    // per frame in flight, bound as a root SRV. No descriptor heap slot -- like the grass
     // obstacles, it rides a root descriptor.
-    ComPtr<ID3D12RootSignature> fluid_root_signature_;
-    ComPtr<ID3D12PipelineState> fluid_pipeline_state_;
     ComPtr<ID3D12Resource> fluid_droplets_;
     std::byte* fluid_droplets_mapped_ = nullptr;
     UINT fluid_droplets_stride_ = 0;
