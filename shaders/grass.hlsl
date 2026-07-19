@@ -84,7 +84,9 @@ cbuffer FrameConstants : register(b1) {
     float g_fill_strength;
     float g_fog_start;
     float g_fog_end;
-    float g_frame_pad;
+    // The scene pass's TLAS slot; unused by the grass, but the b1 layout is shared with
+    // scene.hlsl so it must match. Reuses what was a pad DWORD.
+    uint g_tlas_index;
 };
 
 // The world footprints the grass keeps clear of, as XZ rectangles (min.x, min.z,

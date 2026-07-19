@@ -226,12 +226,17 @@ private:
     };
 
     // A Model, uploaded. The CPU-side Model that produced it is not needed again.
+    // `blas` is its bottom-level raytracing acceleration structure -- one geometry per
+    // primitive, each baking that primitive's model-space transform in -- so the scene's
+    // reflection rays can intersect this model. Built once at scene load, referenced by
+    // the TLAS's per-instance entries; null until BuildAccelerationStructures runs.
     struct GpuModel {
         ComPtr<ID3D12Resource> vertex_buffer;
         D3D12_VERTEX_BUFFER_VIEW vertex_buffer_view{};
         ComPtr<ID3D12Resource> index_buffer;
         D3D12_INDEX_BUFFER_VIEW index_buffer_view{};
         std::vector<DrawPrimitive> primitives;
+        ComPtr<ID3D12Resource> blas;
     };
 
     void CreateDevice();
@@ -325,6 +330,19 @@ private:
     // analytic sky (the capture pixel shader), with the gradient sky behind. Runs
     // after CreateSceneGeometry, on the same one-shot command list.
     void CaptureReflectionProbe(const Scene& scene);
+
+    // Builds the raytracing acceleration structures the scene pass reflects off: a
+    // bottom-level AS per model (BuildAccelerationStructures fills each GpuModel::blas)
+    // and one top-level AS over the yard's static instances, tlas_. Runs at scene load
+    // after CreateSceneGeometry, on its own one-shot command list. The TLAS gets a
+    // shader-visible SRV at tlas_descriptor_, which the scene pixel shader reads
+    // bindlessly to trace reflection rays. Static for now -- rebuilt whole on a level
+    // swap; moving props are not yet in the TLAS.
+    void BuildAccelerationStructures(const Scene& scene);
+    // Creates a default-heap buffer sized for an acceleration structure or its build
+    // scratch (both need ALLOW_UNORDERED_ACCESS). Born layout-less like every other
+    // buffer; the build is its first access.
+    ComPtr<ID3D12Resource> CreateAsBuffer(UINT64 bytes, bool result);
 
     // The second, tiny pipeline: the alpha-blended, depth-free pass that draws
     // HUD text from the MSDF atlas. Builds its root signature, PSO and the
@@ -712,6 +730,13 @@ private:
     std::vector<ComPtr<ID3D12Resource>> textures_;
 
     std::vector<GpuModel> models_;
+
+    // The top-level acceleration structure over the loaded level's static instances,
+    // and the shader-visible SRV slot the scene pixel shader reads it from to trace
+    // reflection rays. Rebuilt per level by BuildAccelerationStructures; the per-model
+    // BLASes it references live on the GpuModels.
+    ComPtr<ID3D12Resource> tlas_;
+    UINT tlas_descriptor_ = 0;
 
     ComPtr<ID3D12Fence> fence_;
     HANDLE fence_event_ = nullptr;

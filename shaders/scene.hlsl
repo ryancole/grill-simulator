@@ -97,7 +97,9 @@ cbuffer FrameConstants : register(b1) {
     // gradient rather than seaming against it at the horizon.
     float g_fog_start;
     float g_fog_end;
-    float g_frame_pad;
+    // The TLAS's slot in the bound heap, so the shade can trace reflection rays against
+    // the yard (see TraceReflection). Reuses what was a pad DWORD.
+    uint g_tlas_index;
 };
 
 // The material's four textures -- base colour, tangent-space normal, metallic-
@@ -264,16 +266,30 @@ float3 PrefilteredSky(float3 r, float roughness) {
     return lerp(SampleSky(r, g_sky), SkyAverage(), roughness);
 }
 
-// The prefiltered *environment* along a reflection vector: the captured cubemap
-// when `use_probe`, so a metal reflects the real yard, and the analytic sky
-// otherwise -- the path the capture pass itself takes, which is why it must not
-// read the cube it is filling. The single-mip cube cannot blur, so roughness fades
-// its reflection toward the sky average, the same floor PrefilteredSky uses.
-float3 SpecularEnvironment(float3 r, float roughness, bool use_probe) {
+// The specular environment along a reflection vector `r` from world point `origin`.
+// On the on-screen pass a hardware ray traces the reflection against the yard's TLAS
+// (inline RayQuery, no ray pipeline): a miss reflects the analytic sky, blurred toward
+// the average by roughness; a hit returns -- for now -- a dark placeholder, so reflected
+// geometry reads as a dark silhouette on the metal. That is increment 1, proving the ray
+// path; real hit shading (the fence, the tables, the meat) comes next. The capture pass
+// (use_probe false) has no TLAS to trace and must stay cheap, so it takes the analytic
+// sky, exactly as it did before -- which is what the probe cube it fills will reflect.
+float3 SpecularEnvironment(float3 origin, float3 r, float roughness, bool use_probe) {
     if (use_probe) {
-        const TextureCube<float4> g_reflection_probe = ResourceDescriptorHeap[g_probe_index];
-        const float3 sharp = g_reflection_probe.SampleLevel(g_sampler, r, 0.0f).rgb;
-        return lerp(sharp, SkyAverage(), roughness);
+        RaytracingAccelerationStructure tlas = ResourceDescriptorHeap[g_tlas_index];
+        RayDesc ray;
+        // Bias the origin off the surface along the reflection so the ray does not
+        // immediately re-hit the very triangle it started from.
+        ray.Origin = origin + r * 0.02f;
+        ray.Direction = r;
+        ray.TMin = 0.0f;
+        ray.TMax = 100.0f;
+        RayQuery<RAY_FLAG_NONE> query;
+        query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
+        query.Proceed(); // All geometry is opaque, so one step resolves the traversal.
+        if (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+            return float3(0.02f, 0.02f, 0.03f);
+        }
     }
     return PrefilteredSky(r, roughness);
 }
@@ -390,7 +406,7 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     // and NaN * 0 (the dry case) stays NaN and paints the whole pixel black. saturate
     // clamps it to a safe 0, exactly as FresnelSchlick above guards its own pow.
     const float wet_rim = pow(saturate(1.0f - n_dot_v), 5.0f) * saturate(g_wetness) * kWetRim;
-    const float3 ambient_specular = SpecularEnvironment(reflection, roughness, use_probe) *
+    const float3 ambient_specular = SpecularEnvironment(input.world, reflection, roughness, use_probe) *
                                     (f0 * env_brdf.x + env_brdf.y + wet_rim);
 
     // Ambient occlusion darkens only the indirect light -- the sky's diffuse and

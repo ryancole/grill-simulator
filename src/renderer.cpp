@@ -58,6 +58,11 @@ constexpr UINT kBloomSrvBase = 3;
 constexpr UINT kFluidDepthSrvIndex = kBloomSrvBase + Renderer::kBloomLevels;      // 9
 constexpr UINT kFluidThicknessSrvIndex = kFluidDepthSrvIndex + 1;                 // 10
 constexpr UINT kFluidDepthBlurSrvIndex = kFluidDepthSrvIndex + 2;                 // 11
+// The top-level raytracing acceleration structure's SRV, in the engine block at a fixed
+// slot. The TLAS resource is rebuilt per level, but its SRV always lands here, rewritten
+// by each BuildAccelerationStructures -- the scene pixel shader reads this slot to trace
+// its reflection rays.
+constexpr UINT kTlasSrvIndex = kFluidDepthBlurSrvIndex + 1;                       // 12
 // The depth gap (metres) a blur tap may cross before it is rejected as a different cluster:
 // a few droplet radii, wide enough to merge a tight stream, tight enough to keep the
 // silhouette. Shared with fluid_blur.hlsl's g_depth_threshold.
@@ -67,6 +72,7 @@ constexpr UINT kEngineHeapSize = 16;
 static_assert(kBloomSrvBase + Renderer::kBloomLevels <= kEngineHeapSize,
               "engine heap too small for bloom");
 static_assert(kFluidThicknessSrvIndex < kEngineHeapSize, "engine heap too small for fluid");
+static_assert(kTlasSrvIndex < kEngineHeapSize, "engine heap too small for the TLAS SRV");
 
 // The one shader-visible CBV/SRV/UAV heap the game binds. The engine block above
 // [0, kEngineHeapSize) holds the session-lifetime post-process SRVs; the per-level
@@ -217,7 +223,9 @@ struct FrameConstants {
     float fill_strength;
     float fog_start;
     float fog_end;
-    float pad;
+    // The TLAS's heap slot, so the scene pixel shader can fetch it and trace reflection
+    // rays. Reuses what was a pad DWORD (mirrors g_tlas_index in scene.hlsl / grass.hlsl).
+    UINT tlas_index;
 };
 
 static_assert(sizeof(FrameConstants) == 208, "FrameConstants must mirror the HLSL cbuffer rows");
@@ -748,6 +756,9 @@ void Renderer::LoadScene(const Scene& scene) {
     // (after ReleaseScene) rather than the whole device bring-up.
     CreateSceneGeometry(scene);
     CaptureReflectionProbe(scene);
+    // The reflection rays the scene pass traces need a BLAS per model and a TLAS over the
+    // yard; both read the geometry just uploaded, so this runs last.
+    BuildAccelerationStructures(scene);
 }
 
 void Renderer::ReleaseScene() {
@@ -767,7 +778,8 @@ void Renderer::ReleaseScene() {
     // frame is drawn between this release and that load (the level swap reset+emplaces
     // the World in one step). Only the resources those descriptors named are freed
     // here; the shadow map resource, created once in CreateShadowMap, is left standing.
-    models_.clear();
+    models_.clear();  // frees each GpuModel's BLAS along with its buffers
+    tlas_.Reset();
     textures_.clear();
     atlas_texture_.Reset();
     mono_atlas_texture_.Reset();
@@ -840,6 +852,18 @@ void Renderer::CreateDevice() {
                                             sizeof(options))) ||
         options.ResourceBindingTier < D3D12_RESOURCE_BINDING_TIER_3) {
         throw std::runtime_error("This GPU or driver does not support resource binding tier 3");
+    }
+
+    // The scene pass traces reflection rays with inline raytracing (a RayQuery in the
+    // pixel shader, no shader tables or ray pipeline), which the runtime exposes at
+    // raytracing tier 1.1. The acceleration structures it walks are built on the same
+    // command list as the geometry. Required, not optional -- the scene's specular path
+    // reflects the real yard off it -- so fail loudly where it is absent.
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5{};
+    if (FAILED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5,
+                                            sizeof(options5))) ||
+        options5.RaytracingTier < D3D12_RAYTRACING_TIER_1_1) {
+        throw std::runtime_error("This GPU or driver does not support raytracing tier 1.1");
     }
 
     // Mesh shaders are optional: unlike enhanced barriers they are not assumed present
@@ -2849,6 +2873,217 @@ void Renderer::CaptureReflectionProbe(const Scene& scene) {
     FlushGpu();
 }
 
+ComPtr<ID3D12Resource> Renderer::CreateAsBuffer(UINT64 bytes, bool result) {
+    const CD3DX12_HEAP_PROPERTIES default_heap(D3D12_HEAP_TYPE_DEFAULT);
+    // Created the legacy way, not through CreateCommittedResource3: a finished AS must be
+    // born in the RAYTRACING_ACCELERATION_STRUCTURE state, which is the only initial
+    // condition the AS-access barriers accept (the resource3 path with the AS flag is
+    // rejected). Buffers carry no layout, so this legacy-state resource works with the
+    // renderer's enhanced barriers exactly as the upload staging buffers do. The build
+    // scratch is a plain UAV buffer.
+    const CD3DX12_RESOURCE_DESC desc =
+        CD3DX12_RESOURCE_DESC::Buffer(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    const D3D12_RESOURCE_STATES state = result
+                                            ? D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE
+                                            : D3D12_RESOURCE_STATE_COMMON;
+    ComPtr<ID3D12Resource> buffer;
+    ThrowIfFailed(device_->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc, state,
+                                                   nullptr, IID_PPV_ARGS(&buffer)),
+                  "CreateCommittedResource(AS buffer)");
+    return buffer;
+}
+
+void Renderer::BuildAccelerationStructures(const Scene& scene) {
+    ThrowIfFailed(allocators_[frame_index_]->Reset(), "CommandAllocator::Reset");
+    ThrowIfFailed(command_list_->Reset(allocators_[frame_index_].Get(), nullptr),
+                  "CommandList::Reset");
+
+    // Scratch and the little upload buffers holding the transforms and instance descs
+    // must outlive the builds that read them, so they are held here until the FlushGpu
+    // at the end retires the work.
+    std::vector<ComPtr<ID3D12Resource>> keepalive;
+
+    // A CPU-writable buffer the GPU reads directly (no copy): the build reads it once, so
+    // an upload-heap resource is fine and simpler than staging into video memory.
+    auto make_upload = [&](const void* data, UINT64 bytes) -> ComPtr<ID3D12Resource> {
+        const CD3DX12_HEAP_PROPERTIES upload_heap(D3D12_HEAP_TYPE_UPLOAD);
+        const CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(bytes);
+        ComPtr<ID3D12Resource> buffer;
+        ThrowIfFailed(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                       IID_PPV_ARGS(&buffer)),
+                      "CreateCommittedResource(AS upload)");
+        void* mapped = nullptr;
+        const CD3DX12_RANGE no_read(0, 0);
+        ThrowIfFailed(buffer->Map(0, &no_read, &mapped), "AS upload Map");
+        std::memcpy(mapped, data, static_cast<size_t>(bytes));
+        buffer->Unmap(0, nullptr);
+        return buffer;
+    };
+
+    // A DirectXMath (row-vector, translation in the last row) transform, written as the
+    // 3x4 (column-translation) matrix DXR wants: the transpose's top three rows.
+    auto to3x4 = [](const XMFLOAT4X4& src, float out[12]) {
+        XMFLOAT4X4 t;
+        XMStoreFloat4x4(&t, XMMatrixTranspose(XMLoadFloat4x4(&src)));
+        const float rows[12] = {t._11, t._12, t._13, t._14, t._21, t._22,
+                                t._23, t._24, t._31, t._32, t._33, t._34};
+        std::memcpy(out, rows, sizeof(rows));
+    };
+
+    // --- One bottom-level AS per model, a geometry per primitive so each bakes in its
+    // own model-space placement (the flattened glTF node transform) via Transform3x4. ---
+    for (GpuModel& model : models_) {
+        const UINT vertex_count =
+            model.vertex_buffer_view.SizeInBytes / model.vertex_buffer_view.StrideInBytes;
+
+        std::vector<float> transforms(model.primitives.size() * 12);
+        for (size_t p = 0; p < model.primitives.size(); ++p) {
+            to3x4(model.primitives[p].transform, &transforms[p * 12]);
+        }
+        ComPtr<ID3D12Resource> transform_buffer =
+            make_upload(transforms.data(), transforms.size() * sizeof(float));
+        const D3D12_GPU_VIRTUAL_ADDRESS transform_base = transform_buffer->GetGPUVirtualAddress();
+        keepalive.push_back(transform_buffer);
+
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries(model.primitives.size());
+        for (size_t p = 0; p < model.primitives.size(); ++p) {
+            const DrawPrimitive& prim = model.primitives[p];
+            D3D12_RAYTRACING_GEOMETRY_DESC& geo = geometries[p];
+            geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            geo.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+            // Each 3x4 is 12 floats (48 bytes, a multiple of the 16-byte alignment the
+            // transform address requires), packed back to back.
+            geo.Triangles.Transform3x4 = transform_base + p * 12 * sizeof(float);
+            geo.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+            geo.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            geo.Triangles.IndexCount = prim.index_count;
+            geo.Triangles.IndexBuffer = model.index_buffer->GetGPUVirtualAddress() +
+                                        static_cast<UINT64>(prim.first_index) * sizeof(std::uint32_t);
+            geo.Triangles.VertexCount = vertex_count;
+            geo.Triangles.VertexBuffer.StartAddress = model.vertex_buffer->GetGPUVirtualAddress();
+            geo.Triangles.VertexBuffer.StrideInBytes = model.vertex_buffer_view.StrideInBytes;
+        }
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = static_cast<UINT>(geometries.size());
+        inputs.pGeometryDescs = geometries.data();
+
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+        device_->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+
+        model.blas = CreateAsBuffer(info.ResultDataMaxSizeInBytes, /*result=*/true);
+        ComPtr<ID3D12Resource> scratch = CreateAsBuffer(info.ScratchDataSizeInBytes, false);
+        keepalive.push_back(scratch);
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};
+        build.Inputs = inputs;
+        build.DestAccelerationStructureData = model.blas->GetGPUVirtualAddress();
+        build.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+
+        // The build reads the vertex and index buffers, which otherwise rest in vertex/
+        // index-buffer access for rendering. They were not touched in this command list, so
+        // there is nothing to drain (SYNC_NONE / NO_ACCESS before); flip them to a shader-
+        // resource read for the build, then back to their render access afterward.
+        BufferBarrier(command_list_.Get(), model.vertex_buffer.Get(), D3D12_BARRIER_SYNC_NONE,
+                      D3D12_BARRIER_ACCESS_NO_ACCESS,
+                      D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                      D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
+        BufferBarrier(command_list_.Get(), model.index_buffer.Get(), D3D12_BARRIER_SYNC_NONE,
+                      D3D12_BARRIER_ACCESS_NO_ACCESS,
+                      D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                      D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
+
+        command_list_->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
+
+        // The TLAS build reads this BLAS, so its write must complete first.
+        BufferBarrier(command_list_.Get(), model.blas.Get(),
+                      D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                      D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
+                      D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                      D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ);
+        // The buffers back to their render access for the frames to come.
+        BufferBarrier(command_list_.Get(), model.vertex_buffer.Get(),
+                      D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                      D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_SYNC_DRAW,
+                      D3D12_BARRIER_ACCESS_VERTEX_BUFFER);
+        BufferBarrier(command_list_.Get(), model.index_buffer.Get(),
+                      D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                      D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_SYNC_DRAW,
+                      D3D12_BARRIER_ACCESS_INDEX_BUFFER);
+    }
+
+    // --- One top-level AS over the yard's static instances, each pointing at its model's
+    // BLAS with its world transform. Dynamic props are not in here yet. ---
+    const std::span<const MeshInstance> instances = scene.Instances();
+    std::vector<D3D12_RAYTRACING_INSTANCE_DESC> instance_descs(instances.size());
+    for (size_t i = 0; i < instances.size(); ++i) {
+        D3D12_RAYTRACING_INSTANCE_DESC& d = instance_descs[i];
+        float rows[12];
+        to3x4(instances[i].transform, rows);
+        std::memcpy(d.Transform, rows, sizeof(rows));
+        d.InstanceID = 0;
+        d.InstanceMask = 0xFF;
+        d.InstanceContributionToHitGroupIndex = 0;
+        d.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+        d.AccelerationStructure = models_[instances[i].model].blas->GetGPUVirtualAddress();
+    }
+    ComPtr<ID3D12Resource> instance_buffer = make_upload(
+        instance_descs.data(), instance_descs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+    keepalive.push_back(instance_buffer);
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tlas_inputs{};
+    tlas_inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    tlas_inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    tlas_inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    tlas_inputs.NumDescs = static_cast<UINT>(instance_descs.size());
+    tlas_inputs.InstanceDescs = instance_buffer->GetGPUVirtualAddress();
+
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO tlas_info{};
+    device_->GetRaytracingAccelerationStructurePrebuildInfo(&tlas_inputs, &tlas_info);
+    tlas_ = CreateAsBuffer(tlas_info.ResultDataMaxSizeInBytes, /*result=*/true);
+    ComPtr<ID3D12Resource> tlas_scratch = CreateAsBuffer(tlas_info.ScratchDataSizeInBytes, false);
+    keepalive.push_back(tlas_scratch);
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC tlas_build{};
+    tlas_build.Inputs = tlas_inputs;
+    tlas_build.DestAccelerationStructureData = tlas_->GetGPUVirtualAddress();
+    tlas_build.ScratchAccelerationStructureData = tlas_scratch->GetGPUVirtualAddress();
+    command_list_->BuildRaytracingAccelerationStructure(&tlas_build, 0, nullptr);
+
+    // The scene pixel shader traces the TLAS, so its build must complete before any frame
+    // reads it. This one barrier makes the write visible; the static TLAS is only read
+    // thereafter, so no further barrier is needed per frame. AS-read access is not
+    // compatible with the pixel-shading sync scope, so the availability is scoped to ALL
+    // -- fine for a one-time load-time barrier.
+    BufferBarrier(command_list_.Get(), tlas_.Get(),
+                  D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                  D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
+                  D3D12_BARRIER_SYNC_ALL,
+                  D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ);
+
+    // The TLAS's shader-visible SRV, at its fixed engine-block slot. An acceleration-
+    // structure SRV names the resource only by GPU address in the desc, so the resource
+    // pointer passed to CreateShaderResourceView is null.
+    tlas_descriptor_ = kTlasSrvIndex;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    srv.Format = DXGI_FORMAT_UNKNOWN;
+    srv.RaytracingAccelerationStructure.Location = tlas_->GetGPUVirtualAddress();
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                               static_cast<INT>(tlas_descriptor_), engine_heap_size_);
+    device_->CreateShaderResourceView(nullptr, &srv, handle);
+
+    ThrowIfFailed(command_list_->Close(), "CommandList::Close");
+    ID3D12CommandList* lists[] = {command_list_.Get()};
+    queue_->ExecuteCommandLists(_countof(lists), lists);
+    FlushGpu();
+}
+
 void Renderer::LoadFontFace(const std::filesystem::path& csv, const std::filesystem::path& png,
                             UINT descriptor, Font& font, ComPtr<ID3D12Resource>& texture,
                             UINT& width, UINT& height,
@@ -4277,6 +4512,8 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     frame.light_view_projection = light_view_projection_;
     frame.camera_position = camera_position;
     frame.time = seconds;
+    // The TLAS slot the scene pixel shader traces its reflection rays against.
+    frame.tlas_index = tlas_descriptor_;
     ApplyEnvironment(frame, environment_);
     std::memcpy(frame_region, &frame, sizeof(frame));
     frame_constants_address_ =
