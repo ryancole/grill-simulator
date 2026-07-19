@@ -211,6 +211,11 @@ static const float3 kDielectricF0 = float3(0.04f, 0.04f, 0.04f);
 // by wetness, so a barely-damp thing is only nudged and a drenched one fully changed.
 static const float kWetAlbedo = 0.6f;
 static const float kWetRoughness = 0.25f;
+// On top of those, a wet film throws a bright reflection at grazing angles -- the sheen
+// that rings the edge of a puddle where the surface turns to catch the sky. kWetRim is
+// how strong that Fresnel-shaped rim is at full soak, added to the environment
+// reflection's weight so the rim shows the sky it reflects rather than a flat white glow.
+static const float kWetRim = 0.5f;
 
 // The GGX/Trowbridge-Reitz normal distribution: how much of the surface's
 // microfacets face exactly the half vector. `a` is the roughness squared.
@@ -359,8 +364,16 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     // where the sun is not glinting off it.
     const float3 reflection = reflect(-view, normal);
     const float2 env_brdf = EnvBRDFApprox(roughness, n_dot_v);
-    const float3 ambient_specular =
-        SpecularEnvironment(reflection, roughness, use_probe) * (f0 * env_brdf.x + env_brdf.y);
+    // The wet grazing rim: a Fresnel (pow-5) term that climbs toward the silhouette,
+    // scaled by wetness, added to the reflection's weight. So a soaked surface lights up
+    // along its edge with the sky it catches -- a dry one adds nothing. The base is
+    // saturated because n_dot_v carries a +1e-5 epsilon and so can top 1 on a face-on
+    // surface, and pow() of a negative base is undefined -- it returns NaN on some GPUs,
+    // and NaN * 0 (the dry case) stays NaN and paints the whole pixel black. saturate
+    // clamps it to a safe 0, exactly as FresnelSchlick above guards its own pow.
+    const float wet_rim = pow(saturate(1.0f - n_dot_v), 5.0f) * saturate(g_wetness) * kWetRim;
+    const float3 ambient_specular = SpecularEnvironment(reflection, roughness, use_probe) *
+                                    (f0 * env_brdf.x + env_brdf.y + wet_rim);
 
     // Ambient occlusion darkens only the indirect light -- the sky's diffuse and
     // its reflection -- in the crevices and contact points the map records. The
