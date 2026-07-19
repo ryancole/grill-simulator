@@ -30,19 +30,43 @@ constexpr DXGI_FORMAT kHdrFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 // rtv_heap_; the bloom mips' views follow it.
 constexpr UINT kHdrRtvIndex = Renderer::kFrameCount;
 constexpr UINT kBloomRtvBase = Renderer::kFrameCount + 1;
+// The screen-space fluid's three render targets sit past the bloom mips in rtv_heap_:
+// the surface depth, its blurred copy, and the thickness.
+constexpr UINT kFluidRtvBase = Renderer::kFrameCount + 1 + Renderer::kBloomLevels;
+
+// The screen-space fluid's offscreen formats: a single-channel float for the surface
+// depth (view-space z) and its blur, and a half float for the accumulated thickness.
+constexpr DXGI_FORMAT kFluidDepthFormat = DXGI_FORMAT_R32_FLOAT;
+constexpr DXGI_FORMAT kFluidThicknessFormat = DXGI_FORMAT_R16_FLOAT;
+// The "no fluid here" depth the surface target is cleared to: far past any real droplet,
+// so a MIN blend keeps the nearest actual surface and the blur/composite can tell empty
+// pixels apart. Shared with the shaders (their g_sentinel).
+constexpr float kFluidSentinel = 1.0e5f;
 
 // The persistent engine SRV heap and its slots. Slot 0 is the HDR buffer the
 // tonemap reads; 1 and 2 are the scene depth and a plain (non-comparison) view of
 // the shadow map, the two the light-shaft pass marches; then one per bloom mip
-// (Renderer::kBloomLevels of them, half the window and down).
+// (Renderer::kBloomLevels of them, half the window and down); then the fluid's
+// surface depth, its blur, and its thickness.
 constexpr UINT kHdrSrvIndex = 0;
 constexpr UINT kDepthSrvIndex = 1;
 constexpr UINT kShaftShadowSrvIndex = 2;
 constexpr UINT kBloomSrvBase = 3;
+// Depth and thickness are adjacent so the composite reads them as one contiguous table;
+// the blur intermediate follows. The separable blur ends with the smoothed depth back in
+// fluid_depth_ (slot 9), which is what the composite samples.
+constexpr UINT kFluidDepthSrvIndex = kBloomSrvBase + Renderer::kBloomLevels;      // 9
+constexpr UINT kFluidThicknessSrvIndex = kFluidDepthSrvIndex + 1;                 // 10
+constexpr UINT kFluidDepthBlurSrvIndex = kFluidDepthSrvIndex + 2;                 // 11
+// The depth gap (metres) a blur tap may cross before it is rejected as a different cluster:
+// a few droplet radii, wide enough to merge a tight stream, tight enough to keep the
+// silhouette. Shared with fluid_blur.hlsl's g_depth_threshold.
+constexpr float kFluidBlurDepthThreshold = 0.08f;
 // Sized past what is in use so the post-process buffers to come need no realloc.
 constexpr UINT kEngineHeapSize = 16;
 static_assert(kBloomSrvBase + Renderer::kBloomLevels <= kEngineHeapSize,
               "engine heap too small for bloom");
+static_assert(kFluidThicknessSrvIndex < kEngineHeapSize, "engine heap too small for fluid");
 
 // The sky the fog fades into, so the horizon has no seam.
 constexpr float kSkyColor[] = {0.52f, 0.62f, 0.76f, 1.0f};
@@ -212,6 +236,72 @@ static_assert(sizeof(CloudConstants) % sizeof(UINT) == 0);
 constexpr UINT kCloudConstantDwords = sizeof(CloudConstants) / sizeof(UINT);
 static_assert(kCloudConstantDwords + 1 <= 64,
               "A root signature holds at most 64 DWORDs in total");
+
+// Mirrors the FluidConstants cbuffer in shaders/fluid.hlsl: just the view and projection
+// the impostor pass billboards and depths its droplets with. The lighting moved to the
+// composite pass, so the surface pass carries only the transforms.
+struct FluidConstants {
+    XMFLOAT4X4 view;
+    XMFLOAT4X4 proj;
+};
+
+static_assert(sizeof(FluidConstants) % sizeof(UINT) == 0);
+constexpr UINT kFluidConstantDwords = sizeof(FluidConstants) / sizeof(UINT);
+// The root constants plus the droplet buffer's root SRV (two DWORDs).
+static_assert(kFluidConstantDwords + 2 <= 64,
+              "A root signature holds at most 64 DWORDs in total");
+
+// Mirrors the FluidBlurConstants cbuffer in shaders/fluid_blur.hlsl: the texel step along
+// the blur axis, the empty-pixel sentinel, and the depth gap a tap may cross.
+struct FluidBlurConstants {
+    XMFLOAT2 texel_step;
+    float sentinel;
+    float depth_threshold;
+};
+
+static_assert(sizeof(FluidBlurConstants) % sizeof(UINT) == 0);
+constexpr UINT kFluidBlurConstantDwords = sizeof(FluidBlurConstants) / sizeof(UINT);
+
+// Mirrors the FluidCompositeConstants cbuffer in shaders/fluid_composite.hlsl: the
+// projection scales and texel size that rebuild view position and normal from depth, the
+// scene's sun/ambient (sRGB, with multipliers), the naphtha tint and glint sharpness, and
+// the per-channel absorption. Each float3 opens a fresh cbuffer row followed by the scalar
+// that shares it, matching the HLSL with no straddle.
+struct FluidCompositeConstants {
+    float proj00;
+    float proj11;
+    XMFLOAT2 texel;
+    XMFLOAT3 sun_dir_view;
+    float sentinel;
+    XMFLOAT3 sun_color;
+    float sun_intensity;
+    XMFLOAT3 sky_ambient;
+    float ambient_strength;
+    XMFLOAT3 tint;
+    float gloss;
+    XMFLOAT3 absorption;
+    float absorption_strength;
+};
+
+static_assert(sizeof(FluidCompositeConstants) % sizeof(UINT) == 0);
+constexpr UINT kFluidCompositeConstantDwords = sizeof(FluidCompositeConstants) / sizeof(UINT);
+static_assert(kFluidCompositeConstantDwords + 1 <= 64,
+              "A root signature holds at most 64 DWORDs in total");
+
+// The pale straw of naphtha the fluid's body takes (sRGB).
+constexpr XMFLOAT3 kDropletTint{0.93f, 0.9f, 0.72f};
+
+// How the fluid drinks light per channel (extinction, higher = more absorbed) and overall:
+// blue is absorbed most, so a thick pool reads warm amber; thin spray barely tints. The
+// sun-glint sharpness rounds out the composite's tuning.
+constexpr XMFLOAT3 kFluidAbsorption{1.0f, 1.7f, 3.0f};
+constexpr float kFluidAbsorptionStrength = 2.5f;
+constexpr float kFluidGloss = 200.0f;
+
+// The droplet pool's ceiling, matching Fluid's kMaxDroplets: the most impostor points the
+// per-frame buffer must hold. A live spray never approaches this, but the buffer is sized
+// for the worst case so an over-long hold never overruns it.
+constexpr UINT kMaxSprayDroplets = 2048;
 
 // Mirrors the GrassConstants cbuffer in shaders/grass.hlsl: the field's placement
 // and per-blade parameters the mesh shader grows the grass from, plus the view-
@@ -561,6 +651,7 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     CreateDepthBuffer();
     CreateHdrTarget();
     CreateBloomTargets();
+    CreateFluidTargets();
     CreateShadowMap();
     CreatePipeline();
     CreateSkyPipeline();
@@ -570,6 +661,7 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     CreateTonemapPipeline();
     CreateLightShaftPipeline();
     CreateCloudPipeline();
+    CreateFluidPipeline();
     CreateBloomPipeline();
     // The grass pass only exists where the device grows blades in a mesh shader; on
     // hardware without the tier the pipeline is never built and RenderGrass returns
@@ -739,9 +831,10 @@ void Renderer::CreateSwapChain(HWND hwnd, UINT width, UINT height) {
     frame_index_ = swap_chain_->GetCurrentBackBufferIndex();
 
     // One RTV per swapchain buffer, one for the HDR scene buffer (kHdrRtvIndex) the
-    // whole world renders into, then one per bloom mip.
+    // whole world renders into, then one per bloom mip, then the fluid's three targets
+    // (surface depth, its blur, thickness).
     D3D12_DESCRIPTOR_HEAP_DESC rtv_desc{};
-    rtv_desc.NumDescriptors = kFrameCount + 1 + kBloomLevels;
+    rtv_desc.NumDescriptors = kFrameCount + 1 + kBloomLevels + 3;
     rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     ThrowIfFailed(device_->CreateDescriptorHeap(&rtv_desc, IID_PPV_ARGS(&rtv_heap_)),
                   "CreateDescriptorHeap(RTV)");
@@ -1625,6 +1718,259 @@ void Renderer::CreateCloudPipeline() {
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&cloud_pipeline_state_)),
                   "CreateGraphicsPipelineState(clouds)");
+}
+
+void Renderer::CreateFluidPipeline() {
+    // Serialize and create one root signature, throwing with the compiler's message on a
+    // bad layout. A local helper so the three fluid passes below stay readable.
+    auto make_root_sig = [&](const CD3DX12_ROOT_SIGNATURE_DESC& desc, const char* name) {
+        ComPtr<ID3DBlob> signature;
+        ComPtr<ID3DBlob> error;
+        HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature,
+                                                 &error);
+        if (FAILED(hr)) {
+            std::string message =
+                error ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                    error->GetBufferSize())
+                      : "unknown error";
+            throw std::runtime_error(std::string("D3D12SerializeRootSignature(") + name +
+                                     ") failed: " + message);
+        }
+        ComPtr<ID3D12RootSignature> root;
+        ThrowIfFailed(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                                   signature->GetBufferSize(), IID_PPV_ARGS(&root)),
+                      "CreateRootSignature(fluid)");
+        return root;
+    };
+
+    const std::filesystem::path shader_dir = ExecutableDirectory() / "shaders";
+    CD3DX12_STATIC_SAMPLER_DESC point_clamp(0, D3D12_FILTER_MIN_MAG_MIP_POINT,
+                                            D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                            D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                            D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    point_clamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // --- Pass 1: the impostor surface pass (nearest depth + thickness, MRT) ---
+    {
+        // b0: the view and projection, as root constants. t0: the per-frame droplet buffer,
+        // a root SRV (a StructuredBuffer of world centre + radius) so it needs no descriptor
+        // heap slot, like the grass obstacles. The vertex shader reads both, so no stage is
+        // denied.
+        CD3DX12_ROOT_PARAMETER parameters[2];
+        parameters[0].InitAsConstants(kFluidConstantDwords, 0);
+        parameters[1].InitAsShaderResourceView(0);
+        CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+        root_desc.Init(_countof(parameters), parameters, 0, nullptr,
+                       D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        fluid_surface_root_signature_ = make_root_sig(root_desc, "fluid surface");
+
+        const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "fluid.vs.cso");
+        const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "fluid.ps.cso");
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+        pso.InputLayout = {nullptr, 0};  // no vertex buffer: the quad comes from SV_VertexID
+        pso.pRootSignature = fluid_surface_root_signature_.Get();
+        pso.VS = {vs.data(), vs.size()};
+        pso.PS = {ps.data(), ps.size()};
+        pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        // The billboard faces the camera and the pixel shader discards its corners, so
+        // there is no meaningful back face to cull.
+        pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+        // Independent per-target blend: RT0 (surface depth) keeps the MINIMUM (nearest z),
+        // so overlapping droplets resolve to the front surface with no depth buffer of their
+        // own; RT1 (thickness) ADDS, summing each droplet's chord along the ray.
+        pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        pso.BlendState.IndependentBlendEnable = TRUE;
+        D3D12_RENDER_TARGET_BLEND_DESC& depth_blend = pso.BlendState.RenderTarget[0];
+        depth_blend.BlendEnable = TRUE;
+        depth_blend.SrcBlend = D3D12_BLEND_ONE;
+        depth_blend.DestBlend = D3D12_BLEND_ONE;
+        depth_blend.BlendOp = D3D12_BLEND_OP_MIN;
+        depth_blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        depth_blend.DestBlendAlpha = D3D12_BLEND_ONE;
+        depth_blend.BlendOpAlpha = D3D12_BLEND_OP_MIN;
+        depth_blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        D3D12_RENDER_TARGET_BLEND_DESC& thick_blend = pso.BlendState.RenderTarget[1];
+        thick_blend.BlendEnable = TRUE;
+        thick_blend.SrcBlend = D3D12_BLEND_ONE;
+        thick_blend.DestBlend = D3D12_BLEND_ONE;
+        thick_blend.BlendOp = D3D12_BLEND_OP_ADD;
+        thick_blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        thick_blend.DestBlendAlpha = D3D12_BLEND_ONE;
+        thick_blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        thick_blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+        // Depth tested read-only against the world (write mask zero, so the scene depth is
+        // never touched): a droplet behind the grill is culled, everything in front draws.
+        // The MIN/ADD blends -- not a depth buffer of our own -- resolve fluid over fluid.
+        pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        pso.DepthStencilState.DepthEnable = TRUE;
+        pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        pso.DSVFormat = kDepthFormat;
+        pso.SampleMask = UINT_MAX;
+        pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pso.NumRenderTargets = 2;
+        pso.RTVFormats[0] = kFluidDepthFormat;
+        pso.RTVFormats[1] = kFluidThicknessFormat;
+        pso.SampleDesc.Count = 1;
+        ThrowIfFailed(
+            device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&fluid_surface_pipeline_)),
+            "CreateGraphicsPipelineState(fluid surface)");
+    }
+
+    // --- Pass 2: the separable bilateral depth blur ---
+    {
+        // b0: the blur axis/sentinel/threshold. t0: the depth to smooth (one engine-heap
+        // table). s0: a point clamp sampler -- the blur reads exact stored depths.
+        const CD3DX12_DESCRIPTOR_RANGE srv_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+        CD3DX12_ROOT_PARAMETER parameters[2];
+        parameters[0].InitAsConstants(kFluidBlurConstantDwords, 0);
+        parameters[1].InitAsDescriptorTable(1, &srv_range, D3D12_SHADER_VISIBILITY_PIXEL);
+        CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+        root_desc.Init(_countof(parameters), parameters, 1, &point_clamp,
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                           D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                           D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                           D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+        fluid_blur_root_signature_ = make_root_sig(root_desc, "fluid blur");
+
+        const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "fluid_blur.vs.cso");
+        const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "fluid_blur.ps.cso");
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+        pso.InputLayout = {nullptr, 0};
+        pso.pRootSignature = fluid_blur_root_signature_.Get();
+        pso.VS = {vs.data(), vs.size()};
+        pso.PS = {ps.data(), ps.size()};
+        pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);  // overwrite
+        pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        pso.DepthStencilState.DepthEnable = FALSE;
+        pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        pso.SampleMask = UINT_MAX;
+        pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pso.NumRenderTargets = 1;
+        pso.RTVFormats[0] = kFluidDepthFormat;
+        pso.SampleDesc.Count = 1;
+        ThrowIfFailed(
+            device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&fluid_blur_pipeline_)),
+            "CreateGraphicsPipelineState(fluid blur)");
+    }
+
+    // --- Pass 3: the dual-source composite into the HDR buffer ---
+    {
+        // b0: the reconstruction/lighting/absorption constants. t0..t1: the blurred depth
+        // and the thickness (one two-entry engine-heap table). s0: a point clamp sampler.
+        const CD3DX12_DESCRIPTOR_RANGE srv_range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
+        CD3DX12_ROOT_PARAMETER parameters[2];
+        parameters[0].InitAsConstants(kFluidCompositeConstantDwords, 0);
+        parameters[1].InitAsDescriptorTable(1, &srv_range, D3D12_SHADER_VISIBILITY_PIXEL);
+        CD3DX12_ROOT_SIGNATURE_DESC root_desc;
+        root_desc.Init(_countof(parameters), parameters, 1, &point_clamp,
+                       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+                           D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                           D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                           D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+        fluid_composite_root_signature_ = make_root_sig(root_desc, "fluid composite");
+
+        const std::vector<std::byte> vs = ReadBinaryFile(shader_dir / "fluid_composite.vs.cso");
+        const std::vector<std::byte> ps = ReadBinaryFile(shader_dir / "fluid_composite.ps.cso");
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+        pso.InputLayout = {nullptr, 0};
+        pso.pRootSignature = fluid_composite_root_signature_.Get();
+        pso.VS = {vs.data(), vs.size()};
+        pso.PS = {ps.data(), ps.size()};
+        pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+        // Dual-source blend: dst' = surface + dst * transmittance. Output 0 is the additive
+        // wet sheen, output 1 the per-channel Beer-Lambert transmittance used as the
+        // destination factor -- so the fluid tints and dims the scene behind it with no copy
+        // of the scene buffer. An empty pixel returns (0, 1) and leaves the scene untouched.
+        pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        D3D12_RENDER_TARGET_BLEND_DESC& blend = pso.BlendState.RenderTarget[0];
+        blend.BlendEnable = TRUE;
+        blend.SrcBlend = D3D12_BLEND_ONE;
+        blend.DestBlend = D3D12_BLEND_SRC1_COLOR;
+        blend.BlendOp = D3D12_BLEND_OP_ADD;
+        blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend.DestBlendAlpha = D3D12_BLEND_SRC1_ALPHA;
+        blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+        pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        pso.DepthStencilState.DepthEnable = FALSE;
+        pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        pso.SampleMask = UINT_MAX;
+        pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pso.NumRenderTargets = 1;
+        pso.RTVFormats[0] = kHdrFormat;
+        pso.SampleDesc.Count = 1;
+        ThrowIfFailed(
+            device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&fluid_composite_pipeline_)),
+            "CreateGraphicsPipelineState(fluid composite)");
+    }
+
+    // One upload-heap region per frame in flight, mapped once and left mapped, rewritten
+    // with this frame's droplet points. MoveToNextFrame retires a frame before its region
+    // is reused, so the CPU never overwrites points the GPU is still reading.
+    fluid_droplets_stride_ = kMaxSprayDroplets * static_cast<UINT>(sizeof(XMFLOAT4));
+    const CD3DX12_HEAP_PROPERTIES upload_heap(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RESOURCE_DESC buffer_desc =
+        CD3DX12_RESOURCE_DESC::Buffer(static_cast<UINT64>(fluid_droplets_stride_) * kFrameCount);
+    ThrowIfFailed(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&fluid_droplets_)),
+                  "CreateCommittedResource(fluid droplets)");
+
+    void* mapped = nullptr;
+    const CD3DX12_RANGE no_read(0, 0);
+    ThrowIfFailed(fluid_droplets_->Map(0, &no_read, &mapped), "FluidDroplets::Map");
+    fluid_droplets_mapped_ = static_cast<std::byte*>(mapped);
+}
+
+void Renderer::CreateFluidTargets() {
+    const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+
+    // Make one window-sized render target of `format`, born a shader resource (its resting
+    // layout between the passes that flip it to a target and back), with its RTV at
+    // rtv_heap_ slot `rtv_index` and its SRV at engine_heap_ slot `srv_index`.
+    auto make_target = [&](DXGI_FORMAT format, UINT rtv_index, UINT srv_index,
+                           ComPtr<ID3D12Resource>& target, const char* name) {
+        const CD3DX12_RESOURCE_DESC1 desc = CD3DX12_RESOURCE_DESC1::Tex2D(
+            format, width_, height_, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        ThrowIfFailed(device_->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                        D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, nullptr,
+                                                        nullptr, 0, nullptr, IID_PPV_ARGS(&target)),
+                      name);
+
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                static_cast<INT>(rtv_index), rtv_size_);
+        device_->CreateRenderTargetView(target.Get(), nullptr, rtv);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = format;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = 1;
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE srv_handle(
+            engine_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(srv_index),
+            engine_heap_size_);
+        device_->CreateShaderResourceView(target.Get(), &srv, srv_handle);
+    };
+
+    make_target(kFluidDepthFormat, kFluidRtvBase + 0, kFluidDepthSrvIndex, fluid_depth_,
+                "CreateCommittedResource3(fluid depth)");
+    make_target(kFluidDepthFormat, kFluidRtvBase + 1, kFluidDepthBlurSrvIndex, fluid_depth_blur_,
+                "CreateCommittedResource3(fluid depth blur)");
+    make_target(kFluidThicknessFormat, kFluidRtvBase + 2, kFluidThicknessSrvIndex, fluid_thickness_,
+                "CreateCommittedResource3(fluid thickness)");
 }
 
 void Renderer::CreateBloomPipeline() {
@@ -3692,6 +4038,148 @@ void Renderer::RenderFlow(const XMMATRIX& view, const XMMATRIX& projection, floa
                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE);
 }
 
+void Renderer::RenderFluidSpray(std::span<const XMFLOAT4> droplets, const XMMATRIX& view,
+                                const XMMATRIX& projection) {
+    if (droplets.empty()) {
+        return;
+    }
+    const UINT count = std::min(static_cast<UINT>(droplets.size()), kMaxSprayDroplets);
+
+    // This frame's slice of the droplet buffer, so the write cannot race the GPU still
+    // reading the previous frame's.
+    std::byte* region =
+        fluid_droplets_mapped_ + static_cast<size_t>(frame_index_) * fluid_droplets_stride_;
+    std::memcpy(region, droplets.data(), static_cast<size_t>(count) * sizeof(XMFLOAT4));
+    const D3D12_GPU_VIRTUAL_ADDRESS address =
+        fluid_droplets_->GetGPUVirtualAddress() +
+        static_cast<UINT64>(frame_index_) * fluid_droplets_stride_;
+
+    // Handles into the heaps the passes bind, resolved once.
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE fluid_depth_rtv(
+        rtv_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(kFluidRtvBase + 0),
+        rtv_size_);
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE fluid_depth_blur_rtv(
+        rtv_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(kFluidRtvBase + 1),
+        rtv_size_);
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE fluid_thickness_rtv(
+        rtv_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(kFluidRtvBase + 2),
+        rtv_size_);
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE hdr_rtv(rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                                static_cast<INT>(kHdrRtvIndex), rtv_size_);
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE dsv(dsv_heap_->GetCPUDescriptorHandleForHeapStart());
+    auto engine_srv = [&](UINT slot) {
+        return CD3DX12_GPU_DESCRIPTOR_HANDLE(engine_heap_->GetGPUDescriptorHandleForHeapStart(),
+                                             static_cast<INT>(slot), engine_heap_size_);
+    };
+
+    // --- Pass 1: surface depth + thickness. The impostors draw into the two offscreen
+    // targets, depth-tested read-only against the world so the yard occludes them; MIN
+    // blend keeps the nearest surface, additive blend sums the thickness. ---
+    TextureBarrier(command_list_.Get(), fluid_depth_.Get(), D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                   D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+                   D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                   D3D12_BARRIER_LAYOUT_RENDER_TARGET);
+    TextureBarrier(command_list_.Get(), fluid_thickness_.Get(), D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                   D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+                   D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                   D3D12_BARRIER_LAYOUT_RENDER_TARGET);
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE surface_rtvs[] = {fluid_depth_rtv, fluid_thickness_rtv};
+    command_list_->OMSetRenderTargets(2, surface_rtvs, FALSE, &dsv);
+    const float sentinel_clear[] = {kFluidSentinel, kFluidSentinel, kFluidSentinel, kFluidSentinel};
+    const float zero_clear[] = {0.0f, 0.0f, 0.0f, 0.0f};
+    command_list_->ClearRenderTargetView(fluid_depth_rtv, sentinel_clear, 0, nullptr);
+    command_list_->ClearRenderTargetView(fluid_thickness_rtv, zero_clear, 0, nullptr);
+
+    FluidConstants surface{};
+    XMStoreFloat4x4(&surface.view, view);
+    XMStoreFloat4x4(&surface.proj, projection);
+    command_list_->SetGraphicsRootSignature(fluid_surface_root_signature_.Get());
+    command_list_->SetPipelineState(fluid_surface_pipeline_.Get());
+    command_list_->SetGraphicsRoot32BitConstants(0, kFluidConstantDwords, &surface, 0);
+    command_list_->SetGraphicsRootShaderResourceView(1, address);
+    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    command_list_->IASetVertexBuffers(0, 0, nullptr);
+    command_list_->DrawInstanced(6, count, 0, 0);
+
+    TextureBarrier(command_list_.Get(), fluid_depth_.Get(), D3D12_BARRIER_SYNC_RENDER_TARGET,
+                   D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+                   D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                   D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    TextureBarrier(command_list_.Get(), fluid_thickness_.Get(), D3D12_BARRIER_SYNC_RENDER_TARGET,
+                   D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+                   D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                   D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+
+    // --- Pass 2: separable bilateral blur, horizontal then vertical, ping-ponging between
+    // the depth and its blur target so the smoothed depth ends back in fluid_depth_. Beads
+    // in a tight cluster melt into one surface; the bilateral weighting keeps blobs apart. ---
+    ID3D12DescriptorHeap* engine_heaps[] = {engine_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(engine_heaps), engine_heaps);
+    command_list_->SetGraphicsRootSignature(fluid_blur_root_signature_.Get());
+    command_list_->SetPipelineState(fluid_blur_pipeline_.Get());
+
+    auto blur = [&](const CD3DX12_CPU_DESCRIPTOR_HANDLE& dst_rtv, ID3D12Resource* dst,
+                    UINT src_srv_slot, XMFLOAT2 texel_step) {
+        TextureBarrier(command_list_.Get(), dst, D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                       D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+                       D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                       D3D12_BARRIER_LAYOUT_RENDER_TARGET);
+        command_list_->OMSetRenderTargets(1, &dst_rtv, FALSE, nullptr);
+        FluidBlurConstants blur_constants{};
+        blur_constants.texel_step = texel_step;
+        blur_constants.sentinel = kFluidSentinel;
+        blur_constants.depth_threshold = kFluidBlurDepthThreshold;
+        command_list_->SetGraphicsRoot32BitConstants(0, kFluidBlurConstantDwords, &blur_constants, 0);
+        command_list_->SetGraphicsRootDescriptorTable(1, engine_srv(src_srv_slot));
+        command_list_->DrawInstanced(3, 1, 0, 0);
+        TextureBarrier(command_list_.Get(), dst, D3D12_BARRIER_SYNC_RENDER_TARGET,
+                       D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+                       D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                       D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    };
+    const float inv_w = 1.0f / static_cast<float>(width_);
+    const float inv_h = 1.0f / static_cast<float>(height_);
+    // Horizontal: depth -> blur target.
+    blur(fluid_depth_blur_rtv, fluid_depth_blur_.Get(), kFluidDepthSrvIndex, XMFLOAT2(inv_w, 0.0f));
+    // Vertical: blur target -> back into depth, where the composite reads it.
+    blur(fluid_depth_rtv, fluid_depth_.Get(), kFluidDepthBlurSrvIndex, XMFLOAT2(0.0f, inv_h));
+
+    // --- Pass 3: composite. Reconstruct the surface from the blurred depth and composite it
+    // into the HDR buffer with a dual-source blend: additive sheen plus per-channel
+    // Beer-Lambert absorption of the scene behind, no scene copy. ---
+    command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, nullptr);
+    command_list_->SetGraphicsRootSignature(fluid_composite_root_signature_.Get());
+    command_list_->SetPipelineState(fluid_composite_pipeline_.Get());
+
+    FluidCompositeConstants composite{};
+    XMFLOAT4X4 proj4x4;
+    XMStoreFloat4x4(&proj4x4, projection);
+    composite.proj00 = proj4x4._11;
+    composite.proj11 = proj4x4._22;
+    composite.texel = XMFLOAT2(inv_w, inv_h);
+    XMStoreFloat3(&composite.sun_dir_view,
+                  XMVector3Normalize(XMVector3TransformNormal(XMLoadFloat3(&sun_direction_), view)));
+    composite.sentinel = kFluidSentinel;
+    composite.sun_color = environment_.sun_color;
+    composite.sun_intensity = environment_.sun_intensity;
+    composite.sky_ambient = environment_.sky_ambient;
+    composite.ambient_strength = environment_.ambient_strength;
+    composite.tint = kDropletTint;
+    composite.gloss = kFluidGloss;
+    composite.absorption = kFluidAbsorption;
+    composite.absorption_strength = kFluidAbsorptionStrength;
+    command_list_->SetGraphicsRoot32BitConstants(0, kFluidCompositeConstantDwords, &composite, 0);
+    command_list_->SetGraphicsRootDescriptorTable(1, engine_srv(kFluidDepthSrvIndex));
+    command_list_->DrawInstanced(3, 1, 0, 0);
+
+    // Leave the world pass as it was found: the scene's texture heap and the HDR target with
+    // its depth bound. The caller restores the scene root signature and pipeline.
+    ID3D12DescriptorHeap* scene_heaps[] = {texture_heap_.Get()};
+    command_list_->SetDescriptorHeaps(_countof(scene_heaps), scene_heaps);
+    command_list_->OMSetRenderTargets(1, &hdr_rtv, FALSE, &dsv);
+}
+
 void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                       std::span<const MeshInstance> held_props, const XMMATRIX& view_projection,
@@ -3699,7 +4187,8 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const std::string> debug_lines,
                       std::span<const OrderCard> orders, std::span<const MeatCard> meats,
                       const XMMATRIX& view, const XMMATRIX& projection, float flow_dt,
-                      std::span<const FlowEmitter> flow_emitters) {
+                      std::span<const FlowEmitter> flow_emitters,
+                      std::span<const XMFLOAT4> droplets) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
@@ -3789,6 +4278,17 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // outline pass early-returns with nothing highlighted and the viewmodel draw that
     // follows assumes the scene's are still in force. A no-op without mesh-shader support.
     RenderGrass(view_projection, camera_position, seconds);
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    command_list_->SetPipelineState(pipeline_state_.Get());
+
+    // The lighter-fluid spray: a screen-space fluid, composited into the HDR buffer as
+    // smooth, tinted, translucent liquid. It captures the droplets' surface depth and
+    // thickness (depth-tested against the yard the world pass just laid down, so the world
+    // occludes them), bilaterally smooths the depth, and composites the lit surface -- all
+    // here, while the scene depth still holds the world and before the arms clear it. It
+    // rebinds the scene's texture heap and render targets on the way out; restore the scene
+    // root signature and pipeline for the outline pass and the draws that follow.
+    RenderFluidSpray(droplets, view, projection);
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
 
@@ -4280,6 +4780,11 @@ void Renderer::Resize(UINT width, UINT height) {
     for (BloomTarget& target : bloom_targets_) {
         target.texture.Reset();
     }
+    // The fluid's offscreen targets are window-sized as well; their SRVs in the engine
+    // heap are simply rewritten by CreateFluidTargets below.
+    fluid_depth_.Reset();
+    fluid_depth_blur_.Reset();
+    fluid_thickness_.Reset();
 
     DXGI_SWAP_CHAIN_DESC desc{};
     ThrowIfFailed(swap_chain_->GetDesc(&desc), "SwapChain::GetDesc");
@@ -4295,6 +4800,7 @@ void Renderer::Resize(UINT width, UINT height) {
     CreateDepthBuffer();
     CreateHdrTarget();
     CreateBloomTargets();
+    CreateFluidTargets();
 }
 
 void Renderer::Shutdown() {

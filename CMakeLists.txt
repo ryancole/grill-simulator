@@ -110,6 +110,16 @@ add_hlsl_shader(grill SOURCE shaders/lightshafts.hlsl ENTRY PSMain PROFILE ps_6_
 # The volumetric cloud pass: marches a density slab overhead and composites it over the sky.
 add_hlsl_shader(grill SOURCE shaders/clouds.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT clouds.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/clouds.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT clouds.ps.cso)
+# The lighter-fluid spray: a screen-space fluid pipeline. Pass 1 (fluid) billboards each
+# droplet and writes nearest surface depth + accumulated thickness; pass 2 (fluid_blur)
+# bilaterally smooths the depth so beads merge into a surface; pass 3 (fluid_composite)
+# reconstructs the surface and composites it as lit, tinted, translucent liquid.
+add_hlsl_shader(grill SOURCE shaders/fluid.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT fluid.vs.cso)
+add_hlsl_shader(grill SOURCE shaders/fluid.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT fluid.ps.cso)
+add_hlsl_shader(grill SOURCE shaders/fluid_blur.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT fluid_blur.vs.cso)
+add_hlsl_shader(grill SOURCE shaders/fluid_blur.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT fluid_blur.ps.cso)
+add_hlsl_shader(grill SOURCE shaders/fluid_composite.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT fluid_composite.vs.cso)
+add_hlsl_shader(grill SOURCE shaders/fluid_composite.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT fluid_composite.ps.cso)
 # The bloom pyramid: one vertex shader, a downsample and an upsample pixel shader.
 add_hlsl_shader(grill SOURCE shaders/bloom.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT bloom.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/bloom.hlsl ENTRY PSDownsample PROFILE ps_6_6 OUTPUT bloom_down.ps.cso)

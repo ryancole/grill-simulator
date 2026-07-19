@@ -130,7 +130,8 @@ public:
                 std::string_view hud_prompt, std::span<const std::string> debug_lines,
                 std::span<const OrderCard> orders, std::span<const MeatCard> meats,
                 const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, float flow_dt,
-                std::span<const FlowEmitter> flow_emitters);
+                std::span<const FlowEmitter> flow_emitters,
+                std::span<const DirectX::XMFLOAT4> droplets);
     // Draws the launch/pause menu as its own complete frame: a solid backdrop, a
     // `title`, and the vertical list of `entries` with the one at `selected` picked
     // out. Owns the swapchain buffer from clear to present, so the game loop calls
@@ -288,6 +289,17 @@ private:
     // where the scene depth is the far plane. Its own root signature (the camera and
     // sky, and the scene depth SRV) and a premultiplied-over blended PSO.
     void CreateCloudPipeline();
+    // The lighter-fluid spray's three pipelines and their root signatures: the impostor
+    // surface pass (nearest eye-depth + thickness, MRT), the separable bilateral depth
+    // blur, and the dual-source composite into the HDR buffer. Also creates the per-frame
+    // droplet upload buffer (a root SRV). The offscreen targets it draws into are made by
+    // CreateFluidTargets, which is window-sized and so runs again on resize.
+    void CreateFluidPipeline();
+    // The screen-space fluid's offscreen render targets, recreated on resize like the HDR
+    // buffer and the bloom mips: the surface depth, its blurred copy and the thickness,
+    // each with a render-target view in rtv_heap_ and a shader-resource view in
+    // engine_heap_.
+    void CreateFluidTargets();
     // The bloom pyramid's textures: kBloomLevels HDR targets, each half the size of
     // the one above, with their RTVs and SRVs. Recreated on resize like the HDR
     // buffer, since the sizes follow the window.
@@ -481,6 +493,15 @@ private:
     // separately (Flow reconstructs rays from both); `dt` steps the sim.
     void RenderFlow(const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, float dt,
                     std::span<const FlowEmitter> emitters);
+    // Draws the lighter-fluid spray as screen-space sphere impostors into the HDR buffer.
+    // Uploads this frame's `droplets` (world centre + radius) into the mapped droplet
+    // region, then one instanced draw of a billboard quad per droplet. Runs in the world
+    // pass while the scene depth still holds the yard, so the beads occlude and are
+    // occluded correctly; it writes depth too, so they bead against one another. Binds its
+    // own pipeline and root signature; the caller restores the scene's. A no-op with no
+    // droplets. `view` and `projection` are the camera's, for the billboard and depth.
+    void RenderFluidSpray(std::span<const DirectX::XMFLOAT4> droplets,
+                          const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection);
     // Casts the grass into the sun's shadow map: runs the amplification and mesh shaders
     // from the light's point of view with no pixel shader, writing the field's depth so
     // it shadows the ground and the props. Called from RenderShadowMap while the map is a
@@ -560,6 +581,28 @@ private:
     ComPtr<ID3D12PipelineState> light_shaft_pipeline_state_;
     ComPtr<ID3D12RootSignature> cloud_root_signature_;
     ComPtr<ID3D12PipelineState> cloud_pipeline_state_;
+
+    // The lighter-fluid spray, a screen-space fluid pipeline in three passes. Pass 1
+    // billboards the droplets and writes nearest surface depth + accumulated thickness to
+    // fluid_depth_/fluid_thickness_; pass 2 bilaterally smooths the depth into
+    // fluid_depth_blur_; pass 3 reconstructs the surface and composites it into the HDR
+    // buffer with a dual-source blend. The offscreen targets are window-sized (recreated on
+    // resize) and their SRVs live in the persistent engine heap.
+    ComPtr<ID3D12RootSignature> fluid_surface_root_signature_;
+    ComPtr<ID3D12PipelineState> fluid_surface_pipeline_;
+    ComPtr<ID3D12RootSignature> fluid_blur_root_signature_;
+    ComPtr<ID3D12PipelineState> fluid_blur_pipeline_;
+    ComPtr<ID3D12RootSignature> fluid_composite_root_signature_;
+    ComPtr<ID3D12PipelineState> fluid_composite_pipeline_;
+    ComPtr<ID3D12Resource> fluid_depth_;
+    ComPtr<ID3D12Resource> fluid_depth_blur_;
+    ComPtr<ID3D12Resource> fluid_thickness_;
+    // The per-frame droplet buffer (world centre + radius), one mapped upload-heap region
+    // per frame in flight, bound as a root SRV. No descriptor heap slot -- like the grass
+    // obstacles, it rides a root descriptor.
+    ComPtr<ID3D12Resource> fluid_droplets_;
+    std::byte* fluid_droplets_mapped_ = nullptr;
+    UINT fluid_droplets_stride_ = 0;
 
     // The bloom pyramid: its mip textures, one root signature and the downsample /
     // upsample PSOs. Level 0's SRV is what the resolve reads to add the glow.

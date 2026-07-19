@@ -61,10 +61,11 @@ constexpr float kParkY = -120.0f;
 constexpr float kParkSpacing = 0.5f;
 constexpr int kParkColumns = 64;
 
-// How a droplet draws: a cube of this side, tinted the pale straw of naphtha.
-// The cube model carries no material, so the tint is its entire colour.
-constexpr float kDropletSide = 0.035f;
-constexpr XMFLOAT3 kDropletTint{0.93f, 0.9f, 0.72f};
+// How a droplet draws: a sphere impostor of this radius, in metres. Sized a touch
+// above the fluid rest offset so a tight stream's beads kiss rather than gap. The
+// pale-straw naphtha tint the impostor shades with lives in the renderer's fluid
+// pass, since the colour is now lit rather than a flat cube face.
+constexpr float kDropletRadius = 0.024f;
 
 XMFLOAT3 ParkSpot(int slot) {
     const int col = slot % kParkColumns;
@@ -225,23 +226,16 @@ void Fluid::Update(float dt) {
                                                        PxParticleBufferFlag::eUPDATE_VELOCITY));
     }
 
-    // Rebuild what the rest of the game sees: the live droplets' draw instances. A
+    // Rebuild what the rest of the game sees: the live droplets' impostor points. A
     // handful of hundreds at most, remade flat each frame like the props' draw lists.
-    instances_.clear();
+    // xyz is the world centre (pos_inv_mass_'s position), w the draw radius.
+    points_.clear();
     for (int i = 0; i < kMaxDroplets; ++i) {
         if (age_[i] <= 0.0f) {
             continue;
         }
         const XMFLOAT4& p = pos_inv_mass_[i];
-
-        MeshInstance instance{};
-        instance.model = Scene::kCubeModel;
-        XMStoreFloat4x4(&instance.transform,
-                        XMMatrixScaling(kDropletSide, kDropletSide, kDropletSide) *
-                            XMMatrixTranslation(p.x, p.y, p.z));
-        instance.tint = kDropletTint;
-        instance.checker = 0.0f;
-        instances_.push_back(instance);
+        points_.push_back(XMFLOAT4(p.x, p.y, p.z, kDropletRadius));
     }
 }
 
@@ -253,7 +247,7 @@ void Fluid::Clear() {
         Park(i);
     }
     pending_.clear();
-    instances_.clear();
+    points_.clear();
     {
         PxScopedCudaLock lock(*physics_->Cuda());
         PxCudaContext* ctx = physics_->Cuda()->getCudaContext();
