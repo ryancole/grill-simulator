@@ -37,6 +37,10 @@ struct MeshInstance {
     // buffer's headroom and the bloom's bright-pass, which is what makes the
     // lighter's flame (the only thing that sets this today) glow.
     float emissive = 0.0f;
+    // How wet the surface looks, 0 (dry) to 1 (soaked). The scene shader darkens the
+    // albedo and sharpens the reflections by this much, so a doused log reads as a wet
+    // sheen. Zero for everything dry; Props drives it from an item's WetnessInformation.
+    float wetness = 0.0f;
 };
 
 // One model of a carryable's cook progression, resolved to a loaded model id: the

@@ -2,8 +2,8 @@
 
 #include <cmath>
 
-void IgnitableRequirements::Update(float ambient_f, float dt) {
-    if (dt <= 0.0f) {
+void IgnitableRequirements::Update(float ambient_f, float dt, float heat_rate_scale) {
+    if (dt <= 0.0f || heat_rate_scale <= 0.0f) {
         return;
     }
 
@@ -13,5 +13,11 @@ void IgnitableRequirements::Update(float ambient_f, float dt) {
     // long frame. Symmetric in direction -- a positive gap warms it, a negative one cools
     // it -- so a flame taken away before the thing caught lets it drift back toward room
     // air, and only a sustained hold carries it across the ignition threshold.
-    internal_temp_f_ += (ambient_f - internal_temp_f_) * -std::expm1(-dt / time_constant_s_);
+    //
+    // `heat_rate_scale` scales the rate the gap closes. Because the easing depends only on
+    // the ratio of elapsed time to the time constant, scaling the rate is exactly a shorter
+    // time constant -- the destination (`ambient_f`) is untouched, so an accelerant speeds
+    // the approach without moving what the object approaches.
+    internal_temp_f_ +=
+        (ambient_f - internal_temp_f_) * -std::expm1(-dt * heat_rate_scale / time_constant_s_);
 }

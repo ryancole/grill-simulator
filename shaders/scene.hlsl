@@ -36,7 +36,10 @@ cbuffer Constants : register(b0) {
     // colour added on top of the shading. Zero for the whole yard; the lighter's
     // flame drives it above one so it survives the tonemap and blooms.
     float g_emissive;
-    float g_pad0;
+    // How wet the surface is, 0 (dry) to 1 (soaked). A liquid film darkens the albedo
+    // and smooths the microsurface, so the shade below reads it to sink the base colour
+    // and sharpen the reflections into a wet sheen. Zero for everything dry.
+    float g_wetness;
 };
 
 // Per-frame, shared by every scene draw: the sun's world-to-clip matrix, the one
@@ -200,6 +203,15 @@ static const float kPi = 3.14159265f;
 // not a metal. Metals have no such fixed value -- their F0 is their base colour.
 static const float3 kDielectricF0 = float3(0.04f, 0.04f, 0.04f);
 
+// The wet look, applied by g_wetness (0 dry .. 1 soaked). A liquid film does two
+// things a viewer reads instantly as "wet": it sinks into the surface and darkens the
+// albedo (kWetAlbedo is the fully-soaked multiplier), and it fills the microsurface
+// so the reflection sharpens toward a mirror (kWetRoughness scales the roughness down,
+// which tightens the sun glint and the sky reflection into a sheen). Both are lerped
+// by wetness, so a barely-damp thing is only nudged and a drenched one fully changed.
+static const float kWetAlbedo = 0.6f;
+static const float kWetRoughness = 0.25f;
+
 // The GGX/Trowbridge-Reitz normal distribution: how much of the surface's
 // microfacets face exactly the half vector. `a` is the roughness squared.
 float DistributionGGX(float n_dot_h, float a) {
@@ -290,12 +302,16 @@ float4 ShadeScene(PSInput input, bool use_probe) {
         const float tile = frac((cell.x + cell.y) * 0.5f) * 2.0f; // 0 or 1
         base_color *= lerp(0.84f, 1.0f, tile);
     }
+    // The liquid film sinks the albedo where the surface is wet.
+    base_color *= lerp(1.0f, kWetAlbedo, saturate(g_wetness));
 
     // glTF packs roughness in G and metallic in B; the factors scale each. A floor
     // on roughness keeps the specular lobe from collapsing to a point the size of
     // one pixel, which aliases into a crawling sparkle as the camera moves.
     const float2 mr = g_metallic_roughness.Sample(g_sampler, input.uv).gb;
-    const float roughness = clamp(g_roughness * mr.x, 0.045f, 1.0f);
+    // The wet film smooths the microsurface, sharpening the reflection into a sheen.
+    const float wet_roughness = lerp(1.0f, kWetRoughness, saturate(g_wetness));
+    const float roughness = clamp(g_roughness * mr.x * wet_roughness, 0.045f, 1.0f);
     const float metallic = saturate(g_metallic * mr.y);
     const float a = roughness * roughness;
 
