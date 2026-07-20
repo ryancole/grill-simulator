@@ -8,11 +8,13 @@
 #include "rigid_body.hpp"
 #include "scene.hpp"
 #include "serve_zone.hpp"
+#include "soft_body.hpp"
 #include "wetness_information.hpp"
 
 #include <DirectXMath.h>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -23,6 +25,7 @@ class Flame;
 class Fluid;
 class Objectives;
 class Physics;
+class Renderer;
 
 // The loose objects in the yard the player can pick up, carry and set back down:
 // a pair of tongs, a steak, a couple of patties. Each is an instance of a prop
@@ -83,6 +86,18 @@ public:
     // glowing outline so the player sees which one an E press would grab. Empty
     // while carrying, since nothing is being aimed at then.
     std::span<const MeshInstance> HighlightInstances() const { return highlight_; }
+
+    // Registers every soft meat's deformable mesh with the renderer and records the
+    // handles. Split out of the constructor because Props is built before the renderer
+    // has the level's geometry, and a deformable mesh's material runs name primitives of
+    // an uploaded model. Call once, after Renderer::LoadScene.
+    void RegisterSoftMeshes(Renderer& renderer);
+
+    // The deforming meats this frame: the skinned vertex stream of every soft body,
+    // with the same browning tint the rigid draw would carry. Drawn by the scene pass
+    // instead of the matching WorldInstances entry, never as well as -- an item with a
+    // soft body is absent from world_.
+    std::span<const SoftMeshInstance> SoftInstances() const { return soft_; }
 
     // The fire/smoke sources the burning props hand to NVIDIA Flow this frame -- one per
     // burning carryable: a caught log (an oriented box along the wood) and the lit lighter (a
@@ -186,6 +201,25 @@ private:
         // for the browning tint and the pick-up prompt. The tongs leave it empty --
         // they are not food, so there is nothing to cook.
         std::optional<CookInformation> cook;
+
+        // Present on a meat that simulates as a deformable volume rather than a rigid
+        // box -- so it squashes when it lands instead of merely tumbling. Null on the
+        // tools, and null on a meat whose model would not tetrahedralize, which is a
+        // property of the asset rather than a failure: such an item simply stays rigid
+        // and SoftBody::Status() says why.
+        //
+        // A unique_ptr rather than an optional because a SoftBody owns SDK handles and
+        // is neither copyable nor movable, and items_ is a vector.
+        //
+        // While this is set the item is drawn from the soft body's skinned vertices
+        // (see SoftInstances) and NOT from world_, so it appears in exactly one draw
+        // list. The rigid body stays alive beside it: it is what the pick-up gaze test
+        // sweeps, what the shove pushes and what carries the item's pose, since a
+        // deformable volume has no pose to speak of.
+        std::unique_ptr<SoftBody> soft;
+        // The renderer's handle for this item's deformable mesh, valid while `soft` is.
+        // Assigned by RegisterSoftMeshes once the renderer has the level's geometry.
+        std::uint32_t soft_mesh = 0;
 
         // Set only on the serving tray: the delivery surface it carries. Props reads it
         // to place a live serve zone at the tray's current pose and to rest delivered
@@ -375,6 +409,9 @@ private:
     std::vector<MeshInstance> world_;
     std::vector<MeshInstance> held_;
     std::vector<MeshInstance> highlight_;
+    // Rebuilt each Update beside world_: the soft meats' skinned streams. See
+    // SoftInstances.
+    std::vector<SoftMeshInstance> soft_;
     // Rebuilt each Update: a Flow fire/smoke source for every ignitable carryable currently
     // alight. See FlowEmitters().
     std::vector<FlowEmitter> flow_emitters_;

@@ -5,23 +5,11 @@
 #include "flow_volume.hpp"
 #include "font.hpp"
 #include "scene.hpp"
-#include "soft_body.hpp" // SoftBodyPrimitive: the runs a deformable mesh draws in
+#include "soft_body.hpp" // SoftBodyPrimitive, SoftMeshInstance
 #include "viewmodel.hpp"
 
 #include <DirectXMath.h>
 
-// One deformable mesh, as it stands this frame. `mesh` is a handle from
-// Renderer::CreateDeformableMesh and `vertices` is that frame's skinned vertex stream,
-// straight from SoftBody::SkinnedVertices() -- already in world space, so unlike a
-// MeshInstance this carries no transform. The rest is what a MeshInstance carries for
-// look: the browning tint, and the wet sheen.
-struct SoftMeshInstance {
-    UINT mesh = 0;
-    std::span<const Vertex> vertices;
-    DirectX::XMFLOAT3 tint{1.0f, 1.0f, 1.0f};
-    float emissive = 0.0f;
-    float wetness = 0.0f;
-};
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
@@ -125,17 +113,7 @@ public:
     // subsystem, which repositions the grid if it is already running.
     void SetFlowRegion(DirectX::XMFLOAT3 center, float half_extent);
     void Resize(UINT width, UINT height);
-    // `props` are the loose objects resting in the yard, drawn with the scene.
-    // `highlight` is the one the player is aiming at, ringed with a glowing
-    // outline; empty rings nothing. `viewmodel` and `held_props` are drawn last,
-    // over a cleared depth buffer, so the player's arms and whatever they carry
-    // are never sliced open by the wall they are standing against. `hud_prompt`
-    // is the one centred line of HUD text laid over the finished frame; empty draws
-    // nothing. `debug_lines` are the read-only debug overlay -- one line each,
-    // anchored up from the bottom-left corner; empty draws no overlay. `orders` are the
-    // bulleted order lines on the top-right rail; empty draws no rail. `meats` are the
-    // always-on status cards on the top-left rail -- one per cooking meat, showing its
-    // doneness and temperature; empty draws no rail.
+
     // Registers a mesh whose vertices change every frame -- a soft-body meat -- and
     // returns the handle Render's SoftMeshInstance names it by. The connectivity and the
     // material runs are fixed for the mesh's life and are uploaded once here; only the
@@ -147,6 +125,18 @@ public:
     UINT CreateDeformableMesh(std::uint32_t model, std::span<const std::uint32_t> indices,
                               std::span<const SoftBodyPrimitive> primitives, UINT max_vertices);
 
+    // `props` are the loose objects resting in the yard, drawn with the scene.
+    // `highlight` is the one the player is aiming at, ringed with a glowing
+    // outline; empty rings nothing. `viewmodel` and `held_props` are drawn last,
+    // over a cleared depth buffer, so the player's arms and whatever they carry
+    // are never sliced open by the wall they are standing against. `hud_prompt`
+    // is the one centred line of HUD text laid over the finished frame; empty draws
+    // nothing. `debug_lines` are the read-only debug overlay -- one line each,
+    // anchored up from the bottom-left corner; empty draws no overlay. `orders` are the
+    // bulleted order lines on the top-right rail; empty draws no rail. `meats` are the
+    // always-on status cards on the top-left rail -- one per cooking meat, showing its
+    // doneness and temperature; empty draws no rail. `soft_meshes` are the deforming
+    // meats, drawn in the scene pass from the vertex streams they carry.
     void Render(const Scene& scene, std::span<const MeshInstance> props,
                 std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                 std::span<const MeshInstance> held_props,

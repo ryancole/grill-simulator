@@ -25,6 +25,19 @@ struct SoftBodyPrimitive {
     std::uint32_t source_primitive = 0;
 };
 
+// One deformable mesh, as it stands this frame. `mesh` is a handle from
+// Renderer::CreateDeformableMesh and `vertices` is that frame's skinned vertex stream,
+// straight from SoftBody::SkinnedVertices() -- already in world space, so unlike a
+// MeshInstance this carries no transform. The rest is what a MeshInstance carries for
+// look: the browning tint, and the wet sheen.
+struct SoftMeshInstance {
+    std::uint32_t mesh = 0;
+    std::span<const Vertex> vertices;
+    DirectX::XMFLOAT3 tint{1.0f, 1.0f, 1.0f};
+    float emissive = 0.0f;
+    float wetness = 0.0f;
+};
+
 // Forward-declared so this header stays free of <PxPhysicsAPI.h>, exactly as
 // physics.hpp is; only soft_body.cpp pulls the SDK in. Everything the SDK hands
 // back is a raw pointer with an SDK-managed lifetime.

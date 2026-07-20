@@ -14,7 +14,6 @@
 #include "props.hpp"
 #include "renderer.hpp"
 #include "scene.hpp"
-#include "soft_body.hpp"
 #include "viewmodel.hpp"
 #include "world.hpp"
 
@@ -26,7 +25,6 @@
 #include <cstddef>
 #include <cmath>
 #include <fstream>
-#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -296,46 +294,6 @@ int Run(HINSTANCE instance, int show_command) {
     // menu draws with the font atlas that rides a level's upload, and having one
     // resident means play begins the instant an entry is chosen.
     load_level(0);
-    game.state = GameState::Playing; // TEMP verification
-
-    // TEMP increment-1 harness: cook every meat into a deformable volume and drop the
-    // first over the patio, so the fall and settle can be watched in the log.
-    std::ofstream soft_log("soft_body.log", std::ios::trunc);
-    std::unique_ptr<SoftBody> soft_test;
-    UINT soft_mesh = 0;
-    std::vector<SoftMeshInstance> soft_draws;
-    float soft_log_timer = 0.0f;
-    {
-        // Cook from the scene's own copy of the model, not a fresh load from disk: the
-        // renderer's materials are indexed by position in Scene::Models(), so the soft
-        // body has to name the same one to be drawn with the right textures. The burger
-        // is found by matching the file's vertex count -- crude, but this whole block is
-        // scaffolding that increment 4 replaces with Props owning the bodies.
-        const Model on_disk = LoadGltfModel("assets/models/burger-raw.glb");
-        const std::vector<Model>& scene_models = game.world->scene().Models();
-        for (std::uint32_t i = 0; i < scene_models.size(); ++i) {
-            if (scene_models[i].vertices.size() != on_disk.vertices.size()) {
-                continue;
-            }
-            DirectX::XMFLOAT4X4 pose;
-            DirectX::XMStoreFloat4x4(&pose, DirectX::XMMatrixTranslation(0.0f, 1.2f, -5.4f));
-            auto body = std::make_unique<SoftBody>(game.physics, scene_models[i], pose, 1.0f);
-            soft_log << "burger model=" << i << " active=" << body->Active()
-                     << " status=\"" << body->Status() << "\""
-                     << " sim_verts=" << body->SimPositions().size()
-                     << " tets=" << (body->SimTetrahedra().size() / 4)
-                     << " skin_verts=" << body->SkinnedVertices().size()
-                     << " skin_tris=" << (body->SkinnedIndices().size() / 3)
-                     << " runs=" << body->SkinnedPrimitives().size() << std::endl;
-            if (body->Active()) {
-                soft_mesh = game.renderer.CreateDeformableMesh(
-                    i, body->SkinnedIndices(), body->SkinnedPrimitives(),
-                    static_cast<UINT>(body->SkinnedVertices().size()));
-                soft_test = std::move(body);
-            }
-            break;
-        }
-    }
 
     // Which menu screen is showing while game.state is Menu. Main is the launch list;
     // Options and Keybinds are reached from it and back out with Escape. A refinement of
@@ -746,52 +704,6 @@ int Run(HINSTANCE instance, int show_command) {
             Profiler::Scope scope{game.profiler, "fluid"};
             game.fluid.Update(dt);
         }
-        // TEMP harness: read the soft body back, log it, and queue it for drawing.
-        soft_draws.clear();
-        if (soft_test != nullptr && soft_test->Active()) {
-            {
-                Profiler::Scope scope{game.profiler, "soft skin"};
-                soft_test->Update();
-            }
-            SoftMeshInstance draw;
-            draw.mesh = soft_mesh;
-            draw.vertices = soft_test->SkinnedVertices();
-            draw.tint = DirectX::XMFLOAT3(1.0f, 1.0f, 1.0f);
-            soft_draws.push_back(draw);
-            soft_log_timer += dt;
-            if (soft_log_timer >= 0.25f) {
-                soft_log_timer = 0.0f;
-                const DirectX::XMFLOAT3 c = soft_test->Centroid();
-                DirectX::XMFLOAT3 lo = soft_test->SimPositions()[0];
-                DirectX::XMFLOAT3 hi = lo;
-                for (const DirectX::XMFLOAT3& p : soft_test->SimPositions()) {
-                    lo.x = std::min(lo.x, p.x); lo.y = std::min(lo.y, p.y); lo.z = std::min(lo.z, p.z);
-                    hi.x = std::max(hi.x, p.x); hi.y = std::max(hi.y, p.y); hi.z = std::max(hi.z, p.z);
-                }
-                DirectX::XMFLOAT3 slo{1e9f, 1e9f, 1e9f};
-                DirectX::XMFLOAT3 shi{-1e9f, -1e9f, -1e9f};
-                int nan_count = 0;
-                for (const Vertex& v : soft_test->SkinnedVertices()) {
-                    if (!std::isfinite(v.position.x) || !std::isfinite(v.position.y) ||
-                        !std::isfinite(v.position.z) || !std::isfinite(v.normal.y)) {
-                        ++nan_count;
-                        continue;
-                    }
-                    slo.x = std::min(slo.x, v.position.x); slo.y = std::min(slo.y, v.position.y); slo.z = std::min(slo.z, v.position.z);
-                    shi.x = std::max(shi.x, v.position.x); shi.y = std::max(shi.y, v.position.y); shi.z = std::max(shi.z, v.position.z);
-                }
-                for (const std::string& line : game.profiler.Report()) {
-                    soft_log << "  " << line << std::endl;
-                }
-                soft_log << "sim c " << c.y << " ext " << (hi.y - lo.y)
-                         << " | skin verts " << soft_test->SkinnedVertices().size()
-                         << " tris " << (soft_test->SkinnedIndices().size() / 3)
-                         << " runs " << soft_test->SkinnedPrimitives().size()
-                         << " y[" << slo.y << "," << shi.y << "] ext "
-                         << (shi.y - slo.y) << " x-ext " << (shi.x - slo.x)
-                         << " nan " << nan_count << std::endl;
-            }
-        }
         // The flame ages its specks on the frame clock, not the physics one: it collides
         // with nothing, so it has no reason to wait for a step. Unconditional -- specks
         // already in the air burn out whether or not the lighter is lit this frame.
@@ -971,7 +883,7 @@ int Run(HINSTANCE instance, int show_command) {
                                  game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
                                  view_projection, game.camera.Position(), prompt,
                                  debug_lines, order_cards, meat_cards, view, projection, dt,
-                                 flow_emitters, game.fluid.Points(), soft_draws);
+                                 flow_emitters, game.fluid.Points(), props.SoftInstances());
         }
         game.profiler.EndFrame();
     }
