@@ -1,5 +1,7 @@
 #pragma once
 
+#include "model.hpp" // Vertex: the skinned mesh handed back is made of these
+
 #include <DirectXMath.h>
 
 #include <cstdint>
@@ -8,7 +10,20 @@
 #include <vector>
 
 class Physics;
-struct Model;
+
+// One run of the skinned mesh that came from a single primitive of the source model.
+// The mesh is flattened -- every primitive's vertices are emitted with that primitive's
+// own transform already applied, because a skinned buffer has no per-draw transform
+// left to apply -- so this is what puts the pieces back: which slice of the index
+// buffer belongs to which of the model's primitives, and therefore which material.
+struct SoftBodyPrimitive {
+    std::uint32_t first_index = 0;
+    std::uint32_t index_count = 0;
+    // Index into the source Model::primitives, for the material the renderer draws it
+    // with. The soft body does not care what a material is; it only has to not lose
+    // which one this run wants.
+    std::uint32_t source_primitive = 0;
+};
 
 // Forward-declared so this header stays free of <PxPhysicsAPI.h>, exactly as
 // physics.hpp is; only soft_body.cpp pulls the SDK in. Everything the SDK hands
@@ -83,7 +98,24 @@ public:
     // shape it is in. Cheap enough to call every frame.
     DirectX::XMFLOAT3 Centroid() const;
 
+    // The drawn mesh, deformed: the source model's own vertices -- its texture
+    // coordinates, its tangents, its silhouette -- with positions and normals carried
+    // along by the simulation. This is what the renderer uploads and draws, in world
+    // space and needing no model transform, and it is the whole point of the exercise:
+    // the meat squashes without becoming a different-looking object.
+    //
+    // Rebuilt by Update. Flattened across primitives (see SoftBodyPrimitive), so the
+    // indices here are the soft body's own, not the source model's.
+    std::span<const Vertex> SkinnedVertices() const { return skinned_; }
+    std::span<const std::uint32_t> SkinnedIndices() const { return skinned_indices_; }
+    std::span<const SoftBodyPrimitive> SkinnedPrimitives() const { return skinned_primitives_; }
+
 private:
+    // Rebuilds SkinnedVertices() from the freshly read-back simulation positions:
+    // blends each drawn vertex from its embedding, then rebuilds the normals off the
+    // deformed surface. Called by Update.
+    void Skin();
+
     // Frees the volume and its cooked mesh, and returns the object to the inert state.
     // Used both by the destructor and to back out of a half-built body when the cook
     // produces something the simulation will not accept.
@@ -114,6 +146,21 @@ private:
     std::vector<DirectX::XMFLOAT4> readback_;
     std::vector<DirectX::XMFLOAT3> sim_positions_;
     std::vector<std::uint32_t> sim_tetrahedra_;
+
+    // The embedding: for each skinned vertex, which tetrahedron of the simulation mesh
+    // it sits inside, and where inside it (barycentric weights over that tet's four
+    // corners). Computed once, against the cooked rest pose; from then on a vertex's
+    // position is just those weights applied to wherever the four corners have moved.
+    // That is the whole trick -- it makes the drawn mesh follow the simulation without
+    // the simulation ever having heard of it.
+    std::vector<std::uint32_t> embed_tet_;
+    std::vector<DirectX::XMFLOAT4> embed_weights_;
+
+    // The drawn mesh: rest state (the flattened source model, kept to restore texture
+    // coordinates and tangents) and the live skinned copy Update rewrites.
+    std::vector<Vertex> skinned_;
+    std::vector<std::uint32_t> skinned_indices_;
+    std::vector<SoftBodyPrimitive> skinned_primitives_;
 
     // See Status(). Set as soon as the cook has an opinion; "no gpu" when there was
     // never a CUDA context to try on.

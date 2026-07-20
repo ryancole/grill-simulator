@@ -24,11 +24,17 @@ namespace {
 // The meat's elasticity, in the units a deformable volume takes.
 //
 // Young's modulus is stiffness in pascals: how hard the material resists being
-// stretched. Real muscle sits somewhere in the tens of kilopascals, and that is
-// roughly where this is -- low enough that a patty visibly flattens when it lands,
-// high enough that it springs back rather than puddling. This is the one knob worth
-// turning if the meat reads as rubber (raise it) or as jelly (lower it).
-constexpr PxReal kYoungsModulus = 50000.0f;
+// stretched. Real muscle sits in the tens of kilopascals; this is above that, which
+// suits a body being watched rather than measured.
+//
+// Worth knowing before reaching for this knob: it barely moves the shape the body
+// settles into. Raising it sixfold changed the resting height of a dropped patty by
+// about a percent, because most of the difference between the cooked rest shape and
+// the settled one is not elastic at all -- the voxel simulation mesh circumscribes the
+// model, so it starts fractionally larger than the surface it stands in for and gives
+// that back on the first contact. This is the knob for how the meat *responds* -- how
+// far it gives on impact and how briskly it comes back -- not for where it ends up.
+constexpr PxReal kYoungsModulus = 150000.0f;
 // Poisson's ratio: how much it bulges sideways when squashed. Meat is nearly
 // incompressible, which wants a value near 0.5 -- but the solver stiffens badly as
 // it approaches that limit, so this backs off to a value that still bulges without
@@ -49,6 +55,13 @@ constexpr PxU32 kSolverIterations = 30;
 // it rides the simulation through the embedding rather than being simulated. A few
 // hundred is enough to carry the shape of a squashing patty.
 constexpr int kSimTargetTriangles = 400;
+
+// How many voxels the simulation mesh spans along the model's longest axis. This sets
+// how finely the body can bend: too few and a patty squashes as one rigid-ish lump, too
+// many and the step cost climbs for detail the eye will not read on something this
+// small. It is a resolution knob, not a shape knob -- the silhouette comes from the
+// collision mesh and the drawn model, neither of which this touches.
+constexpr PxU32 kSimVoxelsAlongLongestAxis = 8;
 
 // Builds one triangle soup from every primitive of `model`, in model space, with each
 // primitive's own transform already applied -- the tet cooker takes a single closed
@@ -125,6 +138,59 @@ SurfaceSoup BuildSurface(const Model& model) {
         (void)base;
     }
     return soup;
+}
+
+// Flattens the whole model -- every primitive, not just the collidable ones -- into one
+// vertex array with each primitive's transform already baked into its positions, normals
+// and tangents. The rasterized path applies that transform per draw; a skinned buffer
+// cannot, because by then the vertices have been moved by the simulation and there is no
+// rigid transform left to speak of. So it is applied once, here, up front.
+//
+// The runs are recorded as they are emitted (see SoftBodyPrimitive) so the renderer can
+// still draw each piece with its own material.
+void FlattenForSkinning(const Model& model, std::vector<Vertex>& vertices,
+                        std::vector<std::uint32_t>& indices,
+                        std::vector<SoftBodyPrimitive>& primitives) {
+    for (size_t p = 0; p < model.primitives.size(); ++p) {
+        const Primitive& primitive = model.primitives[p];
+        const XMMATRIX to_model = XMLoadFloat4x4(&primitive.transform);
+        // A normal is carried by the inverse transpose, not the matrix itself, so a
+        // primitive placed with a non-uniform scale keeps its lighting right.
+        const XMMATRIX normal_matrix =
+            XMMatrixTranspose(XMMatrixInverse(nullptr, to_model));
+
+        SoftBodyPrimitive run;
+        run.first_index = static_cast<std::uint32_t>(indices.size());
+        run.source_primitive = static_cast<std::uint32_t>(p);
+
+        std::vector<std::uint32_t> remap(model.vertices.size(), 0xFFFFFFFFu);
+        for (std::uint32_t i = 0; i < primitive.index_count; ++i) {
+            const std::uint32_t source = model.indices[primitive.first_index + i];
+            if (remap[source] == 0xFFFFFFFFu) {
+                const Vertex& in = model.vertices[source];
+                Vertex out = in; // uv rides through untouched
+                XMStoreFloat3(&out.position,
+                              XMVector3Transform(XMLoadFloat3(&in.position), to_model));
+                XMStoreFloat3(&out.normal, XMVector3Normalize(XMVector3TransformNormal(
+                                               XMLoadFloat3(&in.normal), normal_matrix)));
+                // The tangent lies in the surface and stretches with it, so it goes
+                // through the matrix itself; w is the bitangent handedness and is kept.
+                const XMVECTOR tangent = XMVector3Normalize(
+                    XMVector3TransformNormal(XMLoadFloat3(&reinterpret_cast<const XMFLOAT3&>(
+                                                 in.tangent)),
+                                             to_model));
+                XMStoreFloat3(&reinterpret_cast<XMFLOAT3&>(out.tangent), tangent);
+                out.tangent.w = in.tangent.w;
+                remap[source] = static_cast<std::uint32_t>(vertices.size());
+                vertices.push_back(out);
+            }
+            indices.push_back(remap[source]);
+        }
+        run.index_count = static_cast<std::uint32_t>(indices.size()) - run.first_index;
+        if (run.index_count > 0) {
+            primitives.push_back(run);
+        }
+    }
 }
 
 } // namespace
@@ -211,16 +277,28 @@ SoftBody::SoftBody(Physics& physics, const Model& model, const XMFLOAT4X4& pose,
     // for the rigid meshes the rest of the game cooks and the wrong one here.
     params.buildGPUData = true;
 
-    // The conforming cook: the tetrahedra match the surface, so the simulation mesh and
-    // the collision mesh are the same thing. The alternative (a coarse voxel simulation
-    // mesh wrapped around a finer collision mesh) simulates more cheaply and stably, but
-    // it decouples the two meshes and makes the embedding a second problem; a meat is
-    // small enough that the simpler shape is worth more here than the cost saved.
+    // The voxel cook, not the conforming one. Both fill the surface with tetrahedra, but
+    // they differ in a way that decides whether the body holds its shape at all:
+    //
+    // A conforming cook makes the tetrahedra follow the surface exactly, which around a
+    // filled hole or a decimated crease means slivers -- tetrahedra so flat they have
+    // almost no volume. A sliver has almost no resistance to being squashed along its
+    // thin axis, so a mesh full of them collapses under its own weight however stiff the
+    // material claims to be. That is what a conforming cook of the burger did: it settled
+    // at a fifth of its height, which is the solver giving up rather than meat squashing.
+    //
+    // The voxel cook instead lays the simulation mesh out on a regular grid, so every
+    // tetrahedron is well proportioned by construction and none of them can collapse.
+    // The surface-matching mesh is still cooked and kept, as the *collision* mesh -- so
+    // the body still collides with its real shape while simulating on the sane one. The
+    // two meshes then differ, which matters downstream: the embedding below binds the
+    // drawn vertices to the simulation mesh, since that is the one that is read back.
     //
     // `validate` on: it makes the cooker inspect the surface and refuse deficient input
     // rather than silently emitting a mesh that explodes on the first step.
-    mesh_ = PxDeformableVolumeExt::createDeformableVolumeMeshNoVoxels(
-        params, surface, physics.Sdk().getPhysicsInsertionCallback(), 1.5f, /*validate=*/true);
+    mesh_ = PxDeformableVolumeExt::createDeformableVolumeMesh(
+        params, surface, kSimVoxelsAlongLongestAxis, physics.Sdk().getPhysicsInsertionCallback(),
+        /*validate=*/true);
     if (mesh_ == nullptr) {
         return; // The asset would not tetrahedralize; Active() stays false.
     }
@@ -297,8 +375,51 @@ SoftBody::SoftBody(Physics& physics, const Model& model, const XMFLOAT4X4& pose,
         std::memcpy(sim_tetrahedra_.data(), source, sim_tetrahedra_.size() * sizeof(PxU32));
     }
 
+    // --- The embedding: bind the drawn mesh into the simulation mesh. ---
+    //
+    // Both sides have to be in the same space for this, and the space is the cooked rest
+    // pose in model coordinates: the simulation mesh's own vertices as the cooker laid
+    // them out (the transform above moved the *device* copy, not these), against the
+    // flattened model vertices, which are in model space too. What comes back is, per
+    // drawn vertex, a tetrahedron and four weights inside it.
+    //
+    // From then on the pose is implicit. Skinning reads the *deformed, world-space* tet
+    // corners and applies these same weights, so the result is already in world space --
+    // the placement, the rotation and the deformation all arrive together, and the draw
+    // needs no model matrix at all.
+    FlattenForSkinning(model, skinned_, skinned_indices_, skinned_primitives_);
+
+    PxArray<PxVec3> tet_vertices;
+    tet_vertices.resize(vertex_count);
+    std::memcpy(tet_vertices.begin(), simulation->getVertices(), vertex_count * sizeof(PxVec3));
+    PxArray<PxU32> tet_indices;
+    tet_indices.resize(static_cast<PxU32>(sim_tetrahedra_.size()));
+    std::memcpy(tet_indices.begin(), sim_tetrahedra_.data(),
+                sim_tetrahedra_.size() * sizeof(PxU32));
+
+    PxArray<PxVec3> embed_points;
+    embed_points.resize(static_cast<PxU32>(skinned_.size()));
+    for (size_t i = 0; i < skinned_.size(); ++i) {
+        const XMFLOAT3& p = skinned_[i].position;
+        embed_points[static_cast<PxU32>(i)] = PxVec3(p.x, p.y, p.z);
+    }
+
+    PxArray<PxVec4> weights;
+    PxArray<PxU32> links;
+    PxTetrahedronMeshExt::createPointsToTetrahedronMap(tet_vertices, tet_indices, embed_points,
+                                                       weights, links);
+
+    embed_tet_.resize(skinned_.size());
+    embed_weights_.resize(skinned_.size());
+    for (size_t i = 0; i < skinned_.size(); ++i) {
+        embed_tet_[i] = links[static_cast<PxU32>(i)];
+        const PxVec4& w = weights[static_cast<PxU32>(i)];
+        embed_weights_[i] = XMFLOAT4(w.x, w.y, w.z, w.w);
+    }
+
     // Seed the host mirror from the staged state, so SimPositions() is already the body's
-    // starting shape on the frame it is created rather than a block of zeroes.
+    // starting shape on the frame it is created rather than a block of zeroes -- and
+    // skin once off it, so SkinnedVertices() is drawable before the first step.
     Update();
 }
 
@@ -360,6 +481,71 @@ void SoftBody::Update() {
                         readback_.size() * sizeof(PxVec4));
     for (size_t i = 0; i < readback_.size(); ++i) {
         sim_positions_[i] = XMFLOAT3(readback_[i].x, readback_[i].y, readback_[i].z);
+    }
+    Skin();
+}
+
+void SoftBody::Skin() {
+    if (skinned_.empty()) {
+        return;
+    }
+
+    // Each drawn vertex is its four tet corners, blended by the weights the embedding
+    // fixed at rest. The corners are already in world space, so this lands in world
+    // space -- the deformation and the body's placement in one step.
+    const size_t tet_count = sim_tetrahedra_.size() / 4;
+    for (size_t i = 0; i < skinned_.size(); ++i) {
+        const std::uint32_t tet = embed_tet_[i];
+        if (tet >= tet_count) {
+            continue; // Unembedded: left at its rest position (see below).
+        }
+        const XMFLOAT4& w = embed_weights_[i];
+        const std::uint32_t* corner = &sim_tetrahedra_[tet * 4];
+        XMVECTOR position = XMVectorScale(XMLoadFloat3(&sim_positions_[corner[0]]), w.x);
+        position = XMVectorAdd(position,
+                               XMVectorScale(XMLoadFloat3(&sim_positions_[corner[1]]), w.y));
+        position = XMVectorAdd(position,
+                               XMVectorScale(XMLoadFloat3(&sim_positions_[corner[2]]), w.z));
+        position = XMVectorAdd(position,
+                               XMVectorScale(XMLoadFloat3(&sim_positions_[corner[3]]), w.w));
+        XMStoreFloat3(&skinned_[i].position, position);
+    }
+
+    // Normals have to be rebuilt from the deformed surface -- the rest normals describe a
+    // shape that no longer exists, and a squashed patty lit by its unsquashed normals
+    // reads as a flat decal. Area-weighted, which falls out of using the raw cross
+    // product rather than a normalized one: a big triangle should have more say in a
+    // shared vertex's normal than a sliver does.
+    //
+    // The tangents are deliberately left at rest. They matter far less (they only orient
+    // the normal map's tangent space, and the deformations here are gentle), and
+    // rebuilding them properly needs the texture coordinates as well as the positions --
+    // more work per frame than the difference would show.
+    for (Vertex& vertex : skinned_) {
+        vertex.normal = XMFLOAT3(0.0f, 0.0f, 0.0f);
+    }
+    for (size_t i = 0; i + 2 < skinned_indices_.size(); i += 3) {
+        const std::uint32_t i0 = skinned_indices_[i];
+        const std::uint32_t i1 = skinned_indices_[i + 1];
+        const std::uint32_t i2 = skinned_indices_[i + 2];
+        const XMVECTOR p0 = XMLoadFloat3(&skinned_[i0].position);
+        const XMVECTOR p1 = XMLoadFloat3(&skinned_[i1].position);
+        const XMVECTOR p2 = XMLoadFloat3(&skinned_[i2].position);
+        const XMVECTOR face = XMVector3Cross(XMVectorSubtract(p1, p0), XMVectorSubtract(p2, p0));
+        for (const std::uint32_t index : {i0, i1, i2}) {
+            XMStoreFloat3(&skinned_[index].normal,
+                          XMVectorAdd(XMLoadFloat3(&skinned_[index].normal), face));
+        }
+    }
+    for (Vertex& vertex : skinned_) {
+        const XMVECTOR normal = XMLoadFloat3(&vertex.normal);
+        // A vertex no triangle reached, or one whose triangles cancelled out, would
+        // normalize to a NaN and paint the whole surface black.
+        if (XMVectorGetX(XMVector3LengthSq(normal)) > 1e-20f) {
+            XMStoreFloat3(&vertex.normal, XMVector3Normalize(normal));
+        } else {
+            vertex.normal = XMFLOAT3(0.0f, 1.0f, 0.0f);
+        }
     }
 }
 
