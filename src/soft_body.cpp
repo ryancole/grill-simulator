@@ -481,6 +481,18 @@ void SoftBody::Destroy() {
     // The pinned buffers came from the CUDA allocator, so they go back to it.
     if (physics_ != nullptr && physics_->Cuda() != nullptr) {
         PxCudaContextManager* cuda = physics_->Cuda();
+        // The kinematic targets are device memory, not pinned host memory, so they go
+        // back a different way -- and the volume must stop reading them first.
+        if (kinematic_targets_device_ != 0) {
+            if (volume_ != nullptr) {
+                volume_->setKinematicTargetBufferD(nullptr);
+            }
+            PxScopedCudaLock lock(*cuda);
+            cuda->getCudaContext()->memFree(
+                static_cast<CUdeviceptr>(kinematic_targets_device_));
+            kinematic_targets_device_ = 0;
+        }
+        kinematic_ = false;
         if (sim_positions_pinned_ != nullptr) {
             cuda->freePinnedHostBuffer(sim_positions_pinned_);
         }
@@ -533,6 +545,83 @@ void SoftBody::Update() {
         sim_positions_[i] = XMFLOAT3(readback_[i].x, readback_[i].y, readback_[i].z);
     }
     Skin();
+}
+
+void SoftBody::BeginKinematic(const XMFLOAT4X4& pose) {
+    if (volume_ == nullptr || kinematic_ || sim_positions_.empty()) {
+        return;
+    }
+
+    // Freeze the shape the body is in right now into the carry pose's frame. Taking the
+    // live positions rather than the cooked rest shape is what makes a meat picked up
+    // mid-squash stay squashed in the hand instead of snapping back to a fresh patty.
+    const XMMATRIX to_world = XMLoadFloat4x4(&pose);
+    XMVECTOR determinant;
+    const XMMATRIX to_local = XMMatrixInverse(&determinant, to_world);
+    kinematic_local_.resize(sim_positions_.size());
+    for (size_t i = 0; i < sim_positions_.size(); ++i) {
+        XMStoreFloat3(&kinematic_local_[i],
+                      XMVector3Transform(XMLoadFloat3(&sim_positions_[i]), to_local));
+    }
+    kinematic_targets_.resize(sim_positions_.size());
+
+    // The solver reads targets from device memory, so the buffer lives on the GPU. It is
+    // allocated on the first carry and kept for the body's life -- a meat is picked up
+    // and put down over and over, and the allocation is a few kilobytes.
+    if (kinematic_targets_device_ == 0) {
+        // Under the CUDA lock, like every other direct device call in the game (see
+        // Fluid): the allocation has to land in PhysX's own context, or the pointer is
+        // one its kernels cannot dereference and the targets are silently never applied.
+        PxScopedCudaLock lock(*physics_->Cuda());
+        CUdeviceptr device = 0;
+        if (physics_->Cuda()->getCudaContext()->memAlloc(
+                &device, kinematic_targets_.size() * sizeof(PxVec4)) != 0) {
+            return; // Out of device memory; the meat simply stays a falling body.
+        }
+        kinematic_targets_device_ = static_cast<std::uint64_t>(device);
+    }
+
+    // Fill the buffer before the flag goes up, so the solver never reads uninitialised
+    // targets and yanks the meat to whatever was in that memory.
+    kinematic_ = true;
+    UpdateKinematic(pose);
+    volume_->setDeformableBodyFlag(PxDeformableBodyFlag::eKINEMATIC, true);
+    volume_->setKinematicTargetBufferD(
+        reinterpret_cast<PxVec4*>(static_cast<CUdeviceptr>(kinematic_targets_device_)));
+}
+
+void SoftBody::UpdateKinematic(const XMFLOAT4X4& pose) {
+    if (!kinematic_) {
+        return;
+    }
+    const XMMATRIX to_world = XMLoadFloat4x4(&pose);
+    for (size_t i = 0; i < kinematic_local_.size(); ++i) {
+        XMFLOAT3 world;
+        XMStoreFloat3(&world, XMVector3Transform(XMLoadFloat3(&kinematic_local_[i]), to_world));
+        // w = 0 marks a target active, which is what PxConfigureDeformableVolumeKinematicTarget
+        // writes. Under eKINEMATIC every target counts regardless, but matching the helper
+        // keeps this correct if it ever becomes partially kinematic.
+        kinematic_targets_[i] = XMFLOAT4(world.x, world.y, world.z, 0.0f);
+    }
+    // Safe here only because Physics::Step runs simulate/fetchResults synchronously and
+    // has already returned by the time Props drives the carry: the target buffer must not
+    // be written between simulate() and fetchResults().
+    PxScopedCudaLock lock(*physics_->Cuda());
+    physics_->Cuda()->getCudaContext()->memcpyHtoD(
+        static_cast<CUdeviceptr>(kinematic_targets_device_), kinematic_targets_.data(),
+        kinematic_targets_.size() * sizeof(PxVec4));
+}
+
+void SoftBody::EndKinematic() {
+    if (volume_ == nullptr || !kinematic_) {
+        return;
+    }
+    // Targets away first, then the flag: with no buffer set the flag is ignored anyway,
+    // and the body picks up simulating from exactly where the carry left it -- the device
+    // positions are already there, so there is nothing to restore and nothing to pop.
+    volume_->setKinematicTargetBufferD(nullptr);
+    volume_->setDeformableBodyFlag(PxDeformableBodyFlag::eKINEMATIC, false);
+    kinematic_ = false;
 }
 
 void SoftBody::Skin() {

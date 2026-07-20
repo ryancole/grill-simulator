@@ -123,6 +123,46 @@ public:
     std::span<const std::uint32_t> SkinnedIndices() const { return skinned_indices_; }
     std::span<const SoftBodyPrimitive> SkinnedPrimitives() const { return skinned_primitives_; }
 
+    // --- Carrying -- PRESENTLY INERT, SEE THE WARNING BELOW ----------------------
+    //
+    // The intent: a carried meat is driven rather than dropped from the simulation. Every
+    // vertex of the simulation mesh is handed a kinematic target each frame, so the body
+    // moves exactly where the hand puts it while staying a real participant -- still
+    // colliding, still shoving what it meets -- and on release carries on deforming from
+    // wherever the carry left it rather than popping to a fresh pose.
+    //
+    // Note this does NOT go through the rigid path's scene-remove (see
+    // Props::RemoveBodyFromScene). A deformable volume must stay in the scene to be
+    // driven at all, and eDISABLE_SIMULATION is fatal on the GPU pipeline anyway.
+    //
+    // *** WARNING: none of that happens yet. *** PxDeformableVolume::setKinematicTargetBufferD
+    // is silently ignored unless the scene was created with PxSceneFlag::eENABLE_DIRECT_GPU_API,
+    // and this game cannot raise that flag: it disables all CPU readback of simulation state,
+    // while Props::RebuildTransform, the toppleable furniture and the contact-report audio all
+    // read poses straight off the actors every frame. The flag is not mutable either, so it
+    // cannot be raised just for a carry. Verified by logging the target and the resulting
+    // centroid side by side: the targets track the hand exactly, the body never moves.
+    //
+    // So these four functions run, allocate, and change nothing observable. They are kept
+    // because the geometry and the plumbing are right and worth not re-deriving -- what is
+    // missing is a way to hand the targets to PhysX. Two ways out: write the simulation
+    // positions directly each frame through PxDeformableVolumeExt::copyToDevice (the path
+    // the constructor already uses to place the body), or port the rigid path onto
+    // PxDirectGPUAPI and then raise the flag. Until one of those lands, a carried meat
+    // still draws from its last simulated shape and simply does not follow the hand.
+
+    // Takes the body kinematic, carried at `pose`. The shape it is in right now is
+    // frozen into that pose's frame, so a meat picked up mid-squash is carried squashed
+    // instead of snapping back to its cooked rest shape. No-op if inert or already
+    // kinematic.
+    void BeginKinematic(const DirectX::XMFLOAT4X4& pose);
+    // Moves the frozen shape to `pose`. Call once a frame while carried, after
+    // Physics::Step -- the target buffer must not be written while the solver is running.
+    void UpdateKinematic(const DirectX::XMFLOAT4X4& pose);
+    // Hands the body back to the simulation, in place. No-op if not kinematic.
+    void EndKinematic();
+    bool Kinematic() const { return kinematic_; }
+
 private:
     // Rebuilds SkinnedVertices() from the freshly read-back simulation positions:
     // blends each drawn vertex from its embedding, then rebuilds the normals off the
@@ -174,6 +214,16 @@ private:
     std::vector<Vertex> skinned_;
     std::vector<std::uint32_t> skinned_indices_;
     std::vector<SoftBodyPrimitive> skinned_primitives_;
+
+    // Carrying state (see BeginKinematic). `kinematic_local_` is the shape frozen at
+    // pick-up, in the carry pose's frame; each frame it is carried to world space into
+    // `kinematic_targets_` and pushed to the device buffer the solver reads targets from.
+    // That buffer is a raw CUdeviceptr, held as a plain integer for the same reason the
+    // pinned buffers above are void* -- so the CUDA and PhysX headers stay in the .cpp.
+    bool kinematic_ = false;
+    std::vector<DirectX::XMFLOAT3> kinematic_local_;
+    std::vector<DirectX::XMFLOAT4> kinematic_targets_;
+    std::uint64_t kinematic_targets_device_ = 0;
 
     // See Status(). Set as soon as the cook has an opinion; "no gpu" when there was
     // never a CUDA context to try on.

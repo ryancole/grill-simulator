@@ -734,22 +734,49 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     }
 
+    // Then hand every held soft meat its kinematic target for the next step. `in_simulation`
+    // is exactly the right test: it is false precisely while an item is out of the rigid
+    // scene -- carried, clamped in the tongs, served onto a tray, stacked in the pit -- so
+    // this one loop covers every pick-up and put-down without any of those call sites
+    // knowing about soft bodies. A deformable volume cannot simply leave the scene the way
+    // the rigid body does (it would stop being read back, and the meat would draw frozen
+    // where it was), so instead it is driven to where the hand holds it: still colliding,
+    // still shoving what it meets, and on release carrying on from that exact shape.
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        Item& item = items_[i];
+        if (item.soft == nullptr) {
+            continue;
+        }
+        if (item.in_simulation) {
+            item.soft->EndKinematic(); // A no-op unless it was being carried.
+            continue;
+        }
+        // CurrentPose covers carried and resting-or-stuck; the tongs' jaws are their own
+        // pose, which it does not know about.
+        const XMMATRIX pose =
+            i == gripped_ ? TongsGripPose() * camera_to_world : CurrentPose(i, camera_to_world);
+        XMFLOAT4X4 held;
+        XMStoreFloat4x4(&held, pose);
+        if (item.soft->Kinematic()) {
+            item.soft->UpdateKinematic(held);
+        } else {
+            item.soft->BeginKinematic(held);
+        }
+    }
+
     world_.clear();
     held_.clear();
     highlight_.clear();
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-        if (i == carried_ || i == gripped_) {
-            continue; // drawn in the held pass below (the tongs, and the meat in them)
-        }
-        // A meat served onto the carried tray travels in the hand with it, so it draws
-        // in the held pass alongside the tray rather than out in the world.
-        if (items_[i].served && items_[i].stuck_to == carried_) {
-            continue;
-        }
         // A deforming meat is drawn from its skinned vertices instead of as a rigid
         // instance -- one draw list or the other, never both. The vertices are already
         // in world space, so unlike the rigid path there is no pose to hand over; the
-        // browning tint and the wet sheen carry across unchanged.
+        // browning tint and the wet sheen carry across unchanged. This comes before the
+        // held checks because it holds *wherever* the meat is: carried and gripped ones
+        // are being driven to the hand (see the kinematic loop above), so their vertices
+        // are already at the held pose and they draw here rather than in the held pass.
+        // They lose that pass's cleared depth, but a driven meat is a real collider and
+        // so cannot be inside the wall that would have sliced it.
         if (items_[i].soft != nullptr) {
             SoftMeshInstance draw;
             draw.mesh = items_[i].soft_mesh;
@@ -759,17 +786,29 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
             soft_.push_back(draw);
             continue;
         }
+        if (i == carried_ || i == gripped_) {
+            continue; // drawn in the held pass below (the tongs, and the meat in them)
+        }
+        // A meat served onto the carried tray travels in the hand with it, so it draws
+        // in the held pass alongside the tray rather than out in the world.
+        if (items_[i].served && items_[i].stuck_to == carried_) {
+            continue;
+        }
         world_.push_back(MakeInstance(CurrentModel(items_[i]), XMLoadFloat4x4(&items_[i].resting),
                                       ItemTint(items_[i]), ItemWetness(items_[i])));
     }
-    if (carried_ >= 0) {
+    // A soft meat is never in the held pass -- it went into soft_ above, at the pose it is
+    // being driven to -- so both of these skip one.
+    if (carried_ >= 0 && items_[carried_].soft == nullptr) {
         held_.push_back(MakeInstance(CurrentModel(items_[carried_]),
                                      XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world,
                                      ItemTint(items_[carried_]), ItemWetness(items_[carried_])));
+    }
+    if (carried_ >= 0) {
         // The plate of food on a carried tray: each stuck meat's resting was set above to
         // its pose on the (held) tray, so it draws in the hand right where it sits.
         for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-            if (items_[i].served && items_[i].stuck_to == carried_) {
+            if (items_[i].served && items_[i].stuck_to == carried_ && items_[i].soft == nullptr) {
                 held_.push_back(MakeInstance(CurrentModel(items_[i]),
                                              XMLoadFloat4x4(&items_[i].resting), ItemTint(items_[i])));
             }
@@ -777,7 +816,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     }
     // The meat clamped in the tongs draws in the hand at the grip pose, over the cleared
     // depth like the tongs themselves, so a wall never slices it.
-    if (gripped_ >= 0) {
+    if (gripped_ >= 0 && items_[gripped_].soft == nullptr) {
         held_.push_back(MakeInstance(CurrentModel(items_[gripped_]),
                                      TongsGripPose() * camera_to_world, ItemTint(items_[gripped_])));
     }
