@@ -45,9 +45,27 @@ constexpr PxReal kDynamicFriction = 0.6f;
 // patty-sized body a believable few hundred grams.
 constexpr PxReal kDensity = 1050.0f;
 
-// Solver iterations per step. Deformables need more than a rigid body to hold their
-// shape; too few and the mesh sags under its own weight instead of settling.
-constexpr PxU32 kSolverIterations = 30;
+// Solver iterations per step, and by a wide margin the most expensive number here.
+// Measured, for one patty, in Release (physics milliseconds per frame, and the height
+// the body settles to):
+//
+//      1 -> 3.35 ms, 0.0508      8 ->  5.21 ms, 0.0513
+//      2 -> 2.97 ms, 0.0507     16 -> 12.68 ms, 0.0518
+//      4 -> 3.21 ms, 0.0506     30 -> 78.71 ms  (13 fps)
+//
+// Two things fall out of that. The cost floors at or below four -- the 1/2/4 readings are
+// not monotonic, so that is noise around a floor where something other than iterations
+// dominates. And above eight it climbs far faster than the count does, because the scene
+// steps on a fixed 1/120 clock with an eight-step catch-up: once a frame overruns, every
+// frame runs all eight substeps, so an expensive step makes a slow frame makes more
+// expensive steps. Thirty sat at the bottom of that spiral.
+//
+// Four rather than two: they cost the same within noise, and four keeps some headroom.
+// Note what the numbers above do NOT cover -- they are a body at rest. Too few iterations
+// shows up under impact (jitter, penetration, a landing that squashes further than it
+// should), and a single drop settling in the grass does not exercise that. If a thrown
+// meat ever behaves oddly on contact, this is the first number to raise.
+constexpr PxU32 kSolverIterations = 4;
 
 // How many triangles the simulated surface is decimated down to before it is filled
 // with tetrahedra. This is the single most important number here: the cost of the cook
