@@ -507,6 +507,14 @@ private:
     // then drawn run by run, with the material each run's source primitive carries. The
     // vertices are already in world space, so the model matrix is identity -- there is no
     // rigid transform to apply to something the simulation has bent.
+    // Copies each deforming mesh's vertices for this frame into its buffer. Called once
+    // at the top of Render, before any pass reads them -- the shadow map is drawn from
+    // the same vertices and runs first.
+    void UploadDeformableMeshes(std::span<const SoftMeshInstance> instances);
+    // The deforming meshes as shadow casters, depth-only into the sun's map, so a meat
+    // lying on the patio darkens the patio.
+    void DrawDeformableShadowCasters(std::span<const SoftMeshInstance> instances);
+
     void DrawDeformable(std::span<const SoftMeshInstance> instances,
                         const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction);
 
@@ -522,7 +530,8 @@ private:
     // The shadow pass: draws every caster depth-only into the shadow map from the
     // sun's point of view, wrapped in the barriers that flip the map between
     // depth target and shader resource.
-    void RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props, float time);
+    void RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props,
+                         std::span<const SoftMeshInstance> soft_meshes, float time);
     // Grows the level's grass field into the currently bound HDR target: dispatches the
     // mesh shader over the field's grid of cells, each group generating a pack of
     // blades, writing colour and depth. A no-op with no grass loaded or no mesh-shader

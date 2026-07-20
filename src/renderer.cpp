@@ -4058,6 +4058,43 @@ UINT Renderer::CreateDeformableMesh(std::uint32_t model, std::span<const std::ui
     return static_cast<UINT>(deformable_meshes_.size() - 1);
 }
 
+void Renderer::UploadDeformableMeshes(std::span<const SoftMeshInstance> instances) {
+    // Every deforming mesh's vertices for this frame, copied into this frame's region of
+    // its buffer. Split out of the draw because more than one pass reads them and the
+    // first of those -- the shadow map -- runs before the scene pass: a copy made during
+    // the scene pass would leave the shadow drawn from whatever the buffer held last.
+    for (const SoftMeshInstance& instance : instances) {
+        if (instance.mesh >= deformable_meshes_.size() || instance.vertices.empty()) {
+            continue;
+        }
+        DeformableMesh& mesh = deformable_meshes_[instance.mesh];
+        const UINT bytes = static_cast<UINT>(instance.vertices.size() * sizeof(Vertex));
+        std::memcpy(mesh.vertex_mapped + static_cast<size_t>(frame_index_) * mesh.region_bytes,
+                    instance.vertices.data(), std::min(bytes, mesh.region_bytes));
+    }
+}
+
+void Renderer::DrawDeformableShadowCasters(std::span<const SoftMeshInstance> instances) {
+    // The same depth-only pass the rigid casters take, from this frame's uploaded
+    // vertices. No model matrix: they are already in world space.
+    const XMMATRIX light_view_projection = XMLoadFloat4x4(&light_view_projection_);
+    for (const SoftMeshInstance& instance : instances) {
+        if (instance.mesh >= deformable_meshes_.size() || instance.vertices.empty()) {
+            continue;
+        }
+        const DeformableMesh& mesh = deformable_meshes_[instance.mesh];
+        command_list_->IASetVertexBuffers(0, 1, &mesh.vertex_views[frame_index_]);
+        command_list_->IASetIndexBuffer(&mesh.index_view);
+
+        ShadowConstants constants{};
+        XMStoreFloat4x4(&constants.light_mvp, light_view_projection);
+        command_list_->SetGraphicsRoot32BitConstants(0, kShadowConstantDwords, &constants, 0);
+        for (const SoftBodyPrimitive& run : mesh.primitives) {
+            command_list_->DrawIndexedInstanced(run.index_count, 1, run.first_index, 0, 0);
+        }
+    }
+}
+
 void Renderer::DrawDeformable(std::span<const SoftMeshInstance> instances,
                               const XMMATRIX& view_projection, XMFLOAT3 sun_direction) {
     if (instances.empty()) {
@@ -4071,12 +4108,6 @@ void Renderer::DrawDeformable(std::span<const SoftMeshInstance> instances,
         }
         DeformableMesh& mesh = deformable_meshes_[instance.mesh];
         const GpuModel& model = models_[mesh.model];
-
-        // This frame's vertices into this frame's region. The one real per-frame cost of
-        // a deformable mesh on this side; everything below is an ordinary draw.
-        const UINT bytes = static_cast<UINT>(instance.vertices.size() * sizeof(Vertex));
-        std::memcpy(mesh.vertex_mapped + static_cast<size_t>(frame_index_) * mesh.region_bytes,
-                    instance.vertices.data(), std::min(bytes, mesh.region_bytes));
 
         command_list_->IASetVertexBuffers(0, 1, &mesh.vertex_views[frame_index_]);
         command_list_->IASetIndexBuffer(&mesh.index_view);
@@ -4141,7 +4172,7 @@ void Renderer::DrawShadowCasters(std::span<const MeshInstance> instances) {
 }
 
 void Renderer::RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props,
-                               float time) {
+                               std::span<const SoftMeshInstance> soft_meshes, float time) {
     // Flip the map from the shader resource the scene pass left it as into a depth
     // target to write: the pixel-shader reads of last frame must drain, and it
     // becomes a depth-stencil write.
@@ -4166,6 +4197,7 @@ void Renderer::RenderShadowMap(const Scene& scene, std::span<const MeshInstance>
     // not -- they are lit by the camera's own sun and never enter this pass.
     DrawShadowCasters(scene.Instances());
     DrawShadowCasters(props);
+    DrawDeformableShadowCasters(soft_meshes);
 
     // The grass casts too: run the mesh-shader field from the sun's view into the same
     // depth map, so the blades shadow the ground and one another. It binds its own
@@ -4612,6 +4644,11 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // Rebuild the top-level AS this frame from the yard plus the loose props, so the
     // reflection rays trace them where they actually are now (carried, toppled, browning).
     // Before the scene pass, which is the only thing that reads it.
+    // Every deforming mesh's vertices for this frame, before anything reads them: the
+    // shadow map, the scene pass and (soon) the acceleration structures all draw from
+    // the same copy.
+    UploadDeformableMeshes(soft_meshes);
+
     UpdateTopLevelAS(scene, props);
 
     command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -4619,7 +4656,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // The shadow map comes first: the scene pass samples it, so every caster has
     // to be drawn into it before a single lit pixel is shaded. It binds its own
     // pipeline, root signature and viewport, all replaced below for the main pass.
-    RenderShadowMap(scene, props, seconds);
+    RenderShadowMap(scene, props, soft_meshes, seconds);
 
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
