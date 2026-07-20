@@ -58,6 +58,7 @@ add_executable(grill WIN32
   src/scene.cpp
   src/serve_zone.cpp
   src/physics.cpp
+  src/soft_body.cpp
   src/props.cpp
   src/furniture.cpp
   src/rigid_body.cpp
