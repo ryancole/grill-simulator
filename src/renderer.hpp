@@ -5,9 +5,23 @@
 #include "flow_volume.hpp"
 #include "font.hpp"
 #include "scene.hpp"
+#include "soft_body.hpp" // SoftBodyPrimitive: the runs a deformable mesh draws in
 #include "viewmodel.hpp"
 
 #include <DirectXMath.h>
+
+// One deformable mesh, as it stands this frame. `mesh` is a handle from
+// Renderer::CreateDeformableMesh and `vertices` is that frame's skinned vertex stream,
+// straight from SoftBody::SkinnedVertices() -- already in world space, so unlike a
+// MeshInstance this carries no transform. The rest is what a MeshInstance carries for
+// look: the browning tint, and the wet sheen.
+struct SoftMeshInstance {
+    UINT mesh = 0;
+    std::span<const Vertex> vertices;
+    DirectX::XMFLOAT3 tint{1.0f, 1.0f, 1.0f};
+    float emissive = 0.0f;
+    float wetness = 0.0f;
+};
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
@@ -122,6 +136,17 @@ public:
     // bulleted order lines on the top-right rail; empty draws no rail. `meats` are the
     // always-on status cards on the top-left rail -- one per cooking meat, showing its
     // doneness and temperature; empty draws no rail.
+    // Registers a mesh whose vertices change every frame -- a soft-body meat -- and
+    // returns the handle Render's SoftMeshInstance names it by. The connectivity and the
+    // material runs are fixed for the mesh's life and are uploaded once here; only the
+    // vertices arrive per frame. `model` says which loaded model the runs take their
+    // materials from, so a deformed meat is textured exactly as its rigid twin.
+    //
+    // Call after LoadScene (it reads the uploaded models) and before the first Render.
+    // ReleaseScene drops every registration along with the level.
+    UINT CreateDeformableMesh(std::uint32_t model, std::span<const std::uint32_t> indices,
+                              std::span<const SoftBodyPrimitive> primitives, UINT max_vertices);
+
     void Render(const Scene& scene, std::span<const MeshInstance> props,
                 std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                 std::span<const MeshInstance> held_props,
@@ -130,7 +155,8 @@ public:
                 std::span<const OrderCard> orders, std::span<const MeatCard> meats,
                 const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, float flow_dt,
                 std::span<const FlowEmitter> flow_emitters,
-                std::span<const DirectX::XMFLOAT4> droplets);
+                std::span<const DirectX::XMFLOAT4> droplets,
+                std::span<const SoftMeshInstance> soft_meshes = {});
     // Draws the launch/pause menu as its own complete frame: a solid backdrop, a
     // `title`, and the vertical list of `entries` with the one at `selected` picked
     // out. Owns the swapchain buffer from clear to present, so the game loop calls
@@ -486,6 +512,14 @@ private:
                        const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction,
                        float shadow_receive);
 
+    // The same pass for meshes whose vertices arrived this frame instead of at load: each
+    // instance's stream is copied into its frame's region of the mesh's vertex buffer and
+    // then drawn run by run, with the material each run's source primitive carries. The
+    // vertices are already in world space, so the model matrix is identity -- there is no
+    // rigid transform to apply to something the simulation has bent.
+    void DrawDeformable(std::span<const SoftMeshInstance> instances,
+                        const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction);
+
     // Fills the currently bound render target with the gradient sky, seen from
     // `camera_position` through `view_projection`. Draws no depth, so geometry
     // rendered afterward paints over it. Switches to the sky pipeline and root
@@ -633,6 +667,26 @@ private:
     ComPtr<ID3D12RootSignature> bloom_root_signature_;
     ComPtr<ID3D12PipelineState> bloom_downsample_pipeline_state_;
     ComPtr<ID3D12PipelineState> bloom_upsample_pipeline_state_;
+
+    // A registered deformable mesh: fixed connectivity and material runs, plus a vertex
+    // buffer with one region per frame in flight, so a frame's copy never lands on
+    // vertices the GPU is still drawing from. Both buffers are upload-heap: the vertices
+    // because they are rewritten every frame, and the indices because they are a few tens
+    // of kilobytes written once, which is not worth a staging copy and a command list.
+    struct DeformableMesh {
+        ComPtr<ID3D12Resource> vertex_buffer;
+        std::byte* vertex_mapped = nullptr;
+        UINT region_bytes = 0;
+        D3D12_VERTEX_BUFFER_VIEW vertex_views[kFrameCount]{};
+        ComPtr<ID3D12Resource> index_buffer;
+        D3D12_INDEX_BUFFER_VIEW index_view{};
+        // Which loaded model the runs below take their materials from.
+        std::uint32_t model = 0;
+        std::vector<SoftBodyPrimitive> primitives;
+    };
+    // Registered by CreateDeformableMesh, indexed by the handle it returns, cleared with
+    // the level. A handful at most -- one per meat.
+    std::vector<DeformableMesh> deformable_meshes_;
 
     // The pick-up outline pass. Shares the scene's vertex buffers and input
     // layout; only the root signature and PSO differ.

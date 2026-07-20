@@ -819,6 +819,7 @@ void Renderer::ReleaseScene() {
     rt_instance_info_.Reset();
     rt_instance_info_mapped_ = nullptr;
     rt_prim_info_.Reset();
+    deformable_meshes_.clear();
     textures_.clear();
     atlas_texture_.Reset();
     mono_atlas_texture_.Reset();
@@ -4008,6 +4009,114 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
     }
 }
 
+UINT Renderer::CreateDeformableMesh(std::uint32_t model, std::span<const std::uint32_t> indices,
+                                    std::span<const SoftBodyPrimitive> primitives,
+                                    UINT max_vertices) {
+    DeformableMesh mesh;
+    mesh.model = model;
+    mesh.primitives.assign(primitives.begin(), primitives.end());
+
+    const CD3DX12_HEAP_PROPERTIES upload(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RANGE no_read(0, 0);
+
+    // The vertices: one region per frame in flight, mapped for the mesh's whole life. The
+    // GPU may still be drawing frame N-1 from its region while the CPU writes frame N, so
+    // they cannot share one.
+    mesh.region_bytes = max_vertices * static_cast<UINT>(sizeof(Vertex));
+    const CD3DX12_RESOURCE_DESC vertex_desc =
+        CD3DX12_RESOURCE_DESC::Buffer(static_cast<UINT64>(mesh.region_bytes) * kFrameCount);
+    ThrowIfFailed(device_->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &vertex_desc,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&mesh.vertex_buffer)),
+                  "CreateCommittedResource(deformable vertices)");
+    void* mapped = nullptr;
+    ThrowIfFailed(mesh.vertex_buffer->Map(0, &no_read, &mapped), "Deformable vertices::Map");
+    mesh.vertex_mapped = static_cast<std::byte*>(mapped);
+    for (UINT f = 0; f < kFrameCount; ++f) {
+        mesh.vertex_views[f].BufferLocation =
+            mesh.vertex_buffer->GetGPUVirtualAddress() + static_cast<UINT64>(f) * mesh.region_bytes;
+        mesh.vertex_views[f].SizeInBytes = mesh.region_bytes;
+        mesh.vertex_views[f].StrideInBytes = sizeof(Vertex);
+    }
+
+    // The indices: written once, here. Deformation moves vertices and never rewires them.
+    const UINT index_bytes = static_cast<UINT>(indices.size() * sizeof(std::uint32_t));
+    const CD3DX12_RESOURCE_DESC index_desc = CD3DX12_RESOURCE_DESC::Buffer(index_bytes);
+    ThrowIfFailed(device_->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &index_desc,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&mesh.index_buffer)),
+                  "CreateCommittedResource(deformable indices)");
+    void* index_mapped = nullptr;
+    ThrowIfFailed(mesh.index_buffer->Map(0, &no_read, &index_mapped), "Deformable indices::Map");
+    std::memcpy(index_mapped, indices.data(), index_bytes);
+    mesh.index_buffer->Unmap(0, nullptr);
+    mesh.index_view.BufferLocation = mesh.index_buffer->GetGPUVirtualAddress();
+    mesh.index_view.SizeInBytes = index_bytes;
+    mesh.index_view.Format = DXGI_FORMAT_R32_UINT;
+
+    deformable_meshes_.push_back(std::move(mesh));
+    return static_cast<UINT>(deformable_meshes_.size() - 1);
+}
+
+void Renderer::DrawDeformable(std::span<const SoftMeshInstance> instances,
+                              const XMMATRIX& view_projection, XMFLOAT3 sun_direction) {
+    if (instances.empty()) {
+        return;
+    }
+    command_list_->SetGraphicsRootConstantBufferView(1, frame_constants_address_);
+
+    for (const SoftMeshInstance& instance : instances) {
+        if (instance.mesh >= deformable_meshes_.size() || instance.vertices.empty()) {
+            continue;
+        }
+        DeformableMesh& mesh = deformable_meshes_[instance.mesh];
+        const GpuModel& model = models_[mesh.model];
+
+        // This frame's vertices into this frame's region. The one real per-frame cost of
+        // a deformable mesh on this side; everything below is an ordinary draw.
+        const UINT bytes = static_cast<UINT>(instance.vertices.size() * sizeof(Vertex));
+        std::memcpy(mesh.vertex_mapped + static_cast<size_t>(frame_index_) * mesh.region_bytes,
+                    instance.vertices.data(), std::min(bytes, mesh.region_bytes));
+
+        command_list_->IASetVertexBuffers(0, 1, &mesh.vertex_views[frame_index_]);
+        command_list_->IASetIndexBuffer(&mesh.index_view);
+
+        const XMVECTOR tint = XMLoadFloat3(&instance.tint);
+        for (const SoftBodyPrimitive& run : mesh.primitives) {
+            const DrawPrimitive& primitive = model.primitives[run.source_primitive];
+
+            Constants constants{};
+            // Already world space: the skinning blended world-space tetrahedron corners,
+            // so the model matrix is identity and the normals need no correction matrix
+            // beyond it. The primitive's own placement was baked into the vertices when
+            // the mesh was flattened for skinning, and must not be applied twice.
+            XMStoreFloat4x4(&constants.mvp, view_projection);
+            XMStoreFloat4x4(&constants.model, XMMatrixIdentity());
+            for (int row = 0; row < 3; ++row) {
+                XMStoreFloat4(&constants.normal_rows[row], XMMatrixIdentity().r[row]);
+            }
+
+            XMStoreFloat3(&constants.albedo,
+                          XMVectorMultiply(tint, XMLoadFloat3(&primitive.base_color)));
+            constants.checker = 0.0f;
+            constants.sun_direction = sun_direction;
+            constants.shadow_receive = 1.0f;
+            constants.metallic = primitive.metallic;
+            constants.roughness = primitive.roughness;
+            constants.emissive = instance.emissive;
+            constants.wetness = instance.wetness;
+            constants.base_color_index = primitive.base_color_texture;
+            constants.normal_index = primitive.normal_texture;
+            constants.metallic_roughness_index = primitive.metallic_roughness_texture;
+            constants.occlusion_index = primitive.occlusion_texture;
+            constants.shadow_index = shadow_descriptor_;
+
+            command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
+            command_list_->DrawIndexedInstanced(run.index_count, 1, run.first_index, 0, 0);
+        }
+    }
+}
+
 void Renderer::DrawShadowCasters(std::span<const MeshInstance> instances) {
     const XMMATRIX light_view_projection = XMLoadFloat4x4(&light_view_projection_);
 
@@ -4463,7 +4572,8 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
                       std::span<const OrderCard> orders, std::span<const MeatCard> meats,
                       const XMMATRIX& view, const XMMATRIX& projection, float flow_dt,
                       std::span<const FlowEmitter> flow_emitters,
-                      std::span<const XMFLOAT4> droplets) {
+                      std::span<const XMFLOAT4> droplets,
+                      std::span<const SoftMeshInstance> soft_meshes) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
@@ -4556,6 +4666,10 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // The resting props take the yard's sun too: they are part of the world, and
     // only pass into the near pass once the player lifts them.
     DrawInstances(props, view_projection, sun, 1.0f);
+    // The soft-body meats, into the same pass under the same sun: their vertices arrived
+    // deformed and in world space this frame, but from here they are ordinary geometry
+    // with the same materials, the same shadow map and the same shade as their rigid twins.
+    DrawDeformable(soft_meshes, view_projection, sun);
 
     // The grass grows over the ground, into the same HDR buffer and depth, so it
     // occludes and fogs with the world and the shafts below march through it. It binds
