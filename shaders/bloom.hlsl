@@ -14,9 +14,12 @@ cbuffer BloomConstants : register(b0) {
     float g_param0;
     // Downsample: the soft-knee width. Unused by the upsample.
     float g_param1;
+    // The slot of the source texture (the HDR buffer or a bloom mip) in the one bound
+    // heap, fetched bindlessly rather than through a table -- it changes every pass as
+    // the pyramid walks up and down.
+    uint g_source_index;
 };
 
-Texture2D<float4> g_source : register(t0);
 SamplerState g_sampler : register(s0);
 
 struct VSOutput {
@@ -38,6 +41,7 @@ VSOutput VSMain(uint id : SV_VertexID) {
 // a naive 2x2 average would leave, and the reason the bloom stays stable rather
 // than flickering as the camera moves.
 float3 Downsample(float2 uv) {
+    const Texture2D<float4> g_source = ResourceDescriptorHeap[g_source_index];
     const float2 t = g_src_texel;
     const float3 a = g_source.SampleLevel(g_sampler, uv + t * float2(-2, 2), 0).rgb;
     const float3 b = g_source.SampleLevel(g_sampler, uv + t * float2(0, 2), 0).rgb;
@@ -78,6 +82,7 @@ float4 PSDownsample(VSOutput input) : SV_TARGET {
 // The 3x3 tent filter, spread by the radius, used to grow each mip back up as it is
 // summed into the one above it.
 float3 Upsample(float2 uv) {
+    const Texture2D<float4> g_source = ResourceDescriptorHeap[g_source_index];
     const float2 t = g_src_texel * g_param0;
     const float3 a = g_source.SampleLevel(g_sampler, uv + t * float2(-1, 1), 0).rgb;
     const float3 b = g_source.SampleLevel(g_sampler, uv + t * float2(0, 1), 0).rgb;

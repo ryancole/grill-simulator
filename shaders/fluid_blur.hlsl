@@ -19,9 +19,11 @@ cbuffer FluidBlurConstants : register(b0) {
     // blended in: wide enough to merge neighbouring beads, tight enough to keep separate
     // clusters (and the silhouette against empty space) apart.
     float g_depth_threshold;
+    // The slot of the depth to smooth in the one bound heap, fetched bindlessly rather
+    // than through a table -- it ping-pongs between the two fluid depth targets.
+    uint g_depth_index;
 };
 
-Texture2D<float> g_depth : register(t0);
 SamplerState g_sampler : register(s0);
 
 // The blur half-width in taps, and the spatial falloff. A radius of eight is plenty to
@@ -43,6 +45,7 @@ VSOut VSMain(uint vertex_id : SV_VertexID) {
 }
 
 float PSMain(VSOut input) : SV_Target {
+    const Texture2D<float> g_depth = ResourceDescriptorHeap[g_depth_index];
     const float center = g_depth.SampleLevel(g_sampler, input.uv, 0);
     // Empty stays empty: no surface to smooth, and blending would drag the sentinel in.
     if (center >= g_sentinel * 0.5) {

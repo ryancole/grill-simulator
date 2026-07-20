@@ -17,7 +17,9 @@ cbuffer LightShaftConstants : register(b0) {
     // with, so a marched point projects into the map the way a receiver does.
     row_major float4x4 g_light_view_projection;
     float3 g_camera_position;
-    float g_pad0;
+    // The slot of the scene depth SRV in the one bound heap, fetched bindlessly rather
+    // than through a table. Reuses what was a pad DWORD.
+    uint g_depth_index;
     // Unit vector toward the sun, for the phase function.
     float3 g_sun_direction;
     // How strong the effect is -- part of the level's atmosphere now, alongside the
@@ -28,13 +30,12 @@ cbuffer LightShaftConstants : register(b0) {
     // sun and fade looking away.
     float3 g_shaft_color;
     float g_shaft_g;
+    // The slot of the shadow map's plain (non-comparison) SRV in the bound heap, fetched
+    // bindlessly. The march samples and compares it by hand, since it wants the raw
+    // stored depth rather than the scene's comparison filter.
+    uint g_shadow_index;
 };
 
-// The scene depth (R32 view of the typeless depth buffer) and a plain view of the
-// sun's shadow map -- sampled and compared by hand rather than through the scene's
-// comparison sampler, since a march wants the raw stored depth.
-Texture2D<float> g_depth : register(t0);
-Texture2D<float> g_shadow : register(t1);
 SamplerState g_sampler : register(s0);
 
 // How many steps each ray is marched. More steps is smoother but costlier; the
@@ -76,6 +77,10 @@ float4 PSMain(VSOutput input) : SV_TARGET {
     // carried back to world. A sky pixel reads depth 1 and rebuilds a point on the
     // far plane, so its ray marches the full distance -- which is where open shafts
     // are brightest.
+    // The scene depth and the shadow map, fetched from the bound heap by the slots the
+    // draw handed over.
+    const Texture2D<float> g_depth = ResourceDescriptorHeap[g_depth_index];
+    const Texture2D<float> g_shadow = ResourceDescriptorHeap[g_shadow_index];
     const float depth = g_depth.SampleLevel(g_sampler, input.uv, 0.0f);
     const float2 ndc = input.uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f);
     float4 world = mul(float4(ndc, depth, 1.0f), g_inv_view_projection);
