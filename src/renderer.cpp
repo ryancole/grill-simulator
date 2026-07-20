@@ -819,7 +819,8 @@ void Renderer::ReleaseScene() {
     rt_instance_info_.Reset();
     rt_instance_info_mapped_ = nullptr;
     rt_prim_info_.Reset();
-    deformable_meshes_.clear();
+    rt_next_slot_ = 0;
+    deformable_meshes_.clear();  // frees each mesh's BLAS along with its buffers
     textures_.clear();
     atlas_texture_.Reset();
     mono_atlas_texture_.Reset();
@@ -2724,6 +2725,35 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     FlushGpu();
 }
 
+void Renderer::CreatePrimInfoSrv(UINT count) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srv.Format = DXGI_FORMAT_UNKNOWN;
+    srv.Buffer.NumElements = count;
+    srv.Buffer.StructureByteStride = sizeof(RtPrimInfo);
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE h(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                          static_cast<INT>(rt_prim_info_descriptor_),
+                                          engine_heap_size_);
+    device_->CreateShaderResourceView(rt_prim_info_.Get(), &srv, h);
+}
+
+UINT Renderer::CreateRawBufferSrv(ID3D12Resource* buffer, UINT first_byte, UINT bytes) {
+    const UINT slot = rt_next_slot_++;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srv.Format = DXGI_FORMAT_R32_TYPELESS;
+    // A raw view counts in 4-byte words, not bytes.
+    srv.Buffer.FirstElement = first_byte / 4;
+    srv.Buffer.NumElements = bytes / 4;
+    srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE h(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                          static_cast<INT>(slot), engine_heap_size_);
+    device_->CreateShaderResourceView(buffer, &srv, h);
+    return slot;
+}
+
 ComPtr<ID3D12Resource> Renderer::CreateAsBuffer(UINT64 bytes, bool result) {
     const CD3DX12_HEAP_PROPERTIES default_heap(D3D12_HEAP_TYPE_DEFAULT);
     // Created the legacy way, not through CreateCommittedResource3: a finished AS must be
@@ -2776,20 +2806,10 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
     // views: collect, per model, the heap slots of its vertex and index buffers (as
     // byte-address SRVs) and the base of its primitives in the flat RtPrimInfo array. Slots
     // are handed out past the shadow map, the last thing CreateSceneGeometry placed.
-    UINT next_slot = shadow_descriptor_ + 1;
+    rt_next_slot_ = shadow_descriptor_ + 1;
     std::vector<RtPrimInfo> prim_infos;
     auto raw_srv = [&](ID3D12Resource* buffer, UINT bytes) -> UINT {
-        const UINT slot = next_slot++;
-        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        srv.Format = DXGI_FORMAT_R32_TYPELESS;
-        srv.Buffer.NumElements = bytes / 4;
-        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-        const CD3DX12_CPU_DESCRIPTOR_HANDLE h(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
-                                              static_cast<INT>(slot), engine_heap_size_);
-        device_->CreateShaderResourceView(buffer, &srv, h);
-        return slot;
+        return CreateRawBufferSrv(buffer, 0, bytes);
     };
 
     // --- One bottom-level AS per model, a geometry per primitive so each bakes in its
@@ -2896,28 +2916,21 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
     }
 
     // --- The reflection info the hit shader reads, and the TLAS the rays trace. PrimInfo
-    // is per model-primitive and static, uploaded once here. The TLAS and the per-instance
-    // info are rebuilt every frame by UpdateTopLevelAS (the props move), so here we only
-    // create the buffers they reuse -- sized for the yard plus a generous prop allowance. ---
+    // covers the models' primitives; FinalizeRaytracingGeometry rebuilds it later with the
+    // deformable meshes' runs appended, once those are registered. The TLAS and the
+    // per-instance info are rebuilt every frame by UpdateTopLevelAS (the props move), so
+    // here we only create the buffers they reuse -- sized for the yard plus a generous
+    // prop allowance. ---
     const std::span<const MeshInstance> instances = scene.Instances();
     rt_max_instances_ = static_cast<UINT>(instances.size()) + kMaxDynamicInstances;
 
-    // PrimInfo: static, staged into video memory, one structured-buffer SRV.
+    // PrimInfo: staged into video memory, one structured-buffer SRV. Its slot is taken now
+    // and kept, so the rebuild can drop a new view into the same slot without every frame
+    // constant that names it having to change.
     rt_prim_info_ = UploadBuffer(prim_infos.data(), prim_infos.size() * sizeof(RtPrimInfo),
                                  D3D12_BARRIER_ACCESS_SHADER_RESOURCE, keepalive);
-    {
-        const UINT slot = next_slot++;
-        D3D12_SHADER_RESOURCE_VIEW_DESC info_srv{};
-        info_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        info_srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        info_srv.Format = DXGI_FORMAT_UNKNOWN;
-        info_srv.Buffer.NumElements = static_cast<UINT>(prim_infos.size());
-        info_srv.Buffer.StructureByteStride = sizeof(RtPrimInfo);
-        const CD3DX12_CPU_DESCRIPTOR_HANDLE h(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
-                                              static_cast<INT>(slot), engine_heap_size_);
-        device_->CreateShaderResourceView(rt_prim_info_.Get(), &info_srv, h);
-        rt_prim_info_descriptor_ = slot;
-    }
+    rt_prim_info_descriptor_ = rt_next_slot_++;
+    CreatePrimInfoSrv(static_cast<UINT>(prim_infos.size()));
 
     // The TLAS result + scratch, sized for the maximum instance count, rebuilt in place each
     // frame. A single result buffer is safe: the queue serializes command lists, so a
@@ -2975,7 +2988,7 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
     ThrowIfFailed(rt_instance_info_->Map(0, &no_read, &info_mapped), "instance info Map");
     rt_instance_info_mapped_ = static_cast<std::byte*>(info_mapped);
     for (UINT f = 0; f < kFrameCount; ++f) {
-        const UINT slot = next_slot++;
+        const UINT slot = rt_next_slot_++;
         D3D12_SHADER_RESOURCE_VIEW_DESC info_srv{};
         info_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         info_srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -2995,7 +3008,8 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
     FlushGpu();
 }
 
-void Renderer::UpdateTopLevelAS(const Scene& scene, std::span<const MeshInstance> props) {
+void Renderer::UpdateTopLevelAS(const Scene& scene, std::span<const MeshInstance> props,
+                                std::span<const SoftMeshInstance> soft_meshes) {
     const std::span<const MeshInstance> yard = scene.Instances();
 
     // This frame's own instance-descs and hit-info regions, so the rebuild does not race the
@@ -3032,6 +3046,35 @@ void Renderer::UpdateTopLevelAS(const Scene& scene, std::span<const MeshInstance
     }
     for (const MeshInstance& inst : props) {
         add(inst);
+    }
+
+    // The deforming meats, over the BLASes RefitDeformableAccelerationStructures just wrote
+    // from this frame's vertices. Their transform is identity -- skinning hands back world
+    // space -- and their geometry is the mesh's own, not its source model's, so the hit info
+    // names this frame's vertex region rather than anything on the GpuModel.
+    for (const SoftMeshInstance& instance : soft_meshes) {
+        if (instance.mesh >= deformable_meshes_.size() || instance.vertices.empty() ||
+            n >= rt_max_instances_) {
+            continue;
+        }
+        const DeformableMesh& mesh = deformable_meshes_[instance.mesh];
+        if (mesh.blas == nullptr) {
+            continue;
+        }
+        XMFLOAT4X4 identity{};
+        XMStoreFloat4x4(&identity, XMMatrixIdentity());
+        D3D12_RAYTRACING_INSTANCE_DESC& d = descs[n];
+        d = {};
+        ToRaytracingTransform(identity, &d.Transform[0][0]);
+        d.InstanceMask = 0xFF;
+        d.AccelerationStructure = mesh.blas->GetGPUVirtualAddress();
+        RtInstanceInfo& ii = infos[n];
+        ii = {};
+        ii.vb_srv = mesh.vertex_srv[frame_index_];
+        ii.ib_srv = mesh.ib_srv;
+        ii.prim_base = mesh.prim_base;
+        ii.tint = instance.tint;
+        ++n;
     }
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
@@ -4054,8 +4097,71 @@ UINT Renderer::CreateDeformableMesh(std::uint32_t model, std::span<const std::ui
     mesh.index_view.SizeInBytes = index_bytes;
     mesh.index_view.Format = DXGI_FORMAT_R32_UINT;
 
+    // The same two buffers again, as raw views for the reflection hit shader to fetch
+    // triangles through. The vertices get one view per frame region, because the ray that
+    // reads them is traced against the BLAS refit from that same region -- point a hit at
+    // the wrong region and it shades this frame's triangle with last frame's positions.
+    for (UINT f = 0; f < kFrameCount; ++f) {
+        mesh.vertex_srv[f] =
+            CreateRawBufferSrv(mesh.vertex_buffer.Get(), f * mesh.region_bytes, mesh.region_bytes);
+    }
+    mesh.ib_srv = CreateRawBufferSrv(mesh.index_buffer.Get(), 0, index_bytes);
+
     deformable_meshes_.push_back(std::move(mesh));
     return static_cast<UINT>(deformable_meshes_.size() - 1);
+}
+
+void Renderer::FinalizeRaytracingGeometry() {
+    if (deformable_meshes_.empty()) {
+        return;
+    }
+
+    // The whole array again, models first in exactly the order BuildAccelerationStructures
+    // walked them -- so every GpuModel::prim_base still points where it did -- and then a
+    // run per deformable primitive. Rebuilding beats appending: the buffer is small, it is
+    // built once per level, and one construction path cannot drift from the other.
+    // The material always comes from a model primitive; only where the run's triangles
+    // begin differs between the two passes below.
+    auto entry = [](const DrawPrimitive& primitive, UINT first_index) {
+        RtPrimInfo info{};
+        info.first_index = first_index;
+        info.base_color_index = primitive.base_color_texture;
+        info.base_color = primitive.base_color;
+        return info;
+    };
+    std::vector<RtPrimInfo> prim_infos;
+    for (const GpuModel& model : models_) {
+        for (const DrawPrimitive& prim : model.primitives) {
+            prim_infos.push_back(entry(prim, prim.first_index));
+        }
+    }
+    for (DeformableMesh& mesh : deformable_meshes_) {
+        mesh.prim_base = static_cast<UINT>(prim_infos.size());
+        const GpuModel& model = models_[mesh.model];
+        for (const SoftBodyPrimitive& run : mesh.primitives) {
+            // The material is the source model primitive's; the offset is the run's own,
+            // into the flattened buffer. That mismatch is what this whole function exists
+            // to express.
+            prim_infos.push_back(entry(model.primitives[run.source_primitive], run.first_index));
+        }
+    }
+
+    // Staged into video memory on a one-shot command list, like the original upload. The
+    // old buffer is released once the flush retires the frames that could still be reading
+    // it -- which is none, since this runs at level load before any frame is drawn.
+    ThrowIfFailed(allocators_[frame_index_]->Reset(), "CommandAllocator::Reset");
+    ThrowIfFailed(command_list_->Reset(allocators_[frame_index_].Get(), nullptr),
+                  "CommandList::Reset");
+    std::vector<ComPtr<ID3D12Resource>> keepalive;
+    rt_prim_info_ = UploadBuffer(prim_infos.data(), prim_infos.size() * sizeof(RtPrimInfo),
+                                 D3D12_BARRIER_ACCESS_SHADER_RESOURCE, keepalive);
+    ThrowIfFailed(command_list_->Close(), "CommandList::Close");
+    ID3D12CommandList* lists[] = {command_list_.Get()};
+    queue_->ExecuteCommandLists(_countof(lists), lists);
+    FlushGpu();
+
+    // Back into the slot the frame constants already name.
+    CreatePrimInfoSrv(static_cast<UINT>(prim_infos.size()));
 }
 
 void Renderer::UploadDeformableMeshes(std::span<const SoftMeshInstance> instances) {
@@ -4071,6 +4177,81 @@ void Renderer::UploadDeformableMeshes(std::span<const SoftMeshInstance> instance
         const UINT bytes = static_cast<UINT>(instance.vertices.size() * sizeof(Vertex));
         std::memcpy(mesh.vertex_mapped + static_cast<size_t>(frame_index_) * mesh.region_bytes,
                     instance.vertices.data(), std::min(bytes, mesh.region_bytes));
+    }
+}
+
+void Renderer::RefitDeformableAccelerationStructures(std::span<const SoftMeshInstance> instances) {
+    for (const SoftMeshInstance& instance : instances) {
+        if (instance.mesh >= deformable_meshes_.size() || instance.vertices.empty()) {
+            continue;
+        }
+        DeformableMesh& mesh = deformable_meshes_[instance.mesh];
+
+        // One geometry per material run, over this frame's vertex region. No Transform3x4:
+        // skinning already carried the primitive's placement into the vertices, so unlike a
+        // model's BLAS there is nothing left to bake in.
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries(mesh.primitives.size());
+        const D3D12_GPU_VIRTUAL_ADDRESS vertices =
+            mesh.vertex_buffer->GetGPUVirtualAddress() +
+            static_cast<UINT64>(frame_index_) * mesh.region_bytes;
+        for (size_t p = 0; p < mesh.primitives.size(); ++p) {
+            const SoftBodyPrimitive& run = mesh.primitives[p];
+            D3D12_RAYTRACING_GEOMETRY_DESC& geo = geometries[p];
+            geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            geo.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+            geo.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+            geo.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            geo.Triangles.IndexCount = run.index_count;
+            geo.Triangles.IndexBuffer = mesh.index_buffer->GetGPUVirtualAddress() +
+                                        static_cast<UINT64>(run.first_index) * sizeof(std::uint32_t);
+            // The mesh's own vertex count, not the region's capacity. It is fixed for the
+            // body's life, which a refit requires -- an update may move vertices but may
+            // not change how many there are.
+            geo.Triangles.VertexCount = static_cast<UINT>(instance.vertices.size());
+            geo.Triangles.VertexBuffer.StartAddress = vertices;
+            geo.Triangles.VertexBuffer.StrideInBytes = sizeof(Vertex);
+        }
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        // FAST_BUILD, not FAST_TRACE: this is rebuilt every frame and traced only by
+        // reflection rays, so build time is the cost that recurs and trace time the one
+        // that barely shows.
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE |
+                       D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = static_cast<UINT>(geometries.size());
+        inputs.pGeometryDescs = geometries.data();
+
+        // First frame: size and allocate. The scratch has to hold whichever of the two
+        // builds wants more, since the same buffer serves the full build and every refit.
+        if (mesh.blas == nullptr) {
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+            device_->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+            mesh.blas = CreateAsBuffer(info.ResultDataMaxSizeInBytes, /*result=*/true);
+            mesh.blas_scratch = CreateAsBuffer(
+                std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes), false);
+        }
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};
+        build.Inputs = inputs;
+        build.DestAccelerationStructureData = mesh.blas->GetGPUVirtualAddress();
+        build.ScratchAccelerationStructureData = mesh.blas_scratch->GetGPUVirtualAddress();
+        if (mesh.blas_built) {
+            // Refit in place: same topology, moved vertices. Source and destination are the
+            // one buffer, which DXR allows and which keeps the memory flat frame to frame.
+            build.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+            build.SourceAccelerationStructureData = mesh.blas->GetGPUVirtualAddress();
+        }
+        command_list_->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
+        mesh.blas_built = true;
+
+        // The TLAS build that follows reads this BLAS, so the write has to land first.
+        BufferBarrier(command_list_.Get(), mesh.blas.Get(),
+                      D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                      D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
+                      D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                      D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ);
     }
 }
 
@@ -4641,15 +4822,17 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     ID3D12DescriptorHeap* heaps[] = {engine_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
 
-    // Rebuild the top-level AS this frame from the yard plus the loose props, so the
-    // reflection rays trace them where they actually are now (carried, toppled, browning).
-    // Before the scene pass, which is the only thing that reads it.
     // Every deforming mesh's vertices for this frame, before anything reads them: the
-    // shadow map, the scene pass and (soon) the acceleration structures all draw from
-    // the same copy.
+    // shadow map, the scene pass and the acceleration structures below all draw from the
+    // same copy.
     UploadDeformableMeshes(soft_meshes);
 
-    UpdateTopLevelAS(scene, props);
+    // Then the acceleration structures the reflection rays trace, bottom-level first: each
+    // meat's own BLAS refit from the vertices just landed, then the top-level AS over the
+    // yard, the loose props and those meats -- so everything reflects where it actually is
+    // now (carried, toppled, browning, squashed). Before the scene pass, the only reader.
+    RefitDeformableAccelerationStructures(soft_meshes);
+    UpdateTopLevelAS(scene, props, soft_meshes);
 
     command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 

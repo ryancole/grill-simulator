@@ -59,6 +59,9 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
     // The meats' deformable meshes name primitives of the models just uploaded, so they
     // are registered only now, once the renderer has them.
     props_.RegisterSoftMeshes(renderer);
+    // And only now can the raytracing geometry be closed out: those meshes carry index
+    // buffers of their own, which the reflection hit shader needs entries for.
+    renderer.FinalizeRaytracingGeometry();
     physics.AddStaticWorld(scene_.Colliders());
 
     // Build the turn-in zone from the level's `turn_in`, if it set one. A static column
