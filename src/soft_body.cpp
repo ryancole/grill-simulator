@@ -56,6 +56,12 @@ constexpr PxU32 kSolverIterations = 30;
 // hundred is enough to carry the shape of a squashing patty.
 constexpr int kSimTargetTriangles = 400;
 
+// The fewest triangles worth handing to the tetrahedral cooker. Below this there is not
+// enough surface to enclose a volume, and the cooker's response to that is an assertion
+// rather than an error return -- so this floor is what keeps a lean model from taking
+// the process down.
+constexpr size_t kMinSimTriangles = 64;
+
 // How many voxels the simulation mesh spans along the model's longest axis. This sets
 // how finely the body can bend: too few and a patty squashes as one rigid-ish lump, too
 // many and the step cost climbs for detail the eye will not read on something this
@@ -229,15 +235,41 @@ SoftBody::SoftBody(Physics& physics, const Model& model, const XMFLOAT4X4& pose,
 
     PxArray<PxVec3> points;
     PxArray<PxU32> indices;
-    PxTetMaker::simplifyTriangleMesh(dense_points, dense_indices, kSimTargetTriangles,
-                                     /*maximalEdgeLength=*/0.0f, points, indices,
-                                     /*vertexMap=*/nullptr, /*edgeLengthCostWeight=*/0.1f,
-                                     /*flatnessDetectionThreshold=*/0.01f,
-                                     /*projectSimplifiedPointsOnInputMeshSurface=*/false,
-                                     /*outputVertexToInputTriangle=*/nullptr,
-                                     /*removeDisconnectedPatches=*/true);
-    if (points.size() < 4 || indices.size() < 12) {
-        status_ = "decimated away to nothing";
+    if (soup.indices.size() / 3 <= static_cast<size_t>(kSimTargetTriangles)) {
+        // Already lean enough. Worth checking rather than simplifying unconditionally,
+        // because the simplifier does not stop at the target it is given (see below) and
+        // running it on a mesh that is already small enough is how a usable surface
+        // becomes an unusable one.
+        points = std::move(dense_points);
+        indices = std::move(dense_indices);
+    } else {
+        // The target below is a request, not a promise: this simplifier collapses well
+        // past it. Asked for 400 triangles it returned 153 from a 19,628-triangle burger
+        // and 24 from a 2,000-triangle one -- about one percent either way, regardless of
+        // what was asked. The reason is that its flatness heuristic works in absolute
+        // units while a meat is three centimetres across, so at the default threshold the
+        // entire model reads as flat and collapses. Handing it a large threshold turns
+        // that heuristic off (the SDK documents a large value as having no effect), which
+        // is what makes the target mean something.
+        PxTetMaker::simplifyTriangleMesh(dense_points, dense_indices, kSimTargetTriangles,
+                                         /*maximalEdgeLength=*/0.0f, points, indices,
+                                         /*vertexMap=*/nullptr, /*edgeLengthCostWeight=*/0.1f,
+                                         /*flatnessDetectionThreshold=*/1e30f,
+                                         /*projectSimplifiedPointsOnInputMeshSurface=*/false,
+                                         /*outputVertexToInputTriangle=*/nullptr,
+                                         /*removeDisconnectedPatches=*/true);
+    }
+
+    // Too little surface left to fill with tetrahedra. The cooker does not report this,
+    // it asserts and takes the process down, so the floor is enforced here. Falling back
+    // to the undecimated soup is better than refusing: a model small enough to collapse
+    // this far is small enough to simulate whole.
+    if (indices.size() / 3 < kMinSimTriangles) {
+        points = std::move(dense_points);
+        indices = std::move(dense_indices);
+    }
+    if (points.size() < 4 || indices.size() / 3 < kMinSimTriangles) {
+        status_ = "too little geometry to simulate";
         return;
     }
 
