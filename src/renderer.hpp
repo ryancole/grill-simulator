@@ -237,6 +237,14 @@ private:
         D3D12_INDEX_BUFFER_VIEW index_buffer_view{};
         std::vector<DrawPrimitive> primitives;
         ComPtr<ID3D12Resource> blas;
+        // Where this model's geometry and primitives live for the reflection hit shader:
+        // the byte-address SRV slots of its vertex and index buffers, and the base of its
+        // primitives in the RtPrimInfo array. Filled by BuildAccelerationStructures; used
+        // each frame by UpdateTopLevelAS to build a hit-info entry for every instance of
+        // this model, static or moving.
+        UINT vb_srv = 0;
+        UINT ib_srv = 0;
+        UINT prim_base = 0;
     };
 
     void CreateDevice();
@@ -339,6 +347,13 @@ private:
     // bindlessly to trace reflection rays. Static for now -- rebuilt whole on a level
     // swap; moving props are not yet in the TLAS.
     void BuildAccelerationStructures(const Scene& scene);
+    // Rebuilds the top-level AS for this frame: fills the current instance-descs region
+    // with the yard's static instances plus the loose `props` (each pointing at its model's
+    // BLAS with its world transform), fills the matching per-instance hit-info region, and
+    // builds the TLAS on the render command list before the scene pass reads it. Called at
+    // the top of Render, so carried and toppled props -- and the browning meat, whose tint
+    // rides along -- reflect where they actually are this frame.
+    void UpdateTopLevelAS(const Scene& scene, std::span<const MeshInstance> props);
     // Creates a default-heap buffer sized for an acceleration structure or its build
     // scratch (both need ALLOW_UNORDERED_ACCESS). Born layout-less like every other
     // buffer; the build is its first access.
@@ -735,14 +750,27 @@ private:
     // and the shader-visible SRV slot the scene pixel shader reads it from to trace
     // reflection rays. Rebuilt per level by BuildAccelerationStructures; the per-model
     // BLASes it references live on the GpuModels.
+    // The top-level AS the reflection rays trace, rebuilt in place every frame by
+    // UpdateTopLevelAS from the static yard plus the moving props. tlas_scratch_ is its
+    // build scratch, tlas_instances_ the per-frame-in-flight instance descs it is built
+    // from (kept mapped, one region per frame). A single result buffer is safe because the
+    // queue serializes frames. rt_max_instances_ caps how many instances one frame may hold.
     ComPtr<ID3D12Resource> tlas_;
+    ComPtr<ID3D12Resource> tlas_scratch_;
+    ComPtr<ID3D12Resource> tlas_instances_;
+    std::byte* tlas_instances_mapped_ = nullptr;
+    UINT tlas_instances_stride_ = 0;
     UINT tlas_descriptor_ = 0;
-    // The two structured buffers the reflection hit shader reads to shade what a ray
-    // hits: per-instance geometry+tint info and per-primitive index-range+colour info,
-    // with their shader-visible SRV slots. Built alongside the TLAS, freed on a swap.
+    UINT rt_max_instances_ = 0;
+    // The two structured buffers the reflection hit shader reads to shade what a ray hits:
+    // per-instance geometry+tint info (rebuilt every frame with the props, so it is a
+    // mapped per-frame-in-flight upload buffer with one SRV slot each) and the static
+    // per-primitive index-range+colour info. Freed on a level swap.
     ComPtr<ID3D12Resource> rt_instance_info_;
+    std::byte* rt_instance_info_mapped_ = nullptr;
+    UINT rt_instance_info_stride_ = 0;
+    UINT rt_instance_info_descriptor_[kFrameCount]{};
     ComPtr<ID3D12Resource> rt_prim_info_;
-    UINT rt_instance_info_descriptor_ = 0;
     UINT rt_prim_info_descriptor_ = 0;
 
     ComPtr<ID3D12Fence> fence_;

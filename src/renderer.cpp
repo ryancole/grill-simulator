@@ -63,6 +63,10 @@ constexpr UINT kFluidDepthBlurSrvIndex = kFluidDepthSrvIndex + 2;               
 // by each BuildAccelerationStructures -- the scene pixel shader reads this slot to trace
 // its reflection rays.
 constexpr UINT kTlasSrvIndex = kFluidDepthBlurSrvIndex + 1;                       // 12
+// How many moving props (on top of the level's static instances) one frame's TLAS may
+// hold. The per-frame instance and info buffers are sized for the yard plus this; a level
+// with more loose objects than this would need it raised.
+constexpr UINT kMaxDynamicInstances = 256;
 // The depth gap (metres) a blur tap may cross before it is rejected as a different cluster:
 // a few droplet radii, wide enough to merge a tight stream, tight enough to keep the
 // silhouette. Shared with fluid_blur.hlsl's g_depth_threshold.
@@ -734,6 +738,18 @@ void BufferBarrier(ID3D12GraphicsCommandList7* command_list, ID3D12Resource* res
     command_list->Barrier(1, &group);
 }
 
+// A DirectXMath transform (row-vector convention, translation in the last row) written
+// as the 3x4 matrix a raytracing instance or geometry wants (column-translation): the
+// transpose's top three rows. Shared by the load-time BLAS build and the per-frame TLAS
+// update.
+void ToRaytracingTransform(const XMFLOAT4X4& src, float out[12]) {
+    XMFLOAT4X4 t;
+    XMStoreFloat4x4(&t, XMMatrixTranspose(XMLoadFloat4x4(&src)));
+    const float rows[12] = {t._11, t._12, t._13, t._14, t._21, t._22,
+                            t._23, t._24, t._31, t._32, t._33, t._34};
+    std::memcpy(out, rows, sizeof(rows));
+}
+
 } // namespace
 
 void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
@@ -810,7 +826,11 @@ void Renderer::ReleaseScene() {
     // here; the shadow map resource, created once in CreateShadowMap, is left standing.
     models_.clear();  // frees each GpuModel's BLAS along with its buffers
     tlas_.Reset();
+    tlas_scratch_.Reset();
+    tlas_instances_.Reset();
+    tlas_instances_mapped_ = nullptr;
     rt_instance_info_.Reset();
+    rt_instance_info_mapped_ = nullptr;
     rt_prim_info_.Reset();
     textures_.clear();
     atlas_texture_.Reset();
@@ -2591,8 +2611,12 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
     // longer get a heap of their own: they are written into the per-level region of the
     // one persistent heap (from kMaterialHeapBase), created at startup. Fail loudly if a
     // level would overrun that region rather than silently scribbling past it.
-    const UINT material_descriptors =
-        2 + image_count + 2 + 1 + 1 + 2 * static_cast<UINT>(models.size()) + 2;
+    // ... then, past the probe, BuildAccelerationStructures adds two byte-address SRVs per
+    // model (its vertex + index buffers), one for the static PrimInfo, and one per frame in
+    // flight for the per-frame InstanceInfo. (The TLAS SRV sits in the engine block, not
+    // here.)
+    const UINT material_descriptors = 2 + image_count + 2 + 1 + 1 +
+                                      2 * static_cast<UINT>(models.size()) + 1 + kFrameCount;
     if (material_descriptors > kMaterialHeapCapacity) {
         throw std::runtime_error(
             "Level needs more material descriptors than the SRV heap reserves");
@@ -2956,24 +2980,11 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
         return buffer;
     };
 
-    // A DirectXMath (row-vector, translation in the last row) transform, written as the
-    // 3x4 (column-translation) matrix DXR wants: the transpose's top three rows.
-    auto to3x4 = [](const XMFLOAT4X4& src, float out[12]) {
-        XMFLOAT4X4 t;
-        XMStoreFloat4x4(&t, XMMatrixTranspose(XMLoadFloat4x4(&src)));
-        const float rows[12] = {t._11, t._12, t._13, t._14, t._21, t._22,
-                                t._23, t._24, t._31, t._32, t._33, t._34};
-        std::memcpy(out, rows, sizeof(rows));
-    };
-
     // Reflection hit shading reaches the hit model's geometry and material through bindless
     // views: collect, per model, the heap slots of its vertex and index buffers (as
     // byte-address SRVs) and the base of its primitives in the flat RtPrimInfo array. Slots
     // are handed out past the reflection probe, the last thing CreateSceneGeometry placed.
     UINT next_slot = probe_descriptor_ + 1;
-    std::vector<UINT> model_vb_srv(models_.size());
-    std::vector<UINT> model_ib_srv(models_.size());
-    std::vector<UINT> model_prim_base(models_.size());
     std::vector<RtPrimInfo> prim_infos;
     auto raw_srv = [&](ID3D12Resource* buffer, UINT bytes) -> UINT {
         const UINT slot = next_slot++;
@@ -2997,20 +3008,21 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
             model.vertex_buffer_view.SizeInBytes / model.vertex_buffer_view.StrideInBytes;
 
         // This model's primitives, flattened into the shared RtPrimInfo array, plus its
-        // vertex/index byte-address SRVs the hit shader fetches triangles from.
-        model_prim_base[m] = static_cast<UINT>(prim_infos.size());
+        // vertex/index byte-address SRVs the hit shader fetches triangles from. Stored on
+        // the model so UpdateTopLevelAS can build a hit-info entry for every instance of it.
+        model.prim_base = static_cast<UINT>(prim_infos.size());
         for (const DrawPrimitive& prim : model.primitives) {
             RtPrimInfo pi{};
             pi.first_index = prim.first_index;
             pi.base_color = prim.base_color;
             prim_infos.push_back(pi);
         }
-        model_vb_srv[m] = raw_srv(model.vertex_buffer.Get(), model.vertex_buffer_view.SizeInBytes);
-        model_ib_srv[m] = raw_srv(model.index_buffer.Get(), model.index_buffer_view.SizeInBytes);
+        model.vb_srv = raw_srv(model.vertex_buffer.Get(), model.vertex_buffer_view.SizeInBytes);
+        model.ib_srv = raw_srv(model.index_buffer.Get(), model.index_buffer_view.SizeInBytes);
 
         std::vector<float> transforms(model.primitives.size() * 12);
         for (size_t p = 0; p < model.primitives.size(); ++p) {
-            to3x4(model.primitives[p].transform, &transforms[p * 12]);
+            ToRaytracingTransform(model.primitives[p].transform, &transforms[p * 12]);
         }
         ComPtr<ID3D12Resource> transform_buffer =
             make_upload(transforms.data(), transforms.size() * sizeof(float));
@@ -3090,109 +3102,169 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
                       D3D12_BARRIER_ACCESS_INDEX_BUFFER | D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
     }
 
-    // --- One top-level AS over the yard's static instances, each pointing at its model's
-    // BLAS with its world transform. Dynamic props are not in here yet. ---
+    // --- The reflection info the hit shader reads, and the TLAS the rays trace. PrimInfo
+    // is per model-primitive and static, uploaded once here. The TLAS and the per-instance
+    // info are rebuilt every frame by UpdateTopLevelAS (the props move), so here we only
+    // create the buffers they reuse -- sized for the yard plus a generous prop allowance. ---
     const std::span<const MeshInstance> instances = scene.Instances();
-    std::vector<D3D12_RAYTRACING_INSTANCE_DESC> instance_descs(instances.size());
-    for (size_t i = 0; i < instances.size(); ++i) {
-        D3D12_RAYTRACING_INSTANCE_DESC& d = instance_descs[i];
-        float rows[12];
-        to3x4(instances[i].transform, rows);
-        std::memcpy(d.Transform, rows, sizeof(rows));
-        d.InstanceID = 0;
-        d.InstanceMask = 0xFF;
-        d.InstanceContributionToHitGroupIndex = 0;
-        d.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
-        d.AccelerationStructure = models_[instances[i].model].blas->GetGPUVirtualAddress();
-    }
-    ComPtr<ID3D12Resource> instance_buffer = make_upload(
-        instance_descs.data(), instance_descs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
-    keepalive.push_back(instance_buffer);
+    rt_max_instances_ = static_cast<UINT>(instances.size()) + kMaxDynamicInstances;
 
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tlas_inputs{};
-    tlas_inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-    tlas_inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-    tlas_inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    tlas_inputs.NumDescs = static_cast<UINT>(instance_descs.size());
-    tlas_inputs.InstanceDescs = instance_buffer->GetGPUVirtualAddress();
-
-    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO tlas_info{};
-    device_->GetRaytracingAccelerationStructurePrebuildInfo(&tlas_inputs, &tlas_info);
-    tlas_ = CreateAsBuffer(tlas_info.ResultDataMaxSizeInBytes, /*result=*/true);
-    ComPtr<ID3D12Resource> tlas_scratch = CreateAsBuffer(tlas_info.ScratchDataSizeInBytes, false);
-    keepalive.push_back(tlas_scratch);
-
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC tlas_build{};
-    tlas_build.Inputs = tlas_inputs;
-    tlas_build.DestAccelerationStructureData = tlas_->GetGPUVirtualAddress();
-    tlas_build.ScratchAccelerationStructureData = tlas_scratch->GetGPUVirtualAddress();
-    command_list_->BuildRaytracingAccelerationStructure(&tlas_build, 0, nullptr);
-
-    // The scene pixel shader traces the TLAS, so its build must complete before any frame
-    // reads it. This one barrier makes the write visible; the static TLAS is only read
-    // thereafter, so no further barrier is needed per frame. AS-read access is not
-    // compatible with the pixel-shading sync scope, so the availability is scoped to ALL
-    // -- fine for a one-time load-time barrier.
-    BufferBarrier(command_list_.Get(), tlas_.Get(),
-                  D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
-                  D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
-                  D3D12_BARRIER_SYNC_ALL,
-                  D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ);
-
-    // The TLAS's shader-visible SRV, at its fixed engine-block slot. An acceleration-
-    // structure SRV names the resource only by GPU address in the desc, so the resource
-    // pointer passed to CreateShaderResourceView is null.
-    tlas_descriptor_ = kTlasSrvIndex;
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
-    srv.Format = DXGI_FORMAT_UNKNOWN;
-    srv.RaytracingAccelerationStructure.Location = tlas_->GetGPUVirtualAddress();
-    const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
-                                               static_cast<INT>(tlas_descriptor_), engine_heap_size_);
-    device_->CreateShaderResourceView(nullptr, &srv, handle);
-
-    // The per-instance info the reflection hit shader looks up by hit instance index: the
-    // hit model's vertex/index SRV slots, the base of its primitives, and the instance's
-    // colour tint.
-    std::vector<RtInstanceInfo> instance_infos(instances.size());
-    for (size_t i = 0; i < instances.size(); ++i) {
-        RtInstanceInfo& ii = instance_infos[i];
-        ii.vb_srv = model_vb_srv[instances[i].model];
-        ii.ib_srv = model_ib_srv[instances[i].model];
-        ii.prim_base = model_prim_base[instances[i].model];
-        ii.tint = instances[i].tint;
-    }
-    // Both info buffers live in video memory, read every frame by the reflection shader, so
-    // they are staged into the default heap (the copy rides this command list). Their SRVs
-    // are structured-buffer views past the vertex/index SRVs above.
-    rt_instance_info_ =
-        UploadBuffer(instance_infos.data(), instance_infos.size() * sizeof(RtInstanceInfo),
-                     D3D12_BARRIER_ACCESS_SHADER_RESOURCE, keepalive);
+    // PrimInfo: static, staged into video memory, one structured-buffer SRV.
     rt_prim_info_ = UploadBuffer(prim_infos.data(), prim_infos.size() * sizeof(RtPrimInfo),
                                  D3D12_BARRIER_ACCESS_SHADER_RESOURCE, keepalive);
-    auto structured_srv = [&](ID3D12Resource* buffer, UINT count, UINT stride) -> UINT {
+    {
         const UINT slot = next_slot++;
         D3D12_SHADER_RESOURCE_VIEW_DESC info_srv{};
         info_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         info_srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
         info_srv.Format = DXGI_FORMAT_UNKNOWN;
-        info_srv.Buffer.NumElements = count;
-        info_srv.Buffer.StructureByteStride = stride;
+        info_srv.Buffer.NumElements = static_cast<UINT>(prim_infos.size());
+        info_srv.Buffer.StructureByteStride = sizeof(RtPrimInfo);
         const CD3DX12_CPU_DESCRIPTOR_HANDLE h(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
                                               static_cast<INT>(slot), engine_heap_size_);
-        device_->CreateShaderResourceView(buffer, &info_srv, h);
-        return slot;
-    };
-    rt_instance_info_descriptor_ = structured_srv(
-        rt_instance_info_.Get(), static_cast<UINT>(instance_infos.size()), sizeof(RtInstanceInfo));
-    rt_prim_info_descriptor_ = structured_srv(rt_prim_info_.Get(),
-                                              static_cast<UINT>(prim_infos.size()), sizeof(RtPrimInfo));
+        device_->CreateShaderResourceView(rt_prim_info_.Get(), &info_srv, h);
+        rt_prim_info_descriptor_ = slot;
+    }
+
+    // The TLAS result + scratch, sized for the maximum instance count, rebuilt in place each
+    // frame. A single result buffer is safe: the queue serializes command lists, so a
+    // frame's TLAS reads finish before the next frame's rebuild begins.
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tlas_inputs{};
+    tlas_inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    tlas_inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    tlas_inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    tlas_inputs.NumDescs = rt_max_instances_;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO tlas_info{};
+    device_->GetRaytracingAccelerationStructurePrebuildInfo(&tlas_inputs, &tlas_info);
+    tlas_ = CreateAsBuffer(tlas_info.ResultDataMaxSizeInBytes, /*result=*/true);
+    tlas_scratch_ = CreateAsBuffer(tlas_info.ScratchDataSizeInBytes, false);
+
+    // The TLAS SRV (fixed engine-block slot). Its buffer VA is constant across the in-place
+    // rebuilds, so this one view stays valid. An AS SRV names the resource only by GPU
+    // address, so the resource pointer is null.
+    tlas_descriptor_ = kTlasSrvIndex;
+    D3D12_SHADER_RESOURCE_VIEW_DESC tlas_srv{};
+    tlas_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    tlas_srv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    tlas_srv.Format = DXGI_FORMAT_UNKNOWN;
+    tlas_srv.RaytracingAccelerationStructure.Location = tlas_->GetGPUVirtualAddress();
+    const CD3DX12_CPU_DESCRIPTOR_HANDLE tlas_handle(
+        engine_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(tlas_descriptor_),
+        engine_heap_size_);
+    device_->CreateShaderResourceView(nullptr, &tlas_srv, tlas_handle);
+
+    // The per-frame instance descs the TLAS is built from, and the per-frame InstanceInfo
+    // the hit shader reads -- one mapped region per frame in flight, so a rebuild never
+    // tramples the region the GPU is still reading. Each info region gets its own SRV slot;
+    // Render points FrameConstants at the current frame's.
+    const CD3DX12_HEAP_PROPERTIES upload_props(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RANGE no_read(0, 0);
+
+    tlas_instances_stride_ = rt_max_instances_ * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+    const CD3DX12_RESOURCE_DESC inst_buf_desc =
+        CD3DX12_RESOURCE_DESC::Buffer(static_cast<UINT64>(tlas_instances_stride_) * kFrameCount);
+    ThrowIfFailed(device_->CreateCommittedResource(&upload_props, D3D12_HEAP_FLAG_NONE,
+                                                   &inst_buf_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                   nullptr, IID_PPV_ARGS(&tlas_instances_)),
+                  "CreateCommittedResource(TLAS instances)");
+    void* inst_mapped = nullptr;
+    ThrowIfFailed(tlas_instances_->Map(0, &no_read, &inst_mapped), "TLAS instances Map");
+    tlas_instances_mapped_ = static_cast<std::byte*>(inst_mapped);
+
+    rt_instance_info_stride_ = rt_max_instances_ * sizeof(RtInstanceInfo);
+    const CD3DX12_RESOURCE_DESC info_buf_desc =
+        CD3DX12_RESOURCE_DESC::Buffer(static_cast<UINT64>(rt_instance_info_stride_) * kFrameCount);
+    ThrowIfFailed(device_->CreateCommittedResource(&upload_props, D3D12_HEAP_FLAG_NONE,
+                                                   &info_buf_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                   nullptr, IID_PPV_ARGS(&rt_instance_info_)),
+                  "CreateCommittedResource(instance info)");
+    void* info_mapped = nullptr;
+    ThrowIfFailed(rt_instance_info_->Map(0, &no_read, &info_mapped), "instance info Map");
+    rt_instance_info_mapped_ = static_cast<std::byte*>(info_mapped);
+    for (UINT f = 0; f < kFrameCount; ++f) {
+        const UINT slot = next_slot++;
+        D3D12_SHADER_RESOURCE_VIEW_DESC info_srv{};
+        info_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        info_srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        info_srv.Format = DXGI_FORMAT_UNKNOWN;
+        info_srv.Buffer.FirstElement = static_cast<UINT64>(f) * rt_max_instances_;
+        info_srv.Buffer.NumElements = rt_max_instances_;
+        info_srv.Buffer.StructureByteStride = sizeof(RtInstanceInfo);
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE h(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
+                                              static_cast<INT>(slot), engine_heap_size_);
+        device_->CreateShaderResourceView(rt_instance_info_.Get(), &info_srv, h);
+        rt_instance_info_descriptor_[f] = slot;
+    }
 
     ThrowIfFailed(command_list_->Close(), "CommandList::Close");
     ID3D12CommandList* lists[] = {command_list_.Get()};
     queue_->ExecuteCommandLists(_countof(lists), lists);
     FlushGpu();
+}
+
+void Renderer::UpdateTopLevelAS(const Scene& scene, std::span<const MeshInstance> props) {
+    const std::span<const MeshInstance> yard = scene.Instances();
+
+    // This frame's own instance-descs and hit-info regions, so the rebuild does not race the
+    // GPU still reading the previous frame's.
+    auto* descs = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(
+        tlas_instances_mapped_ + static_cast<size_t>(frame_index_) * tlas_instances_stride_);
+    auto* infos = reinterpret_cast<RtInstanceInfo*>(
+        rt_instance_info_mapped_ + static_cast<size_t>(frame_index_) * rt_instance_info_stride_);
+
+    // One TLAS instance per yard instance and per loose prop, each pointing at its model's
+    // BLAS with its world transform, plus a matching hit-info entry (the model's geometry
+    // and this instance's tint). Capped at the sizes the buffers were built for.
+    UINT n = 0;
+    auto add = [&](const MeshInstance& inst) {
+        if (n >= rt_max_instances_) {
+            return;
+        }
+        const GpuModel& model = models_[inst.model];
+        D3D12_RAYTRACING_INSTANCE_DESC& d = descs[n];
+        d = {};
+        ToRaytracingTransform(inst.transform, &d.Transform[0][0]);
+        d.InstanceMask = 0xFF;
+        d.AccelerationStructure = model.blas->GetGPUVirtualAddress();
+        RtInstanceInfo& ii = infos[n];
+        ii = {};
+        ii.vb_srv = model.vb_srv;
+        ii.ib_srv = model.ib_srv;
+        ii.prim_base = model.prim_base;
+        ii.tint = inst.tint;
+        ++n;
+    };
+    for (const MeshInstance& inst : yard) {
+        add(inst);
+    }
+    for (const MeshInstance& inst : props) {
+        add(inst);
+    }
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+    inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    inputs.NumDescs = n;
+    inputs.InstanceDescs = tlas_instances_->GetGPUVirtualAddress() +
+                           static_cast<UINT64>(frame_index_) * tlas_instances_stride_;
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};
+    build.Inputs = inputs;
+    build.DestAccelerationStructureData = tlas_->GetGPUVirtualAddress();
+    build.ScratchAccelerationStructureData = tlas_scratch_->GetGPUVirtualAddress();
+    // A single TLAS buffer, rebuilt in place: the queue runs command lists in order, so the
+    // previous frame's reads of it have all completed before this build overwrites it.
+    command_list_->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
+
+    // Make the fresh TLAS visible to the scene pass's reflection rays below. AS-read access
+    // is not compatible with the pixel-shading sync scope, so the availability is scoped to
+    // ALL (the build is at the very top of the frame, so this is not a hot barrier).
+    BufferBarrier(command_list_.Get(), tlas_.Get(),
+                  D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                  D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
+                  D3D12_BARRIER_SYNC_ALL,
+                  D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ);
 }
 
 void Renderer::LoadFontFace(const std::filesystem::path& csv, const std::filesystem::path& png,
@@ -4626,7 +4698,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // The TLAS slot the scene pixel shader traces its reflection rays against, and the two
     // info buffers it shades a hit from.
     frame.tlas_index = tlas_descriptor_;
-    frame.instance_info_index = rt_instance_info_descriptor_;
+    frame.instance_info_index = rt_instance_info_descriptor_[frame_index_];
     frame.prim_info_index = rt_prim_info_descriptor_;
     ApplyEnvironment(frame, environment_);
     std::memcpy(frame_region, &frame, sizeof(frame));
@@ -4638,6 +4710,11 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // descriptor table that points into it.
     ID3D12DescriptorHeap* heaps[] = {engine_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
+
+    // Rebuild the top-level AS this frame from the yard plus the loose props, so the
+    // reflection rays trace them where they actually are now (carried, toppled, browning).
+    // Before the scene pass, which is the only thing that reads it.
+    UpdateTopLevelAS(scene, props);
 
     command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
