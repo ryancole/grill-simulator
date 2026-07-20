@@ -10,6 +10,7 @@
 #include "level.hpp"
 #include "menu.hpp"
 #include "physics.hpp"
+#include "profiler.hpp"
 #include "props.hpp"
 #include "renderer.hpp"
 #include "scene.hpp"
@@ -22,6 +23,7 @@
 #include <array>
 #include <cctype>
 #include <cstddef>
+#include <cmath>
 #include <fstream>
 #include <optional>
 #include <span>
@@ -66,6 +68,9 @@ struct Game {
     // actions, loaded from controls.toml in Run before the loop starts.
     Actions actions;
     Audio audio;
+    // Where the frame's time goes. Session state like the rest; its readout rides the
+    // debug overlay (F3).
+    Profiler profiler;
 
     // The top-level mode. Launches into the menu; a level is loaded behind it (for
     // the font atlas the menu draws with, and so play can start the instant an entry
@@ -687,11 +692,18 @@ int Run(HINSTANCE instance, int show_command) {
 
         // Advance the physics scene on its fixed clock: the props, furniture and the
         // player's controller all move on it. Simulate first, then read poses.
-        game.physics.Step(dt);
+        game.profiler.BeginFrame();
+        {
+            Profiler::Scope scope{game.profiler, "physics"};
+            game.physics.Step(dt);
+        }
         // The fluid reads its droplet positions back from the stepped scene and injects
         // whatever last frame's spray queued -- after the step, which is what the readback
         // wants this frame's results of.
-        game.fluid.Update(dt);
+        {
+            Profiler::Scope scope{game.profiler, "fluid"};
+            game.fluid.Update(dt);
+        }
         // The flame ages its specks on the frame clock, not the physics one: it collides
         // with nothing, so it has no reason to wait for a step. Unconditional -- specks
         // already in the air burn out whether or not the lighter is lit this frame.
@@ -723,10 +735,13 @@ int Run(HINSTANCE instance, int show_command) {
         // place its heat sources at wherever those bodies now sit -- before the props
         // update, so the meats cook against this frame's grate position.
         game.world->furniture().Update();
-        game.world->props().Update(camera_to_world, game.actions, dt,
-                                   game.world->furniture().HeatSources(),
-                                   game.world->turn_in_zone(), game.world->fire_pit_zone(),
-                                   game.world->objectives(), &game.fluid, &game.flame);
+        {
+            Profiler::Scope props_scope{game.profiler, "props"};
+            game.world->props().Update(camera_to_world, game.actions, dt,
+                                       game.world->furniture().HeatSources(),
+                                       game.world->turn_in_zone(), game.world->fire_pit_zone(),
+                                       game.world->objectives(), &game.fluid, &game.flame);
+        }
         // Light the grill from a held flame: warm its grate toward the lighter (or a lit
         // log) the player holds to it and switch it on when it catches -- the same ignition
         // that lights the logs, now for the furniture. After the props update so the flame
@@ -763,6 +778,10 @@ int Run(HINSTANCE instance, int show_command) {
         // so they are gone from here. Left empty while hidden, which draws no overlay.
         std::vector<std::string> debug_lines;
         if (show_debug) {
+            // Where last frame's time went, first: it is the reason the overlay is up
+            // more often than not.
+            const std::span<const std::string> timings = game.profiler.Report();
+            debug_lines.assign(timings.begin(), timings.end());
             const std::span<const HeatSource> heat_sources = game.world->furniture().HeatSources();
             for (std::size_t i = 0; i < heat_sources.size(); ++i) {
                 debug_lines.push_back(
@@ -856,11 +875,17 @@ int Run(HINSTANCE instance, int show_command) {
         const std::span<const FlowEmitter> log_fires = props.FlowEmitters();
         flow_emitters.insert(flow_emitters.end(), log_fires.begin(), log_fires.end());
 
-        game.renderer.Render(game.world->scene(), world_instances, highlights,
-                             game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
-                             view_projection, game.camera.Position(), prompt,
-                             debug_lines, order_cards, meat_cards, view, projection, dt,
-                             flow_emitters, game.fluid.Points());
+        {
+            // Submission plus the swapchain wait, so with vsync on this is most of the
+            // frame however little work there is. It is here to be subtracted, not read.
+            Profiler::Scope scope{game.profiler, "render"};
+            game.renderer.Render(game.world->scene(), world_instances, highlights,
+                                 game.viewmodel.Pose(camera_to_world), props.HeldInstances(),
+                                 view_projection, game.camera.Position(), prompt,
+                                 debug_lines, order_cards, meat_cards, view, projection, dt,
+                                 flow_emitters, game.fluid.Points(), props.SoftInstances());
+        }
+        game.profiler.EndFrame();
     }
 
     game.renderer.Shutdown();

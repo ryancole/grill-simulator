@@ -53,10 +53,3 @@ float3 SkyRadiance(VSOutput input) {
 float4 PSMain(VSOutput input) : SV_TARGET {
     return float4(SkyRadiance(input), 1.0f);
 }
-
-// The background behind the reflection-probe capture: into the _UNORM cube sampled
-// through an sRGB view, so the linear radiance is encoded here, exactly as the
-// scene capture pass does.
-float4 PSMainCapture(VSOutput input) : SV_TARGET {
-    return float4(LinearToSrgb(SkyRadiance(input)), 1.0f);
-}

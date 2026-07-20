@@ -16,9 +16,11 @@ cbuffer Constants : register(b0) {
     // >0.5 fills the quad flat with g_color and ignores the atlas -- the translucent
     // panel drawn behind the debug overlay. 0 (the default) is the glyph path below.
     float g_solid;
+    // The slot of this run's MSDF atlas in the one bound heap, fetched bindlessly rather
+    // than through a table -- the two HUD faces (Inter, monospace) live at different slots.
+    uint g_atlas_index;
 };
 
-Texture2D<float4> g_atlas : register(t0);
 SamplerState g_sampler : register(s0);
 
 struct VSInput {
@@ -50,6 +52,7 @@ float4 PSMain(PSInput input) : SV_TARGET {
         return g_color;
     }
 
+    const Texture2D<float4> g_atlas = ResourceDescriptorHeap[g_atlas_index];
     const float3 msd = g_atlas.Sample(g_sampler, input.uv).rgb;
     const float distance = Median(msd) - 0.5f;
 

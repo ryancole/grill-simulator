@@ -11,14 +11,12 @@ cbuffer TonemapConstants : register(b0) {
     float g_exposure;
     // How strongly the bloom is added back into the frame.
     float g_bloom_intensity;
+    // The slots of the HDR scene buffer and the bloom top mip in the one bound heap,
+    // fetched bindlessly rather than through tables.
+    uint g_hdr_index;
+    uint g_bloom_index;
 };
 
-// The HDR scene, one linear texel per output pixel. Read by integer Load rather
-// than a filtered sample: the resolve is 1:1, so there is nothing to interpolate.
-Texture2D<float4> g_hdr : register(t0);
-// The bloom pyramid's top mip, at half resolution. Sampled (not loaded) so the
-// hardware bilinearly upscales it to full res, which is also what softens it.
-Texture2D<float4> g_bloom : register(t1);
 SamplerState g_sampler : register(s0);
 
 struct VSOutput {
@@ -62,6 +60,11 @@ float3 PbrNeutralToneMap(float3 color) {
 }
 
 float4 PSMain(VSOutput input) : SV_TARGET {
+    // The HDR scene buffer and the bloom top mip, fetched from the bound heap by the
+    // slots the draw handed over. Read HDR by integer Load (the resolve is 1:1); sample
+    // bloom so the hardware upscales it from half resolution.
+    const Texture2D<float4> g_hdr = ResourceDescriptorHeap[g_hdr_index];
+    const Texture2D<float4> g_bloom = ResourceDescriptorHeap[g_bloom_index];
     const int3 texel = int3(int2(input.position.xy), 0);
     const float3 hdr = g_hdr.Load(texel).rgb;
     // The bloom is added into the scene before tonemapping, so its glow is rolled

@@ -5,9 +5,11 @@
 #include "flow_volume.hpp"
 #include "font.hpp"
 #include "scene.hpp"
+#include "soft_body.hpp" // SoftBodyPrimitive, SoftMeshInstance
 #include "viewmodel.hpp"
 
 #include <DirectXMath.h>
+
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
@@ -61,12 +63,12 @@ public:
     // for the whole session, independent of which level is loaded. No scene geometry
     // is uploaded here; call LoadScene once the first level's Scene exists.
     void Initialize(HWND hwnd, UINT width, UINT height);
-    // Uploads one level's models, textures and reflection probe into the GPU
+    // Uploads one level's models, textures and acceleration structures into the GPU
     // resources the frame draws from. Call after Initialize, and again after
     // ReleaseScene to swap in a different level. Assumes no scene is currently
     // loaded (ReleaseScene, or a fresh Initialize, left the slots empty).
     void LoadScene(const Scene& scene);
-    // Frees the current level's models, textures and probe, so a different Scene
+    // Frees the current level's models, textures and structures, so a different Scene
     // can be uploaded. Flushes the GPU first -- the frame in flight may still be
     // reading these -- so it is only for a between-levels swap, never mid-frame.
     // The device, swapchain, pipelines and shadow map outlive it; the font atlas
@@ -74,13 +76,12 @@ public:
     void ReleaseScene();
     // Points the sun a level's way: re-aims the shadow map's orthographic light and
     // sets the direction the scene's direct term is lit from. The gradient sky
-    // ignores it. Call before LoadScene so the reflection probe captures this sun.
+    // ignores it.
     void SetSunDirection(DirectX::XMFLOAT3 direction);
     // Sets the level's sky and lighting -- the sun colour, sky gradient, clouds,
     // ambient, fog and shafts every pass shades with. Just records the value; the
     // per-frame passes stamp it into their constant buffers each frame, so it takes
-    // effect on the next Render. Call before LoadScene so the reflection probe bakes
-    // the level's sky, exactly as SetSunDirection is called for its sun.
+    // effect on the next Render.
     void SetEnvironment(const Environment& environment);
     // A level's grass field: a flat rectangle of procedurally grown blades. `center`
     // is its middle on the ground (y the height the blades stand on), `size` its extent
@@ -112,6 +113,18 @@ public:
     // subsystem, which repositions the grid if it is already running.
     void SetFlowRegion(DirectX::XMFLOAT3 center, float half_extent);
     void Resize(UINT width, UINT height);
+
+    // Registers a mesh whose vertices change every frame -- a soft-body meat -- and
+    // returns the handle Render's SoftMeshInstance names it by. The connectivity and the
+    // material runs are fixed for the mesh's life and are uploaded once here; only the
+    // vertices arrive per frame. `model` says which loaded model the runs take their
+    // materials from, so a deformed meat is textured exactly as its rigid twin.
+    //
+    // Call after LoadScene (it reads the uploaded models) and before the first Render.
+    // ReleaseScene drops every registration along with the level.
+    UINT CreateDeformableMesh(std::uint32_t model, std::span<const std::uint32_t> indices,
+                              std::span<const SoftBodyPrimitive> primitives, UINT max_vertices);
+
     // `props` are the loose objects resting in the yard, drawn with the scene.
     // `highlight` is the one the player is aiming at, ringed with a glowing
     // outline; empty rings nothing. `viewmodel` and `held_props` are drawn last,
@@ -122,7 +135,8 @@ public:
     // anchored up from the bottom-left corner; empty draws no overlay. `orders` are the
     // bulleted order lines on the top-right rail; empty draws no rail. `meats` are the
     // always-on status cards on the top-left rail -- one per cooking meat, showing its
-    // doneness and temperature; empty draws no rail.
+    // doneness and temperature; empty draws no rail. `soft_meshes` are the deforming
+    // meats, drawn in the scene pass from the vertex streams they carry.
     void Render(const Scene& scene, std::span<const MeshInstance> props,
                 std::span<const MeshInstance> highlight, const ViewmodelPose& viewmodel,
                 std::span<const MeshInstance> held_props,
@@ -131,7 +145,8 @@ public:
                 std::span<const OrderCard> orders, std::span<const MeatCard> meats,
                 const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection, float flow_dt,
                 std::span<const FlowEmitter> flow_emitters,
-                std::span<const DirectX::XMFLOAT4> droplets);
+                std::span<const DirectX::XMFLOAT4> droplets,
+                std::span<const SoftMeshInstance> soft_meshes = {});
     // Draws the launch/pause menu as its own complete frame: a solid backdrop, a
     // `title`, and the vertical list of `entries` with the one at `selected` picked
     // out. Owns the swapchain buffer from clear to present, so the game loop calls
@@ -226,12 +241,25 @@ private:
     };
 
     // A Model, uploaded. The CPU-side Model that produced it is not needed again.
+    // `blas` is its bottom-level raytracing acceleration structure -- one geometry per
+    // primitive, each baking that primitive's model-space transform in -- so the scene's
+    // reflection rays can intersect this model. Built once at scene load, referenced by
+    // the TLAS's per-instance entries; null until BuildAccelerationStructures runs.
     struct GpuModel {
         ComPtr<ID3D12Resource> vertex_buffer;
         D3D12_VERTEX_BUFFER_VIEW vertex_buffer_view{};
         ComPtr<ID3D12Resource> index_buffer;
         D3D12_INDEX_BUFFER_VIEW index_buffer_view{};
         std::vector<DrawPrimitive> primitives;
+        ComPtr<ID3D12Resource> blas;
+        // Where this model's geometry and primitives live for the reflection hit shader:
+        // the byte-address SRV slots of its vertex and index buffers, and the base of its
+        // primitives in the RtPrimInfo array. Filled by BuildAccelerationStructures; used
+        // each frame by UpdateTopLevelAS to build a hit-info entry for every instance of
+        // this model, static or moving.
+        UINT vb_srv = 0;
+        UINT ib_srv = 0;
+        UINT prim_base = 0;
     };
 
     void CreateDevice();
@@ -242,7 +270,7 @@ private:
     // The one shader-visible CBV/SRV/UAV heap, created once at startup. Its front
     // block holds the session SRVs that outlive a level swap (slot 0 the HDR scene
     // buffer, then depth/shadow/bloom/fluid); the per-level material, atlas, shadow
-    // and probe descriptors follow, rewritten in place on each swap. Bound once and
+    // and raytracing descriptors follow, rewritten in place on each swap. Bound once and
     // never swapped mid-frame, which is what the scene pass's bindless fetches need.
     void CreateEngineDescriptorHeap();
     // The HDR scene buffer the whole world renders into, in linear light: an
@@ -319,12 +347,25 @@ private:
     // stands in for a material with no texture of its own.
     void CreateSceneGeometry(const Scene& scene);
 
-    // Renders the static yard into a cubemap once, from a fixed point at its
-    // centre, so the scene pass can reflect the real fence and trees off a metal
-    // rather than only the analytic sky. Six faces, each the scene lit by the
-    // analytic sky (the capture pixel shader), with the gradient sky behind. Runs
-    // after CreateSceneGeometry, on the same one-shot command list.
-    void CaptureReflectionProbe(const Scene& scene);
+    // Builds the raytracing acceleration structures the scene pass reflects off: a
+    // bottom-level AS per model (BuildAccelerationStructures fills each GpuModel::blas)
+    // and one top-level AS over the yard's static instances, tlas_. Runs at scene load
+    // after CreateSceneGeometry, on its own one-shot command list. The TLAS gets a
+    // shader-visible SRV at tlas_descriptor_, which the scene pixel shader reads
+    // bindlessly to trace reflection rays. Static for now -- rebuilt whole on a level
+    // swap; moving props are not yet in the TLAS.
+    void BuildAccelerationStructures(const Scene& scene);
+    // Rebuilds the top-level AS for this frame: fills the current instance-descs region
+    // with the yard's static instances plus the loose `props` (each pointing at its model's
+    // BLAS with its world transform), fills the matching per-instance hit-info region, and
+    // builds the TLAS on the render command list before the scene pass reads it. Called at
+    // the top of Render, so carried and toppled props -- and the browning meat, whose tint
+    // rides along -- reflect where they actually are this frame.
+    void UpdateTopLevelAS(const Scene& scene, std::span<const MeshInstance> props);
+    // Creates a default-heap buffer sized for an acceleration structure or its build
+    // scratch (both need ALLOW_UNORDERED_ACCESS). Born layout-less like every other
+    // buffer; the build is its first access.
+    ComPtr<ID3D12Resource> CreateAsBuffer(UINT64 bytes, bool result);
 
     // The second, tiny pipeline: the alpha-blended, depth-free pass that draws
     // HUD text from the MSDF atlas. Builds its root signature, PSO and the
@@ -453,32 +494,44 @@ private:
     // and plain _UNORM for data textures (normal, metallic-roughness, atlas).
     ComPtr<ID3D12Resource> UploadTexture(const Image& image, UINT descriptor, DXGI_FORMAT format,
                                          std::vector<ComPtr<ID3D12Resource>>& staging);
-    D3D12_GPU_DESCRIPTOR_HANDLE TextureHandle(UINT descriptor) const;
 
     // One draw per primitive of each instance's model, each under its own root
     // constants. `shadow_receive` is 1 for the world, which is shadowed by the
     // sun, and 0 for the viewmodel, which is not.
-    // `bind_probe` binds the reflection cubemap for the pass to sample. The
-    // on-screen pass wants it; the probe-capture pass must not (it is filling that
-    // cube and its pixel shader never reads it), so it passes false.
     void DrawInstances(std::span<const MeshInstance> instances,
                        const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction,
-                       float shadow_receive, bool bind_probe);
+                       float shadow_receive);
+
+    // The same pass for meshes whose vertices arrived this frame instead of at load: each
+    // instance's stream is copied into its frame's region of the mesh's vertex buffer and
+    // then drawn run by run, with the material each run's source primitive carries. The
+    // vertices are already in world space, so the model matrix is identity -- there is no
+    // rigid transform to apply to something the simulation has bent.
+    // Copies each deforming mesh's vertices for this frame into its buffer. Called once
+    // at the top of Render, before any pass reads them -- the shadow map is drawn from
+    // the same vertices and runs first.
+    void UploadDeformableMeshes(std::span<const SoftMeshInstance> instances);
+    // The deforming meshes as shadow casters, depth-only into the sun's map, so a meat
+    // lying on the patio darkens the patio.
+    void DrawDeformableShadowCasters(std::span<const SoftMeshInstance> instances);
+
+    void DrawDeformable(std::span<const SoftMeshInstance> instances,
+                        const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction);
 
     // Fills the currently bound render target with the gradient sky, seen from
     // `camera_position` through `view_projection`. Draws no depth, so geometry
     // rendered afterward paints over it. Switches to the sky pipeline and root
-    // signature; the caller restores whatever it needs next.
-    // `capture` picks the pixel shader: the on-screen pass leaves its radiance
-    // linear for the HDR buffer, the probe capture encodes to sRGB for the 8-bit
-    // cube. `time` drifts the cloud layer; the capture passes 0 for a still probe.
+    // signature; the caller restores whatever it needs next. Its radiance is left
+    // linear for the HDR buffer, which the tonemap pass encodes. `time` is vestigial
+    // (it once drifted the flat cloud layer).
     void DrawSky(const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
-                 float time, bool capture);
+                 float time);
 
     // The shadow pass: draws every caster depth-only into the shadow map from the
     // sun's point of view, wrapped in the barriers that flip the map between
     // depth target and shader resource.
-    void RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props, float time);
+    void RenderShadowMap(const Scene& scene, std::span<const MeshInstance> props,
+                         std::span<const SoftMeshInstance> soft_meshes, float time);
     // Grows the level's grass field into the currently bound HDR target: dispatches the
     // mesh shader over the field's grid of cells, each group generating a pack of
     // blades, writing colour and depth. A no-op with no grass loaded or no mesh-shader
@@ -553,10 +606,10 @@ private:
 
     // The one persistent, shader-visible CBV/SRV/UAV heap the game binds -- the
     // session SRVs (HDR buffer, depth, shadow, bloom, fluid) in its front block, the
-    // per-level material/atlas/shadow/probe descriptors after them. See
+    // per-level material/atlas/shadow/raytracing descriptors after them. See
     // CreateEngineDescriptorHeap and the kMaterialHeapBase / kSrvHeapSize constants in
-    // the .cpp. TextureHandle indexes it; a level swap overwrites the per-level region
-    // rather than rebuilding the heap.
+    // the .cpp. Shaders index it directly (ResourceDescriptorHeap); a level swap
+    // overwrites the per-level region rather than rebuilding the heap.
     ComPtr<ID3D12DescriptorHeap> engine_heap_;
     UINT engine_heap_size_ = 0;
 
@@ -568,12 +621,9 @@ private:
 
     // The gradient-sky background pass. No vertex buffer, no textures: the pixel
     // shader reconstructs the view ray from the inverse view-projection handed in
-    // as root constants. `sky_capture_pipeline_state_` is the same pass encoding to
-    // sRGB into the 8-bit probe cube, where the on-screen one leaves its radiance
-    // linear for the HDR buffer.
+    // as root constants.
     ComPtr<ID3D12RootSignature> sky_root_signature_;
     ComPtr<ID3D12PipelineState> sky_pipeline_state_;
-    ComPtr<ID3D12PipelineState> sky_capture_pipeline_state_;
 
     // The resolve pass: tonemaps the HDR scene buffer and encodes it to the
     // swapchain. Reads engine_heap_ slot 0; no vertex buffer (a fullscreen triangle
@@ -617,16 +667,25 @@ private:
     ComPtr<ID3D12PipelineState> bloom_downsample_pipeline_state_;
     ComPtr<ID3D12PipelineState> bloom_upsample_pipeline_state_;
 
-    // The reflection probe. `scene_capture_pipeline_state_` is the scene PSO with
-    // the capture pixel shader (analytic sky, no cube read); it fills probe_cube_
-    // through the six face RTVs in probe_rtv_heap_, depth-tested against
-    // probe_depth_. The finished cube's SRV lives in engine_heap_ at
-    // probe_descriptor_. All built once, at startup.
-    ComPtr<ID3D12PipelineState> scene_capture_pipeline_state_;
-    ComPtr<ID3D12Resource> probe_cube_;
-    ComPtr<ID3D12DescriptorHeap> probe_rtv_heap_;
-    ComPtr<ID3D12Resource> probe_depth_;
-    UINT probe_descriptor_ = 0;
+    // A registered deformable mesh: fixed connectivity and material runs, plus a vertex
+    // buffer with one region per frame in flight, so a frame's copy never lands on
+    // vertices the GPU is still drawing from. Both buffers are upload-heap: the vertices
+    // because they are rewritten every frame, and the indices because they are a few tens
+    // of kilobytes written once, which is not worth a staging copy and a command list.
+    struct DeformableMesh {
+        ComPtr<ID3D12Resource> vertex_buffer;
+        std::byte* vertex_mapped = nullptr;
+        UINT region_bytes = 0;
+        D3D12_VERTEX_BUFFER_VIEW vertex_views[kFrameCount]{};
+        ComPtr<ID3D12Resource> index_buffer;
+        D3D12_INDEX_BUFFER_VIEW index_view{};
+        // Which loaded model the runs below take their materials from.
+        std::uint32_t model = 0;
+        std::vector<SoftBodyPrimitive> primitives;
+    };
+    // Registered by CreateDeformableMesh, indexed by the handle it returns, cleared with
+    // the level. A handful at most -- one per meat.
+    std::vector<DeformableMesh> deformable_meshes_;
 
     // The pick-up outline pass. Shares the scene's vertex buffers and input
     // layout; only the root signature and PSO differ.
@@ -668,8 +727,8 @@ private:
     DirectX::XMFLOAT4X4 light_view_projection_{};
     // The current level's sky and lighting, stamped into every pass's constant
     // buffer each frame (see the ApplyEnvironment overloads). Defaults to the look
-    // the shaders once baked in, so the first frames before any level loads -- and
-    // the reflection probe's own default capture -- are drawn as they always were.
+    // the shaders once baked in, so the first frames before any level loads are
+    // drawn as they always were.
     Environment environment_ = kDefaultEnvironment;
     // The NVIDIA Flow fire/smoke sim, run by RenderFlow each frame. Session-persistent like
     // the device and pipelines: it comes up in Initialize on our device/queue/fence and is
@@ -713,6 +772,33 @@ private:
     std::vector<ComPtr<ID3D12Resource>> textures_;
 
     std::vector<GpuModel> models_;
+
+    // The top-level acceleration structure over the loaded level's static instances,
+    // and the shader-visible SRV slot the scene pixel shader reads it from to trace
+    // reflection rays. Rebuilt per level by BuildAccelerationStructures; the per-model
+    // BLASes it references live on the GpuModels.
+    // The top-level AS the reflection rays trace, rebuilt in place every frame by
+    // UpdateTopLevelAS from the static yard plus the moving props. tlas_scratch_ is its
+    // build scratch, tlas_instances_ the per-frame-in-flight instance descs it is built
+    // from (kept mapped, one region per frame). A single result buffer is safe because the
+    // queue serializes frames. rt_max_instances_ caps how many instances one frame may hold.
+    ComPtr<ID3D12Resource> tlas_;
+    ComPtr<ID3D12Resource> tlas_scratch_;
+    ComPtr<ID3D12Resource> tlas_instances_;
+    std::byte* tlas_instances_mapped_ = nullptr;
+    UINT tlas_instances_stride_ = 0;
+    UINT tlas_descriptor_ = 0;
+    UINT rt_max_instances_ = 0;
+    // The two structured buffers the reflection hit shader reads to shade what a ray hits:
+    // per-instance geometry+tint info (rebuilt every frame with the props, so it is a
+    // mapped per-frame-in-flight upload buffer with one SRV slot each) and the static
+    // per-primitive index-range+colour info. Freed on a level swap.
+    ComPtr<ID3D12Resource> rt_instance_info_;
+    std::byte* rt_instance_info_mapped_ = nullptr;
+    UINT rt_instance_info_stride_ = 0;
+    UINT rt_instance_info_descriptor_[kFrameCount]{};
+    ComPtr<ID3D12Resource> rt_prim_info_;
+    UINT rt_prim_info_descriptor_ = 0;
 
     ComPtr<ID3D12Fence> fence_;
     HANDLE fence_event_ = nullptr;

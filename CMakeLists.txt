@@ -58,6 +58,8 @@ add_executable(grill WIN32
   src/scene.cpp
   src/serve_zone.cpp
   src/physics.cpp
+  src/profiler.cpp
+  src/soft_body.cpp
   src/props.cpp
   src/furniture.cpp
   src/rigid_body.cpp
@@ -94,14 +96,8 @@ flow_stage_runtime(grill)
 
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT scene.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT scene.ps.cso)
-# The capture variant of the scene pixel shader: reflects the analytic sky rather
-# than the probe, so it can fill the probe cubemap without reading it.
-add_hlsl_shader(grill SOURCE shaders/scene.hlsl ENTRY PSMainCapture PROFILE ps_6_6 OUTPUT scene_capture.ps.cso)
 add_hlsl_shader(grill SOURCE shaders/sky.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT sky.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/sky.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT sky.ps.cso)
-# The capture variant of the sky pixel shader: encodes to sRGB for the 8-bit probe
-# cube, where the on-screen one leaves its radiance linear for the HDR buffer.
-add_hlsl_shader(grill SOURCE shaders/sky.hlsl ENTRY PSMainCapture PROFILE ps_6_6 OUTPUT sky_capture.ps.cso)
 # The resolve pass: tonemaps the linear HDR scene buffer and encodes it to sRGB.
 add_hlsl_shader(grill SOURCE shaders/tonemap.hlsl ENTRY VSMain PROFILE vs_6_6 OUTPUT tonemap.vs.cso)
 add_hlsl_shader(grill SOURCE shaders/tonemap.hlsl ENTRY PSMain PROFILE ps_6_6 OUTPUT tonemap.ps.cso)

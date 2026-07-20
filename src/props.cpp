@@ -1,5 +1,7 @@
 #include "props.hpp"
 
+#include "renderer.hpp"
+
 #include "actions.hpp"
 #include "flame.hpp"
 #include "fluid.hpp"
@@ -314,10 +316,39 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
     item.rigid.Adopt(CreateBody(item, pose), knock_rating, index, impact_sound);
     RebuildTransform(item);
 
+    // A meat also simulates as a deformable volume, so it squashes where a rigid box
+    // could only tumble. It is cooked from the same model the rigid draw uses and seeded
+    // at the same pose, and it may quietly fail -- an asset that will not tetrahedralize
+    // leaves this null and the item stays rigid, which is a property of the model rather
+    // than an error worth stopping a level load for. The rigid body stays either way:
+    // it is what the gaze test sweeps and what carries the item's pose.
+    if (item.cook) {
+        XMFLOAT4X4 seed;
+        XMStoreFloat4x4(&seed, pose);
+        auto body = std::make_unique<SoftBody>(*physics_, base_model, seed, 1.0f);
+        if (body->Active()) {
+            item.soft = std::move(body);
+        }
+    }
+
     // Bind userData only after the item is settled in items_, since it points at
     // the tag living inside the RigidBody -- items_ is reserved so it never moves.
     items_.push_back(std::move(item));
     items_.back().rigid.Bind();
+}
+
+void Props::RegisterSoftMeshes(Renderer& renderer) {
+    for (Item& item : items_) {
+        if (item.soft == nullptr) {
+            continue;
+        }
+        // The runs name primitives of the item's base model, which is the one the soft
+        // body was cooked from -- a food that swaps mesh as it cooks keeps deforming the
+        // shape it started as.
+        item.soft_mesh = renderer.CreateDeformableMesh(
+            item.stages.front().model, item.soft->SkinnedIndices(), item.soft->SkinnedPrimitives(),
+            static_cast<UINT>(item.soft->SkinnedVertices().size()));
+    }
 }
 
 void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, float dt,
@@ -694,6 +725,15 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
 
     // Rebuild the draw lists from the current state. There are a handful of
     // items, so this is cheaper than tracking which one moved.
+    // Read every soft meat back from the GPU before the draw lists are built: the
+    // skinned vertices this produces are what the deforming ones are drawn from.
+    soft_.clear();
+    for (Item& item : items_) {
+        if (item.soft != nullptr) {
+            item.soft->Update();
+        }
+    }
+
     world_.clear();
     held_.clear();
     highlight_.clear();
@@ -704,6 +744,19 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         // A meat served onto the carried tray travels in the hand with it, so it draws
         // in the held pass alongside the tray rather than out in the world.
         if (items_[i].served && items_[i].stuck_to == carried_) {
+            continue;
+        }
+        // A deforming meat is drawn from its skinned vertices instead of as a rigid
+        // instance -- one draw list or the other, never both. The vertices are already
+        // in world space, so unlike the rigid path there is no pose to hand over; the
+        // browning tint and the wet sheen carry across unchanged.
+        if (items_[i].soft != nullptr) {
+            SoftMeshInstance draw;
+            draw.mesh = items_[i].soft_mesh;
+            draw.vertices = items_[i].soft->SkinnedVertices();
+            draw.tint = ItemTint(items_[i]);
+            draw.wetness = ItemWetness(items_[i]);
+            soft_.push_back(draw);
             continue;
         }
         world_.push_back(MakeInstance(CurrentModel(items_[i]), XMLoadFloat4x4(&items_[i].resting),
