@@ -136,7 +136,7 @@ public:
     // `title`, and the vertical list of `entries` with the one at `selected` picked
     // out. Owns the swapchain buffer from clear to present, so the game loop calls
     // this *instead of* Render while the menu is up -- no level is stepped or drawn
-    // behind it. Reads the font atlas from the per-level texture heap, so a level
+    // behind it. Reads the font atlas from the heap's per-level region, so a level
     // must be loaded (its geometry simply is not drawn).
     void RenderMenu(std::string_view title, std::span<const std::string> entries, int selected);
     // Hit-tests the menu layout: the entry index whose row the client-space point
@@ -149,7 +149,7 @@ public:
     // backdrop, a `title` ("LOADING") and a quieter `subtitle` (the level's name) beneath
     // it. Owns the swapchain buffer from clear to present. The game loop draws this once
     // and presents it, so it is the frame left on screen while the following blocking
-    // level build stalls the thread. Reads the font atlas from the per-level texture heap,
+    // level build stalls the thread. Reads the font atlas from the heap's per-level region,
     // so a level must be loaded (the outgoing one, whose geometry simply is not drawn).
     void RenderLoading(std::string_view title, std::string_view subtitle);
 
@@ -197,9 +197,11 @@ public:
 
 private:
     // One draw: a slice of its model's index buffer, the base colour the glTF
-    // material asked for, the descriptor of the texture that modulates it, and the
-    // descriptor of its tangent-space normal map (the flat 1x1 default when the
-    // material has none).
+    // material asked for, and the heap slots of the four textures that modulate it --
+    // the base colour, its tangent-space normal map, the metallic-roughness map and
+    // the occlusion map (each the white or flat-normal 1x1 default when the material
+    // has none). The scene pixel shader reads them bindlessly via ResourceDescriptorHeap,
+    // so these are plain descriptor-heap indices, not bound GPU handles.
     struct DrawPrimitive {
         DirectX::XMFLOAT4X4 transform;
         UINT first_index;
@@ -207,10 +209,10 @@ private:
         DirectX::XMFLOAT3 base_color;
         float metallic;
         float roughness;
-        D3D12_GPU_DESCRIPTOR_HANDLE base_color_texture;
-        D3D12_GPU_DESCRIPTOR_HANDLE normal_texture;
-        D3D12_GPU_DESCRIPTOR_HANDLE metallic_roughness_texture;
-        D3D12_GPU_DESCRIPTOR_HANDLE occlusion_texture;
+        UINT base_color_texture;
+        UINT normal_texture;
+        UINT metallic_roughness_texture;
+        UINT occlusion_texture;
     };
 
     // One level of the bloom pyramid: an HDR texture at some fraction of the window,
@@ -237,10 +239,11 @@ private:
     void CreateSwapChain(HWND hwnd, UINT width, UINT height);
     void CreateRenderTargetViews();
     void CreateDepthBuffer();
-    // The shader-visible heap for session-level SRVs -- the ones that outlive a
-    // level swap, kept apart from the per-level material heap (texture_heap_) that
-    // ReleaseScene tears down. Created once at startup; slot 0 is the HDR scene
-    // buffer, with room reserved for the post-process buffers to come.
+    // The one shader-visible CBV/SRV/UAV heap, created once at startup. Its front
+    // block holds the session SRVs that outlive a level swap (slot 0 the HDR scene
+    // buffer, then depth/shadow/bloom/fluid); the per-level material, atlas, shadow
+    // and probe descriptors follow, rewritten in place on each swap. Bound once and
+    // never swapped mid-frame, which is what the scene pass's bindless fetches need.
     void CreateEngineDescriptorHeap();
     // The HDR scene buffer the whole world renders into, in linear light: an
     // R16G16B16A16_FLOAT target the size of the window, with a render-target view in
@@ -327,8 +330,8 @@ private:
     // HUD text from the MSDF atlas. Builds its root signature, PSO and the
     // per-frame dynamic vertex buffer the glyph quads are written into.
     void CreateTextPipeline();
-    // Loads the font's glyph metrics and uploads its atlas into the shared
-    // texture heap. Shares the scene upload's open command list and staging list.
+    // Loads the font's glyph metrics and uploads its atlas into the heap's per-level
+    // region. Shares the scene upload's open command list and staging list.
     void LoadFontAtlas(std::vector<ComPtr<ID3D12Resource>>& staging);
     // Loads one baked face -- its glyph CSV into `font` and its .png atlas into
     // `texture` at heap slot `descriptor`, recording the atlas pixel size in
@@ -446,7 +449,7 @@ private:
                                         D3D12_BARRIER_ACCESS access_after,
                                         std::vector<ComPtr<ID3D12Resource>>& staging);
     // Uploads a mip chain and writes its shader resource view into slot
-    // `descriptor` of the texture heap. `format` is sRGB for base-colour images
+    // `descriptor` of the SRV heap. `format` is sRGB for base-colour images
     // and plain _UNORM for data textures (normal, metallic-roughness, atlas).
     ComPtr<ID3D12Resource> UploadTexture(const Image& image, UINT descriptor, DXGI_FORMAT format,
                                          std::vector<ComPtr<ID3D12Resource>>& staging);
@@ -548,9 +551,12 @@ private:
     // (after the swapchain buffers); its SRV is slot 0 of engine_heap_.
     ComPtr<ID3D12Resource> hdr_target_;
 
-    // The persistent, shader-visible heap for session-level SRVs (the HDR buffer,
-    // and the post-process buffers to come). Kept separate from texture_heap_ so a
-    // level swap, which rebuilds that per-level heap, never disturbs these.
+    // The one persistent, shader-visible CBV/SRV/UAV heap the game binds -- the
+    // session SRVs (HDR buffer, depth, shadow, bloom, fluid) in its front block, the
+    // per-level material/atlas/shadow/probe descriptors after them. See
+    // CreateEngineDescriptorHeap and the kMaterialHeapBase / kSrvHeapSize constants in
+    // the .cpp. TextureHandle indexes it; a level swap overwrites the per-level region
+    // rather than rebuilding the heap.
     ComPtr<ID3D12DescriptorHeap> engine_heap_;
     UINT engine_heap_size_ = 0;
 
@@ -614,7 +620,7 @@ private:
     // The reflection probe. `scene_capture_pipeline_state_` is the scene PSO with
     // the capture pixel shader (analytic sky, no cube read); it fills probe_cube_
     // through the six face RTVs in probe_rtv_heap_, depth-tested against
-    // probe_depth_. The finished cube's SRV lives in texture_heap_ at
+    // probe_depth_. The finished cube's SRV lives in engine_heap_ at
     // probe_descriptor_. All built once, at startup.
     ComPtr<ID3D12PipelineState> scene_capture_pipeline_state_;
     ComPtr<ID3D12Resource> probe_cube_;
@@ -649,7 +655,7 @@ private:
     UINT grass_obstacle_count_ = 0;
 
     // The shadow pass. The map lives in dsv_heap_ slot 1 as a depth view and in
-    // texture_heap_ at shadow_descriptor_ as an SRV; the light view-projection is
+    // engine_heap_ at shadow_descriptor_ as an SRV; the light view-projection is
     // fixed (the sun does not move) and rides to the scene pass in frame_constants_.
     ComPtr<ID3D12RootSignature> shadow_root_signature_;
     ComPtr<ID3D12PipelineState> shadow_pipeline_state_;
@@ -680,7 +686,7 @@ private:
     D3D12_VIEWPORT shadow_viewport_{};
     D3D12_RECT shadow_scissor_{};
 
-    // The HUD text pass. The atlas SRV lives in the shared texture_heap_ at
+    // The HUD text pass. The atlas SRV lives in the shared engine_heap_ at
     // atlas_descriptor_; the vertex buffer is one upload-heap region per frame in
     // flight, kept mapped, rewritten with the frame's glyph quads.
     ComPtr<ID3D12RootSignature> text_root_signature_;
@@ -692,7 +698,7 @@ private:
     Font font_;
     // A second baked face, monospace, drawn only by the debug overlay so its columns
     // line up; the prompt and menu stay on font_ (Inter). Its atlas rides the same
-    // texture_heap_ at mono_atlas_descriptor_, right after font_'s.
+    // engine_heap_ at mono_atlas_descriptor_, right after font_'s.
     ComPtr<ID3D12Resource> mono_atlas_texture_;
     UINT mono_atlas_descriptor_ = 0;
     UINT mono_atlas_width_ = 0;
@@ -701,10 +707,9 @@ private:
     ComPtr<ID3D12Resource> text_vertex_buffer_;
     std::byte* text_vertex_mapped_ = nullptr;
 
-    // Shader-visible, and the only descriptor heap the game binds. Slot 0 is the
-    // white texture; every glTF image follows it.
-    ComPtr<ID3D12DescriptorHeap> texture_heap_;
-    UINT texture_size_ = 0;
+    // The GPU resources behind the per-level material descriptors (see engine_heap_,
+    // which the SRVs live in). Held so they outlive the frames that sample them and
+    // are freed together on a level swap.
     std::vector<ComPtr<ID3D12Resource>> textures_;
 
     std::vector<GpuModel> models_;

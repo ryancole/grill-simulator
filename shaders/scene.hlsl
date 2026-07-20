@@ -40,6 +40,15 @@ cbuffer Constants : register(b0) {
     // and smooths the microsurface, so the shade below reads it to sink the base colour
     // and sharpen the reflections into a wet sheen. Zero for everything dry.
     float g_wetness;
+    // The material's four textures, as slots in the bound descriptor heap. Rather than
+    // a descriptor table bound per draw, each is fetched from ResourceDescriptorHeap by
+    // this index (see ShadeScene) -- the bindless path. A material with no map of a kind
+    // is pointed at the shared 1x1 white or flat-normal stand-in, so the index is always
+    // valid and there is no branch.
+    uint g_base_color_index;
+    uint g_normal_index;
+    uint g_metallic_roughness_index;
+    uint g_occlusion_index;
 };
 
 // Per-frame, shared by every scene draw: the sun's world-to-clip matrix, the one
@@ -84,28 +93,22 @@ cbuffer FrameConstants : register(b1) {
     float g_frame_pad;
 };
 
-// A material with no texture of its own is pointed at a 1x1 white texel, so
-// there is no branch here and no second pipeline state.
-Texture2D<float4> g_base_color : register(t0);
-// The sun's depth buffer from the shadow pass: one channel, the light-space depth
-// of the nearest caster at each texel.
+// The material's four textures -- base colour, tangent-space normal, metallic-
+// roughness and occlusion -- are no longer bound to registers here. They are fetched
+// bindlessly inside ShadeScene from ResourceDescriptorHeap by the g_*_index constants
+// above, so a draw hands over four heap slots instead of binding four tables. A
+// material lacking a given map is pointed at the shared 1x1 white (or flat-normal)
+// stand-in, so there is still no branch and no second pipeline state.
+//
+// The sun's depth buffer from the shadow pass: one channel, the light-space depth of
+// the nearest caster at each texel. Bound once per pass, so it stays a plain table.
 Texture2D<float> g_shadow_map : register(t1);
-// The material's tangent-space normal map. A material with none is pointed at a
-// flat 1x1 (0,0,1), so there is no branch and no second pipeline state -- exactly
-// as the base colour handles a textureless material with a 1x1 white.
-Texture2D<float4> g_normal_map : register(t2);
-// The metallic-roughness map: glTF packs roughness in G and metallic in B. A
-// material with none samples a 1x1 white, so the factors above stand alone.
-Texture2D<float4> g_metallic_roughness : register(t3);
 // The reflection probe: the yard captured into a cubemap once at startup, so a
 // metal reflects the fence and the trees, not just the analytic sky. Sampled by
 // PSMain; PSMainCapture, which fills this very cube, must not read it, so the
 // sample is behind a compile-time flag that folds away for the capture variant.
+// Bound once per pass, so it too stays a table.
 TextureCube<float4> g_reflection_probe : register(t4);
-// The ambient-occlusion map: glTF stores how exposed each texel is to ambient
-// light in the R channel. A material with none samples a 1x1 white, so nothing is
-// occluded. It is linear data, not colour, so it is sampled without sRGB decode.
-Texture2D<float4> g_occlusion : register(t5);
 SamplerState g_sampler : register(s0);
 // Hardware PCF. SampleCmp compares the receiver's depth against the stored one
 // and bilinearly filters the 0/1 results, so a single tap already softens across
@@ -286,6 +289,15 @@ float2 EnvBRDFApprox(float roughness, float n_dot_v) {
 // entry point below, so the cube sample folds away entirely for the capture
 // variant and no feedback is possible.
 float4 ShadeScene(PSInput input, bool use_probe) {
+    // The material's four textures, fetched bindlessly from the bound heap by the
+    // slots the draw handed over in its root constants. A material with no map of a
+    // kind was pointed at the shared white or flat-normal stand-in on the CPU, so
+    // these indices are always valid and the samples below need no branch.
+    Texture2D<float4> base_color_map = ResourceDescriptorHeap[g_base_color_index];
+    Texture2D<float4> normal_map = ResourceDescriptorHeap[g_normal_index];
+    Texture2D<float4> metallic_roughness_map = ResourceDescriptorHeap[g_metallic_roughness_index];
+    Texture2D<float4> occlusion_map = ResourceDescriptorHeap[g_occlusion_index];
+
     // Rebuild the tangent frame and perturb the geometric normal by the map. The
     // tangent is re-orthogonalized against the interpolated normal (Gram-Schmidt),
     // which absorbs the small drift interpolation leaves between them; the
@@ -295,13 +307,13 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     const float3 tangent =
         normalize(input.tangent.xyz - geometric_normal * dot(geometric_normal, input.tangent.xyz));
     const float3 bitangent = cross(geometric_normal, tangent) * input.tangent.w;
-    const float3 tangent_normal = g_normal_map.Sample(g_sampler, input.uv).xyz * 2.0f - 1.0f;
+    const float3 tangent_normal = normal_map.Sample(g_sampler, input.uv).xyz * 2.0f - 1.0f;
     const float3 normal = normalize(tangent_normal.x * tangent + tangent_normal.y * bitangent +
                                     tangent_normal.z * geometric_normal);
 
     // The base colour, in linear light: the texture is decoded by its sRGB view,
     // the flat factor/tint in g_albedo is decoded here.
-    float3 base_color = SrgbToLinear(g_albedo) * g_base_color.Sample(g_sampler, input.uv).rgb;
+    float3 base_color = SrgbToLinear(g_albedo) * base_color_map.Sample(g_sampler, input.uv).rgb;
     if (g_checker > 0.0f) {
         const float2 cell = floor(input.world.xz / g_checker);
         const float tile = frac((cell.x + cell.y) * 0.5f) * 2.0f; // 0 or 1
@@ -313,7 +325,7 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     // glTF packs roughness in G and metallic in B; the factors scale each. A floor
     // on roughness keeps the specular lobe from collapsing to a point the size of
     // one pixel, which aliases into a crawling sparkle as the camera moves.
-    const float2 mr = g_metallic_roughness.Sample(g_sampler, input.uv).gb;
+    const float2 mr = metallic_roughness_map.Sample(g_sampler, input.uv).gb;
     // The wet film smooths the microsurface, sharpening the reflection into a sheen.
     const float wet_roughness = lerp(1.0f, kWetRoughness, saturate(g_wetness));
     const float roughness = clamp(g_roughness * mr.x * wet_roughness, 0.045f, 1.0f);
@@ -379,7 +391,7 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     // its reflection -- in the crevices and contact points the map records. The
     // direct sun is untouched, since a surface in a crevice is still lit if the sun
     // reaches it. A material with no map reads 1 and nothing changes.
-    const float ao = g_occlusion.Sample(g_sampler, input.uv).r;
+    const float ao = occlusion_map.Sample(g_sampler, input.uv).r;
     const float3 ambient = (ambient_diffuse + ambient_specular) * ao;
 
     // A dim fill from behind the sun, diffuse only, so faces turned away read brown
