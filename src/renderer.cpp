@@ -80,7 +80,7 @@ static_assert(kTlasSrvIndex < kEngineHeapSize, "engine heap too small for the TL
 
 // The one shader-visible CBV/SRV/UAV heap the game binds. The engine block above
 // [0, kEngineHeapSize) holds the session-lifetime post-process SRVs; the per-level
-// material, font-atlas, shadow and probe descriptors follow it, starting at
+// material, font-atlas, shadow and raytracing descriptors follow it, starting at
 // kMaterialHeapBase. Keeping them in one heap means it is bound once and never
 // swapped mid-frame -- there is only ever one CBV/SRV/UAV heap bindable at a time,
 // and the scene pass's bindless fetches (ResourceDescriptorHeap) index whatever is
@@ -89,9 +89,9 @@ static_assert(kTlasSrvIndex < kEngineHeapSize, "engine heap too small for the TL
 // on a level swap (descriptor writes are immediate), so the heap itself outlives every
 // level, exactly as the engine block does.
 constexpr UINT kMaterialHeapBase = kEngineHeapSize;
-// How many material/atlas/shadow/probe descriptors one level may claim. A level uses
-// two stand-ins, its glTF images, two font atlases, the shadow map and the probe --
-// a few dozen in practice; CreateSceneGeometry throws if a level ever exceeds this.
+// How many per-level descriptors one level may claim. A level uses two stand-ins, its
+// glTF images, two font atlases, the shadow map and its raytracing views -- a few dozen
+// in practice; CreateSceneGeometry throws if a level ever exceeds this.
 constexpr UINT kMaterialHeapCapacity = 512;
 constexpr UINT kSrvHeapSize = kEngineHeapSize + kMaterialHeapCapacity;
 
@@ -153,21 +153,18 @@ struct Constants {
     UINT normal_index;
     UINT metallic_roughness_index;
     UINT occlusion_index;
-    // The shadow map and reflection probe, as heap slots the shader fetches bindlessly.
-    // Per-pass rather than per-material, but folding them into the root constants lets the
-    // scene signature drop its last two descriptor tables (mirrors g_shadow_index /
-    // g_probe_index in scene.hlsl).
+    // The shadow map, as a heap slot the shader fetches bindlessly. Per-pass rather than
+    // per-material, but folding it into the root constants lets the scene signature drop
+    // its last descriptor tables (mirrors g_shadow_index in scene.hlsl).
     UINT shadow_index;
-    UINT probe_index;
 };
 
 static_assert(sizeof(Constants) % sizeof(UINT) == 0);
 constexpr UINT kConstantDwords = sizeof(Constants) / sizeof(UINT);
-// The scene signature now holds no descriptor tables at all -- every texture, including
-// the shadow map and probe, is fetched bindlessly from the root-constant slots above.
-// Beyond the root constants it holds only the frame constant buffer (2 DWORDs). The two
-// former table DWORDs became the two index DWORDs, so the total is unchanged, still at
-// the 64-DWORD ceiling.
+// The scene signature holds no descriptor tables at all -- every texture, the shadow map
+// included, is fetched bindlessly from the root-constant slots above. Beyond the root
+// constants it holds only the frame constant buffer (2 DWORDs), which leaves it just
+// under the 64-DWORD ceiling.
 static_assert(kConstantDwords + 2 <= 64, "A root signature holds at most 64 DWORDs in total");
 
 // The shadow map is square and this many texels on a side. Matches kShadowMapSize
@@ -254,14 +251,18 @@ struct RtInstanceInfo {
     float pad1;
 };
 // One entry per model-primitive: where its triangles begin in its model's shared index
-// buffer, and its base-colour factor. Indexed by prim_base + the hit's geometry index.
+// buffer, the heap slot of its base-colour map, and its base-colour factor. Indexed by
+// prim_base + the hit's geometry index.
 struct RtPrimInfo {
     UINT first_index;
+    // The same bindless slot the rasterized draw hands over in its root constants, so a
+    // reflection samples the very texture the surface is drawn with. A primitive with no
+    // map points at the shared 1x1 white, so this is always valid and needs no branch.
+    UINT base_color_index;
     UINT pad0;
     UINT pad1;
-    UINT pad2;
     XMFLOAT3 base_color;
-    float pad3;
+    float pad2;
 };
 
 // Mirrors the LightShaftConstants cbuffer in shaders/lightshafts.hlsl: the inverse
@@ -561,19 +562,6 @@ constexpr DXGI_FORMAT kTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 // passes, which still write display-space colour, untouched.
 constexpr DXGI_FORMAT kSrgbTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 
-// The reflection probe cubemap: this many texels on a side, per face, captured
-// once from the yard's centre at eye height. Typeless so the same memory renders
-// as _UNORM (the capture writes display-space colour, as the scene pass does to
-// the back buffer) and samples as _UNORM_SRGB (decoded to linear light, like a
-// base-colour texture). The scene's own depth buffer cannot be reused -- it is the
-// window's size -- so the capture has a square depth of its own in DSV slot 2.
-constexpr UINT kProbeSize = 256;
-constexpr XMFLOAT3 kProbePosition{0.0f, 1.5f, 0.0f};
-constexpr DXGI_FORMAT kProbeResourceFormat = DXGI_FORMAT_R8G8B8A8_TYPELESS;
-constexpr DXGI_FORMAT kProbeRtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-constexpr DXGI_FORMAT kProbeSrvFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-constexpr UINT kProbeDsvIndex = 2;
-
 // The first material slot, at the base of the heap's per-level region (just past
 // the engine block). A material with no base colour texture points here, which
 // spares the shader a branch and the pipeline a second variant. Every other
@@ -791,35 +779,34 @@ void Renderer::Initialize(HWND hwnd, UINT width, UINT height) {
     flow_.Initialize(device_.Get(), queue_.Get(), fence_.Get());
 
     // Everything above is the session's, not the level's. The scene geometry, the
-    // font atlas and the reflection probe come up in LoadScene, so a level can be
+    // font atlas and the acceleration structures come up in LoadScene, so a level can be
     // swapped out from under all this without rebuilding the device or pipelines.
     initialized_ = true;
 }
 
 void Renderer::LoadScene(const Scene& scene) {
-    // The shared descriptor heap, every model's buffers and images, the font atlas
-    // and the probe cube. Split out of Initialize so a level swap re-runs only this
-    // (after ReleaseScene) rather than the whole device bring-up.
+    // The shared descriptor heap, every model's buffers and images, and the font
+    // atlas. Split out of Initialize so a level swap re-runs only this (after
+    // ReleaseScene) rather than the whole device bring-up.
     CreateSceneGeometry(scene);
-    CaptureReflectionProbe(scene);
     // The reflection rays the scene pass traces need a BLAS per model and a TLAS over the
     // yard; both read the geometry just uploaded, so this runs last.
     BuildAccelerationStructures(scene);
 }
 
 void Renderer::ReleaseScene() {
-    // The GPU may still be reading this level's buffers, textures, heap or probe in
-    // the frame in flight, so drain it before any of these ComPtrs let go.
+    // The GPU may still be reading this level's buffers, textures or heap in the
+    // frame in flight, so drain it before any of these ComPtrs let go.
     FlushGpu();
 
     // A level swap runs through here; empty the Flow grid so a plume lit in one yard does
     // not hang in the air of the next. The grid's allocation is kept for the next level.
     flow_.Clear();
 
-    // Everything CreateSceneGeometry and CaptureReflectionProbe built. The one SRV
-    // heap is NOT torn down -- it is persistent now and holds the engine block's
-    // post-process SRVs too, which must outlive the swap. Its per-level region (the
-    // material, atlas, shadow and probe descriptors) is simply overwritten by the
+    // Everything CreateSceneGeometry built. The one SRV heap is NOT torn down -- it is
+    // persistent now and holds the engine block's post-process SRVs too, which must
+    // outlive the swap. Its per-level region (the material, atlas, shadow and
+    // raytracing descriptors) is simply overwritten by the
     // next LoadScene; the slots left dangling in between are never sampled, since no
     // frame is drawn between this release and that load (the level swap reset+emplaces
     // the World in one step). Only the resources those descriptors named are freed
@@ -835,9 +822,6 @@ void Renderer::ReleaseScene() {
     textures_.clear();
     atlas_texture_.Reset();
     mono_atlas_texture_.Reset();
-    probe_cube_.Reset();
-    probe_rtv_heap_.Reset();
-    probe_depth_.Reset();
 }
 
 float Renderer::AspectRatio() const {
@@ -998,10 +982,9 @@ void Renderer::CreateSwapChain(HWND hwnd, UINT width, UINT height) {
                   "CreateDescriptorHeap(RTV)");
     rtv_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
-    // Three: the scene's depth buffer, the sun's shadow map, then the reflection
-    // probe's square capture depth.
+    // Two: the scene's depth buffer, then the sun's shadow map.
     D3D12_DESCRIPTOR_HEAP_DESC dsv_desc{};
-    dsv_desc.NumDescriptors = 3;
+    dsv_desc.NumDescriptors = 2;
     dsv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
     ThrowIfFailed(device_->CreateDescriptorHeap(&dsv_desc, IID_PPV_ARGS(&dsv_heap_)),
                   "CreateDescriptorHeap(DSV)");
@@ -1203,7 +1186,7 @@ void Renderer::CreateShadowMap() {
 void Renderer::CreatePipeline() {
     // The per-draw transform and colour arrive as root constants, and so now do every
     // texture the pass reads as a heap slot: the four material textures, plus the shadow
-    // map and the reflection probe. The pixel shader fetches all of them bindlessly
+    // map. The pixel shader fetches all of them bindlessly
     // through ResourceDescriptorHeap[slot], so the scene signature carries no descriptor
     // tables at all -- only the root constants and the frame constant buffer. The samplers
     // every texture wants are baked into the signature as static samplers.
@@ -1297,18 +1280,6 @@ void Renderer::CreatePipeline() {
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pipeline_state_)),
                   "CreateGraphicsPipelineState");
-
-    // The probe-capture variant: the same pipeline, same root signature and vertex
-    // shader, with the capture pixel shader (analytic sky, no cube read) and the
-    // probe's render-target format. It renders the yard into the cubemap faces,
-    // which are 8-bit, so it encodes to sRGB where the on-screen variant stays HDR.
-    const std::vector<std::byte> capture_ps =
-        ReadBinaryFile(shader_dir / "scene_capture.ps.cso");
-    pso.PS = {capture_ps.data(), capture_ps.size()};
-    pso.RTVFormats[0] = kProbeRtvFormat;
-    ThrowIfFailed(
-        device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&scene_capture_pipeline_state_)),
-        "CreateGraphicsPipelineState(capture)");
 }
 
 void Renderer::CreateGrassPipeline() {
@@ -1497,23 +1468,10 @@ void Renderer::CreateSkyPipeline() {
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sky_pipeline_state_)),
                   "CreateGraphicsPipelineState(sky)");
-
-    // The capture variant: the same pass behind the reflection probe, encoding to
-    // sRGB for the 8-bit cube instead of leaving its radiance linear.
-    const std::vector<std::byte> capture_ps = ReadBinaryFile(shader_dir / "sky_capture.ps.cso");
-    pso.PS = {capture_ps.data(), capture_ps.size()};
-    pso.RTVFormats[0] = kProbeRtvFormat;
-    ThrowIfFailed(
-        device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sky_capture_pipeline_state_)),
-        "CreateGraphicsPipelineState(sky capture)");
 }
 
-void Renderer::DrawSky(const XMMATRIX& view_projection, XMFLOAT3 camera_position, float time,
-                       bool capture) {
-    // The capture variant encodes to sRGB for the 8-bit probe cube; the on-screen
-    // one leaves its radiance linear for the HDR buffer.
-    command_list_->SetPipelineState(
-        capture ? sky_capture_pipeline_state_.Get() : sky_pipeline_state_.Get());
+void Renderer::DrawSky(const XMMATRIX& view_projection, XMFLOAT3 camera_position, float time) {
+    command_list_->SetPipelineState(sky_pipeline_state_.Get());
     command_list_->SetGraphicsRootSignature(sky_root_signature_.Get());
     command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     command_list_->IASetVertexBuffers(0, 0, nullptr);
@@ -2307,8 +2265,7 @@ void Renderer::SetEnvironment(const Environment& environment) {
     // Just record it. Every pass that draws the sky or shades under it stamps
     // environment_ into its constant buffer as it renders -- Render for the scene
     // and shafts, DrawSky for the background -- so the change lands next frame with
-    // nothing to re-upload here. Called before LoadScene, it also decides the sky
-    // the reflection-probe capture bakes, since that capture reads the same paths.
+    // nothing to re-upload here.
     environment_ = environment;
 }
 
@@ -2603,19 +2560,16 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
         image_count += static_cast<UINT>(model.images.size());
     }
 
-    // The white texture and the flat normal, then every model image, then the two
-    // HUD font atlases (Inter + monospace), the sun's shadow map, and the reflection
-    // probe cubemap. Then, past the probe, BuildAccelerationStructures adds two
-    // byte-address SRVs per model (its vertex + index buffers, for the reflection hit
-    // shader) and two structured-buffer SRVs (the instance + primitive info). These no
-    // longer get a heap of their own: they are written into the per-level region of the
-    // one persistent heap (from kMaterialHeapBase), created at startup. Fail loudly if a
-    // level would overrun that region rather than silently scribbling past it.
-    // ... then, past the probe, BuildAccelerationStructures adds two byte-address SRVs per
-    // model (its vertex + index buffers), one for the static PrimInfo, and one per frame in
-    // flight for the per-frame InstanceInfo. (The TLAS SRV sits in the engine block, not
-    // here.)
-    const UINT material_descriptors = 2 + image_count + 2 + 1 + 1 +
+    // The white texture and the flat normal, then every model image, then the two HUD font
+    // atlases (Inter + monospace) and the sun's shadow map. Then, past the shadow map,
+    // BuildAccelerationStructures adds two byte-address SRVs per model (its vertex + index
+    // buffers, for the reflection hit shader), one for the static PrimInfo, and one per
+    // frame in flight for the per-frame InstanceInfo. (The TLAS SRV sits in the engine
+    // block, not here.) These no longer get a heap of their own: they are written into the
+    // per-level region of the one persistent heap (from kMaterialHeapBase), created at
+    // startup. Fail loudly if a level would overrun that region rather than silently
+    // scribbling past it.
+    const UINT material_descriptors = 2 + image_count + 2 + 1 +
                                       2 * static_cast<UINT>(models.size()) + 1 + kFrameCount;
     if (material_descriptors > kMaterialHeapCapacity) {
         throw std::runtime_error(
@@ -2760,175 +2714,12 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
         static_cast<INT>(shadow_descriptor_), engine_heap_size_);
     device_->CreateShaderResourceView(shadow_map_.Get(), &shadow_srv, shadow_handle);
 
-    // The reflection probe's cube SRV takes the descriptor after the shadow map.
-    // The cube itself is created and filled in CaptureReflectionProbe; only the
-    // slot is reserved here so the scene root signature can point at it.
-    probe_descriptor_ = shadow_descriptor_ + 1;
-
     ThrowIfFailed(command_list_->Close(), "CommandList::Close");
     ID3D12CommandList* lists[] = {command_list_.Get()};
     queue_->ExecuteCommandLists(_countof(lists), lists);
 
     // The staging buffers are released when this function returns, so the copies
     // have to have landed before it does.
-    FlushGpu();
-}
-
-void Renderer::CaptureReflectionProbe(const Scene& scene) {
-    // The cube: six square faces, one mip, typeless so it renders as _UNORM (the
-    // capture writes display-space colour, as the scene pass does to the back
-    // buffer) and samples as sRGB (decoded to linear light). A render-target
-    // resource must declare its clear value up front.
-    D3D12_CLEAR_VALUE clear{};
-    clear.Format = kProbeRtvFormat;
-    clear.Color[0] = kSkyColor[0];
-    clear.Color[1] = kSkyColor[1];
-    clear.Color[2] = kSkyColor[2];
-    clear.Color[3] = 1.0f;
-
-    const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
-    const CD3DX12_RESOURCE_DESC1 cube_desc =
-        CD3DX12_RESOURCE_DESC1::Tex2D(kProbeResourceFormat, kProbeSize, kProbeSize, 6, 1, 1, 0,
-                                      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
-    // Born a shader resource, the layout it rests in once the capture below has
-    // filled it and the scene pass reflects off it.
-    ThrowIfFailed(device_->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &cube_desc,
-                                                    D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, &clear,
-                                                    nullptr, 0, nullptr,
-                                                    IID_PPV_ARGS(&probe_cube_)),
-                  "CreateCommittedResource3(probe cube)");
-
-    // One render-target view per face.
-    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc{};
-    rtv_heap_desc.NumDescriptors = 6;
-    rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    ThrowIfFailed(device_->CreateDescriptorHeap(&rtv_heap_desc, IID_PPV_ARGS(&probe_rtv_heap_)),
-                  "CreateDescriptorHeap(probe RTV)");
-    for (UINT face = 0; face < 6; ++face) {
-        D3D12_RENDER_TARGET_VIEW_DESC rtv{};
-        rtv.Format = kProbeRtvFormat;
-        rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
-        rtv.Texture2DArray.FirstArraySlice = face;
-        rtv.Texture2DArray.ArraySize = 1;
-        rtv.Texture2DArray.MipSlice = 0;
-        const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(
-            probe_rtv_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(face),
-            rtv_size_);
-        device_->CreateRenderTargetView(probe_cube_.Get(), &rtv, handle);
-    }
-
-    // The square depth buffer the capture tests against, in DSV slot 2.
-    D3D12_CLEAR_VALUE depth_clear{};
-    depth_clear.Format = kDepthFormat;
-    depth_clear.DepthStencil.Depth = 1.0f;
-    const CD3DX12_RESOURCE_DESC1 depth_desc = CD3DX12_RESOURCE_DESC1::Tex2D(
-        kDepthFormat, kProbeSize, kProbeSize, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
-    ThrowIfFailed(device_->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &depth_desc,
-                                                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
-                                                    &depth_clear, nullptr, 0, nullptr,
-                                                    IID_PPV_ARGS(&probe_depth_)),
-                  "CreateCommittedResource3(probe depth)");
-    D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
-    dsv.Format = kDepthFormat;
-    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    const CD3DX12_CPU_DESCRIPTOR_HANDLE probe_dsv(dsv_heap_->GetCPUDescriptorHandleForHeapStart(),
-                                                  static_cast<INT>(kProbeDsvIndex), dsv_size_);
-    device_->CreateDepthStencilView(probe_depth_.Get(), &dsv, probe_dsv);
-
-    // The cube's SRV, in the slot CreateSceneGeometry reserved for it.
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = kProbeSrvFormat;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.TextureCube.MipLevels = 1;
-    const CD3DX12_CPU_DESCRIPTOR_HANDLE srv_handle(engine_heap_->GetCPUDescriptorHandleForHeapStart(),
-                                                   static_cast<INT>(probe_descriptor_), engine_heap_size_);
-    device_->CreateShaderResourceView(probe_cube_.Get(), &srv, srv_handle);
-
-    // The capture is lit from the eye at the probe centre; write that into frame
-    // constants region 0 and aim the scene pass's CBV at it. Nothing is in flight
-    // yet, so region 0 is free to borrow.
-    FrameConstants frame{};
-    frame.light_view_projection = light_view_projection_;
-    frame.camera_position = kProbePosition;
-    ApplyEnvironment(frame, environment_);
-    std::memcpy(frame_constants_mapped_, &frame, sizeof(frame));
-    frame_constants_address_ = frame_constants_->GetGPUVirtualAddress();
-
-    // The six face cameras: the standard cube directions and ups, a 90-degree
-    // frustum. Each is just another left-handed camera, so the same back-face cull
-    // the main view uses renders each face correctly.
-    struct Face {
-        XMVECTOR dir;
-        XMVECTOR up;
-    };
-    const Face faces[6] = {
-        {XMVectorSet(1, 0, 0, 0), XMVectorSet(0, 1, 0, 0)},   // +X
-        {XMVectorSet(-1, 0, 0, 0), XMVectorSet(0, 1, 0, 0)},  // -X
-        {XMVectorSet(0, 1, 0, 0), XMVectorSet(0, 0, -1, 0)},  // +Y
-        {XMVectorSet(0, -1, 0, 0), XMVectorSet(0, 0, 1, 0)},  // -Y
-        {XMVectorSet(0, 0, 1, 0), XMVectorSet(0, 1, 0, 0)},   // +Z
-        {XMVectorSet(0, 0, -1, 0), XMVectorSet(0, 1, 0, 0)},  // -Z
-    };
-    const XMVECTOR eye = XMLoadFloat3(&kProbePosition);
-    const XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV2, 1.0f, 0.05f, 100.0f);
-
-    // The level's sun (set by SetSunDirection before this capture runs), so the
-    // probe bakes reflections lit the same way as the frame that samples it.
-    const XMFLOAT3 sun = sun_direction_;
-
-    // Record the capture on the one-shot command list CreateSceneGeometry left
-    // closed.
-    ThrowIfFailed(allocators_[frame_index_]->Reset(), "CommandAllocator::Reset");
-    ThrowIfFailed(command_list_->Reset(allocators_[frame_index_].Get(), nullptr),
-                  "CommandList::Reset");
-
-    ID3D12DescriptorHeap* heaps[] = {engine_heap_.Get()};
-    command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
-
-    const CD3DX12_VIEWPORT viewport(0.0f, 0.0f, static_cast<float>(kProbeSize),
-                                    static_cast<float>(kProbeSize));
-    const CD3DX12_RECT scissor(0, 0, static_cast<LONG>(kProbeSize), static_cast<LONG>(kProbeSize));
-    command_list_->RSSetViewports(1, &viewport);
-    command_list_->RSSetScissorRects(1, &scissor);
-
-    // Every face from its resting shader-resource layout to a render target. The
-    // cube was just created and nothing has touched it, so there is no prior work to
-    // drain -- SYNC_NONE with no access before.
-    TextureBarrier(command_list_.Get(), probe_cube_.Get(), D3D12_BARRIER_SYNC_NONE,
-                   D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
-                   D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,
-                   D3D12_BARRIER_LAYOUT_RENDER_TARGET);
-
-    for (UINT face = 0; face < 6; ++face) {
-        const XMMATRIX view_projection = XMMatrixLookToLH(eye, faces[face].dir, faces[face].up) * proj;
-
-        const CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(
-            probe_rtv_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(face),
-            rtv_size_);
-        command_list_->OMSetRenderTargets(1, &rtv, FALSE, &probe_dsv);
-        command_list_->ClearRenderTargetView(rtv, kSkyColor, 0, nullptr);
-        command_list_->ClearDepthStencilView(probe_dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-
-        // The gradient sky behind, then the static yard lit by the analytic sky.
-        // Time 0 bakes a still cloudscape into the probe the metals reflect.
-        DrawSky(view_projection, kProbePosition, 0.0f, true);
-        command_list_->SetGraphicsRootSignature(root_signature_.Get());
-        command_list_->SetPipelineState(scene_capture_pipeline_state_.Get());
-        command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        DrawInstances(scene.Instances(), view_projection, sun, 0.0f, false);
-    }
-
-    // And back to a shader resource for the scene pass to reflect off of: the face
-    // renders must drain before any pixel-shader sample of the cube.
-    TextureBarrier(command_list_.Get(), probe_cube_.Get(), D3D12_BARRIER_SYNC_RENDER_TARGET,
-                   D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
-                   D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
-                   D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
-
-    ThrowIfFailed(command_list_->Close(), "CommandList::Close");
-    ID3D12CommandList* lists[] = {command_list_.Get()};
-    queue_->ExecuteCommandLists(_countof(lists), lists);
     FlushGpu();
 }
 
@@ -2983,8 +2774,8 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
     // Reflection hit shading reaches the hit model's geometry and material through bindless
     // views: collect, per model, the heap slots of its vertex and index buffers (as
     // byte-address SRVs) and the base of its primitives in the flat RtPrimInfo array. Slots
-    // are handed out past the reflection probe, the last thing CreateSceneGeometry placed.
-    UINT next_slot = probe_descriptor_ + 1;
+    // are handed out past the shadow map, the last thing CreateSceneGeometry placed.
+    UINT next_slot = shadow_descriptor_ + 1;
     std::vector<RtPrimInfo> prim_infos;
     auto raw_srv = [&](ID3D12Resource* buffer, UINT bytes) -> UINT {
         const UINT slot = next_slot++;
@@ -3014,6 +2805,7 @@ void Renderer::BuildAccelerationStructures(const Scene& scene) {
         for (const DrawPrimitive& prim : model.primitives) {
             RtPrimInfo pi{};
             pi.first_index = prim.first_index;
+            pi.base_color_index = prim.base_color_texture;
             pi.base_color = prim.base_color;
             prim_infos.push_back(pi);
         }
@@ -4153,15 +3945,13 @@ void Renderer::DrawKeybinds(std::string_view title, std::span<const std::string>
 
 void Renderer::DrawInstances(std::span<const MeshInstance> instances,
                              const XMMATRIX& view_projection, XMFLOAT3 sun_direction,
-                             float shadow_receive, bool bind_probe) {
+                             float shadow_receive) {
     // The only per-pass binding the scene signature holds beyond the per-draw root
     // constants: the frame constants (sun matrix + eye) at b1. Bound here, at the top of
     // every batch, so it survives the root-signature switch the outline pass makes --
     // setting a root signature clears every argument bound under the old one. Every
-    // texture, including the shadow map and the probe, now rides the per-draw root
-    // constants as a heap slot the shader fetches bindlessly, so there are no tables to
-    // bind. The probe slot is zeroed for the capture pass (bind_probe false), whose shader
-    // never reads it.
+    // texture, the shadow map included, rides the per-draw root constants as a heap slot
+    // the shader fetches bindlessly, so there are no tables to bind.
     command_list_->SetGraphicsRootConstantBufferView(1, frame_constants_address_);
 
     for (const MeshInstance& instance : instances) {
@@ -4207,11 +3997,9 @@ void Renderer::DrawInstances(std::span<const MeshInstance> instances,
             constants.normal_index = primitive.normal_texture;
             constants.metallic_roughness_index = primitive.metallic_roughness_texture;
             constants.occlusion_index = primitive.occlusion_texture;
-            // The shadow map and the probe, likewise as heap slots. The same for every
-            // draw in the batch, but riding the per-draw constants keeps the pass free of
-            // tables. The capture pass (no probe read) zeroes the probe slot.
+            // The shadow map, likewise as a heap slot. The same for every draw in the
+            // batch, but riding the per-draw constants keeps the pass free of tables.
             constants.shadow_index = shadow_descriptor_;
-            constants.probe_index = bind_probe ? probe_descriptor_ : 0;
 
             command_list_->SetGraphicsRoot32BitConstants(0, kConstantDwords, &constants, 0);
             command_list_->DrawIndexedInstanced(primitive.index_count, 1, primitive.first_index, 0,
@@ -4756,7 +4544,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // The gradient sky, filling the frame behind the yard. Depth is off, so the
     // geometry that follows paints over it. DrawSky binds its own pipeline and root
     // signature, so the scene's are restored before the first instance is drawn.
-    DrawSky(view_projection, camera_position, seconds, false);
+    DrawSky(view_projection, camera_position, seconds);
     command_list_->SetGraphicsRootSignature(root_signature_.Get());
     command_list_->SetPipelineState(pipeline_state_.Get());
 
@@ -4764,10 +4552,10 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // light_view_projection_, so the shadows the world casts line up with its shade.
     const XMFLOAT3 sun = sun_direction_;
     // The world and the resting props receive the sun's shadow.
-    DrawInstances(scene.Instances(), view_projection, sun, 1.0f, true);
+    DrawInstances(scene.Instances(), view_projection, sun, 1.0f);
     // The resting props take the yard's sun too: they are part of the world, and
     // only pass into the near pass once the player lifts them.
-    DrawInstances(props, view_projection, sun, 1.0f, true);
+    DrawInstances(props, view_projection, sun, 1.0f);
 
     // The grass grows over the ground, into the same HDR buffer and depth, so it
     // occludes and fogs with the world and the shafts below march through it. It binds
@@ -4801,7 +4589,7 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
         // follow, which are all DrawInstances and assume the scene's are in force.
         command_list_->SetPipelineState(pipeline_state_.Get());
         command_list_->SetGraphicsRootSignature(root_signature_.Get());
-        DrawInstances(highlight, view_projection, sun, 1.0f, true);
+        DrawInstances(highlight, view_projection, sun, 1.0f);
     }
 
     // The volumetric clouds, composited over the sky *before* the arms are drawn --
@@ -4867,11 +4655,11 @@ void Renderer::Render(const Scene& scene, std::span<const MeshInstance> props,
     // The arms and anything carried do not receive the sun's shadow: they are lit
     // by a sun bolted to the camera, which the shadow map, built from the world's
     // fixed sun, says nothing about. Hence 0 -- their sun term stays unshadowed.
-    DrawInstances(viewmodel.instances, view_projection, viewmodel.sun_direction, 0.0f, true);
+    DrawInstances(viewmodel.instances, view_projection, viewmodel.sun_direction, 0.0f);
     // A carried object rides in the same pass as the arms, under the same key
     // light bolted to the eye, so it is lit like something in the hand and never
     // clipped by the wall the player is facing.
-    DrawInstances(held_props, view_projection, viewmodel.sun_direction, 0.0f, true);
+    DrawInstances(held_props, view_projection, viewmodel.sun_direction, 0.0f);
 
     // The volumetric sun shafts, added into the HDR scene. The world's depth writes
     // must drain, then the depth buffer becomes a shader resource the march reads to

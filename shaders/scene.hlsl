@@ -49,13 +49,10 @@ cbuffer Constants : register(b0) {
     uint g_normal_index;
     uint g_metallic_roughness_index;
     uint g_occlusion_index;
-    // The sun's shadow map and the reflection probe cubemap, also fetched bindlessly.
-    // These are per-pass rather than per-material (the same for every draw in a batch),
-    // but riding the root constants keeps the scene pass free of descriptor tables
-    // entirely. The probe slot is only read on the on-screen path (use_probe); the
-    // capture pass leaves it unused.
+    // The sun's shadow map, also fetched bindlessly. Per-pass rather than per-material
+    // (the same for every draw in a batch), but riding the root constants keeps the
+    // scene pass free of descriptor tables entirely.
     uint g_shadow_index;
-    uint g_probe_index;
 };
 
 // Per-frame, shared by every scene draw: the sun's world-to-clip matrix, the one
@@ -114,12 +111,9 @@ cbuffer FrameConstants : register(b1) {
 // material lacking a given map is pointed at the shared 1x1 white (or flat-normal)
 // stand-in, so there is still no branch and no second pipeline state.
 //
-// The sun's depth buffer (one channel, the light-space depth of the nearest caster)
-// and the reflection probe cubemap (the yard captured once at startup, so a metal
-// reflects the fence and trees, not just the analytic sky) are fetched bindlessly from
-// the bound heap by g_shadow_index / g_probe_index -- see SunVisibility and
-// SpecularEnvironment. The probe is read only on the on-screen path; PSMainCapture,
-// which fills that cube, takes use_probe = false and never fetches it.
+// The sun's depth buffer (one channel, the light-space depth of the nearest caster) is
+// fetched the same way, by g_shadow_index -- see SunVisibility. What a metal reflects no
+// longer comes from a texture at all: SpecularEnvironment traces a ray against the scene.
 SamplerState g_sampler : register(s0);
 // Hardware PCF. SampleCmp compares the receiver's depth against the stored one
 // and bilinearly filters the 0/1 results, so a single tap already softens across
@@ -284,73 +278,107 @@ struct RtInstanceInfo {
 };
 struct RtPrimInfo {
     uint first_index;
+    uint base_color_index;
     uint pad0;
     uint pad1;
-    uint pad2;
     float3 base_color;
-    float pad3;
+    float pad2;
 };
 
-// The specular environment along a reflection vector `r` from world point `origin`.
-// On the on-screen pass a hardware ray traces the reflection against the yard's TLAS
-// (inline RayQuery, no ray pipeline): a miss reflects the analytic sky, blurred toward
-// the average by roughness; a hit returns -- for now -- a dark placeholder, so reflected
-// geometry reads as a dark silhouette on the metal. That is increment 1, proving the ray
-// path; real hit shading (the fence, the tables, the meat) comes next. The capture pass
-// (use_probe false) has no TLAS to trace and must stay cheap, so it takes the analytic
-// sky, exactly as it did before -- which is what the probe cube it fills will reflect.
-float3 SpecularEnvironment(float3 origin, float3 r, float roughness, bool use_probe) {
-    if (use_probe) {
-        RaytracingAccelerationStructure tlas = ResourceDescriptorHeap[g_tlas_index];
-        RayDesc ray;
-        // Bias the origin off the surface along the reflection so the ray does not
-        // immediately re-hit the very triangle it started from.
-        ray.Origin = origin + r * 0.02f;
-        ray.Direction = r;
-        ray.TMin = 0.0f;
-        ray.TMax = 100.0f;
-        RayQuery<RAY_FLAG_NONE> query;
-        query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
-        query.Proceed(); // All geometry is opaque, so one step resolves the traversal.
-        if (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-            // Shade the hit: look up the hit instance and primitive, fetch the struck
-            // triangle's three vertices from the model's bindless vertex/index buffers,
-            // interpolate the surface normal, and light it with the sun and sky. No
-            // texture, no shadow ray yet -- a lit, flat-coloured reflection of the yard.
-            const StructuredBuffer<RtInstanceInfo> instance_infos =
-                ResourceDescriptorHeap[g_instance_info_index];
-            const StructuredBuffer<RtPrimInfo> prim_infos =
-                ResourceDescriptorHeap[g_prim_info_index];
-            const RtInstanceInfo inst = instance_infos[query.CommittedInstanceIndex()];
-            const RtPrimInfo prim = prim_infos[inst.prim_base + query.CommittedGeometryIndex()];
+// Which mip of a reflected surface's base-colour map to read. A reflection ray carries no
+// screen-space derivatives, so the hardware cannot pick a mip for us and the sample must
+// name one. Two things widen the footprint a ray averages over: the roughness of the
+// surface it left, which spreads the reflection into a cone, and the distance it travelled,
+// which grows that cone's cross-section. Blurring with both also hides the aliasing a
+// mip-0 fetch would crawl with as the camera moves.
+float ReflectionMip(float roughness, float distance) {
+    return roughness * 5.0f + log2(1.0f + distance * 0.1f);
+}
 
-            const ByteAddressBuffer index_buffer = ResourceDescriptorHeap[inst.ib_srv];
-            const ByteAddressBuffer vertex_buffer = ResourceDescriptorHeap[inst.vb_srv];
-            const uint tri = prim.first_index + query.CommittedPrimitiveIndex() * 3;
-            const uint i0 = index_buffer.Load(tri * 4);
-            const uint i1 = index_buffer.Load((tri + 1) * 4);
-            const uint i2 = index_buffer.Load((tri + 2) * 4);
-            // Vertex is 48 bytes: position at 0, normal at 12 (see Vertex in model.hpp).
-            const float3 n0 = asfloat(vertex_buffer.Load3(i0 * 48 + 12));
-            const float3 n1 = asfloat(vertex_buffer.Load3(i1 * 48 + 12));
-            const float3 n2 = asfloat(vertex_buffer.Load3(i2 * 48 + 12));
-            const float2 bary = query.CommittedTriangleBarycentrics();
-            const float3 object_normal =
-                n0 * (1.0f - bary.x - bary.y) + n1 * bary.x + n2 * bary.y;
-            // Object -> world for the normal. The yard's boxes have axis-aligned faces and
-            // scale, so the 3x3 (translation dropped) plus a normalize is exact enough here.
-            float3 hit_normal = normalize(mul((float3x3)query.CommittedObjectToWorld3x4(),
-                                              object_normal));
-            if (dot(hit_normal, r) > 0.0f) {
-                hit_normal = -hit_normal; // face the incoming ray
-            }
-            const float3 albedo = SrgbToLinear(prim.base_color * inst.tint);
-            const float n_dot_l = saturate(dot(hit_normal, g_sun_direction));
-            const float3 sun =
-                SrgbToLinear(g_sun_color) * g_sun_intensity * n_dot_l * (1.0f / kPi);
-            const float3 ambient = SrgbToLinear(g_sky_ambient) * g_ambient_strength;
-            return albedo * (sun + ambient);
+// The specular environment along a reflection vector `r` from world point `origin`. A
+// hardware ray traces the reflection against the scene's TLAS (inline RayQuery, no ray
+// pipeline): a miss reflects the analytic sky, blurred toward the average by roughness; a
+// hit shades the struck triangle -- its interpolated normal, its base-colour map sampled
+// at the ray's own mip, lit by the sky ambient and by a sun a second ray has to reach past
+// the rest of the scene to deliver.
+float3 SpecularEnvironment(float3 origin, float3 r, float roughness) {
+    RaytracingAccelerationStructure tlas = ResourceDescriptorHeap[g_tlas_index];
+    RayDesc ray;
+    // Bias the origin off the surface along the reflection so the ray does not
+    // immediately re-hit the very triangle it started from.
+    ray.Origin = origin + r * 0.02f;
+    ray.Direction = r;
+    ray.TMin = 0.0f;
+    ray.TMax = 100.0f;
+    RayQuery<RAY_FLAG_NONE> query;
+    query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
+    query.Proceed(); // All geometry is opaque, so one step resolves the traversal.
+    if (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+        // Shade the hit: look up the hit instance and primitive, fetch the struck
+        // triangle's three vertices from the model's bindless vertex/index buffers,
+        // interpolate the surface across them, and light it with the sun and sky.
+        const StructuredBuffer<RtInstanceInfo> instance_infos =
+            ResourceDescriptorHeap[g_instance_info_index];
+        const StructuredBuffer<RtPrimInfo> prim_infos = ResourceDescriptorHeap[g_prim_info_index];
+        const RtInstanceInfo inst = instance_infos[query.CommittedInstanceIndex()];
+        const RtPrimInfo prim = prim_infos[inst.prim_base + query.CommittedGeometryIndex()];
+
+        const ByteAddressBuffer index_buffer = ResourceDescriptorHeap[inst.ib_srv];
+        const ByteAddressBuffer vertex_buffer = ResourceDescriptorHeap[inst.vb_srv];
+        const uint tri = prim.first_index + query.CommittedPrimitiveIndex() * 3;
+        const uint i0 = index_buffer.Load(tri * 4);
+        const uint i1 = index_buffer.Load((tri + 1) * 4);
+        const uint i2 = index_buffer.Load((tri + 2) * 4);
+        // Vertex is 48 bytes: position at 0, normal at 12 (see Vertex in model.hpp).
+        const float3 n0 = asfloat(vertex_buffer.Load3(i0 * 48 + 12));
+        const float3 n1 = asfloat(vertex_buffer.Load3(i1 * 48 + 12));
+        const float3 n2 = asfloat(vertex_buffer.Load3(i2 * 48 + 12));
+        // ... and its texture coordinates, at offset 24 of the same vertex.
+        const float2 t0 = asfloat(vertex_buffer.Load2(i0 * 48 + 24));
+        const float2 t1 = asfloat(vertex_buffer.Load2(i1 * 48 + 24));
+        const float2 t2 = asfloat(vertex_buffer.Load2(i2 * 48 + 24));
+        const float2 bary = query.CommittedTriangleBarycentrics();
+        const float3 object_normal = n0 * (1.0f - bary.x - bary.y) + n1 * bary.x + n2 * bary.y;
+        const float2 hit_uv = t0 * (1.0f - bary.x - bary.y) + t1 * bary.x + t2 * bary.y;
+        // Object -> world for the normal. The yard's boxes have axis-aligned faces and
+        // scale, so the 3x3 (translation dropped) plus a normalize is exact enough here.
+        float3 hit_normal =
+            normalize(mul((float3x3)query.CommittedObjectToWorld3x4(), object_normal));
+        if (dot(hit_normal, r) > 0.0f) {
+            hit_normal = -hit_normal; // face the incoming ray
         }
+        // The struck surface's own base-colour map, fetched bindlessly by the slot the
+        // primitive carries and sampled at an explicit mip (see ReflectionMip -- a ray has
+        // no derivatives to pick one from). The texture is decoded by its sRGB view; the
+        // flat factor and tint are decoded here, exactly as the rasterized shade does.
+        const Texture2D<float4> hit_base_color = ResourceDescriptorHeap[prim.base_color_index];
+        const float mip = ReflectionMip(roughness, query.CommittedRayT());
+        const float3 albedo = SrgbToLinear(prim.base_color * inst.tint) *
+                              hit_base_color.SampleLevel(g_sampler, hit_uv, mip).rgb;
+        // Is the sun actually reaching what we are reflecting? A second ray, from the hit
+        // toward the sun, answers it exactly -- no shadow map, no projection, no bias
+        // tuning, and it covers the whole scene rather than the map's frame. It only needs
+        // to know whether anything is in the way, so the traversal is told to stop at the
+        // first triangle it meets rather than search for the nearest one, and the origin is
+        // lifted off the surface along its own normal so the hit does not shadow itself.
+        const float n_dot_l = saturate(dot(hit_normal, g_sun_direction));
+        float sun_visibility = 0.0f;
+        if (n_dot_l > 0.0f) {
+            RayDesc shadow_ray;
+            shadow_ray.Origin = ray.Origin + r * query.CommittedRayT() + hit_normal * 0.02f;
+            shadow_ray.Direction = g_sun_direction;
+            shadow_ray.TMin = 0.0f;
+            shadow_ray.TMax = 100.0f;
+            RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> shadow_query;
+            shadow_query.TraceRayInline(tlas, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF,
+                                        shadow_ray);
+            shadow_query.Proceed();
+            sun_visibility = shadow_query.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0f : 1.0f;
+        }
+        const float3 sun = SrgbToLinear(g_sun_color) * g_sun_intensity * n_dot_l *
+                           sun_visibility * (1.0f / kPi);
+        const float3 ambient = SrgbToLinear(g_sky_ambient) * g_ambient_strength;
+        return albedo * (sun + ambient);
     }
     return PrefilteredSky(r, roughness);
 }
@@ -366,12 +394,8 @@ float2 EnvBRDFApprox(float roughness, float n_dot_v) {
     return float2(-1.04f, 1.04f) * a004 + r.zw;
 }
 
-// The whole surface shade, in linear light. `use_probe` picks the specular
-// environment: the captured cubemap for the on-screen pass, the analytic sky for
-// the capture pass that fills that cube. It is a compile-time literal at each
-// entry point below, so the cube sample folds away entirely for the capture
-// variant and no feedback is possible.
-float4 ShadeScene(PSInput input, bool use_probe) {
+// The whole surface shade, in linear light.
+float4 ShadeScene(PSInput input) {
     // The material's four textures, fetched bindlessly from the bound heap by the
     // slots the draw handed over in its root constants. A material with no map of a
     // kind was pointed at the shared white or flat-normal stand-in on the CPU, so
@@ -467,7 +491,7 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     // and NaN * 0 (the dry case) stays NaN and paints the whole pixel black. saturate
     // clamps it to a safe 0, exactly as FresnelSchlick above guards its own pow.
     const float wet_rim = pow(saturate(1.0f - n_dot_v), 5.0f) * saturate(g_wetness) * kWetRim;
-    const float3 ambient_specular = SpecularEnvironment(input.world, reflection, roughness, use_probe) *
+    const float3 ambient_specular = SpecularEnvironment(input.world, reflection, roughness) *
                                     (f0 * env_brdf.x + env_brdf.y + wet_rim);
 
     // Ambient occlusion darkens only the indirect light -- the sky's diffuse and
@@ -504,16 +528,8 @@ float4 ShadeScene(PSInput input, bool use_probe) {
     return float4(color, 1.0f);
 }
 
-// The on-screen pass: reflect the captured probe. Its target is the linear HDR
-// scene buffer, so the shade is written as-is and the tonemap pass encodes it.
+// The target is the linear HDR scene buffer, so the shade is written as-is and the
+// tonemap pass encodes it, once, for the whole frame.
 float4 PSMain(PSInput input) : SV_TARGET {
-    return ShadeScene(input, true);
-}
-
-// The capture pass that fills the probe: reflect the analytic sky instead, so it
-// never reads the cube it is writing. Its target is the _UNORM probe cube, sampled
-// back through an sRGB view, so the linear shade is encoded here.
-float4 PSMainCapture(PSInput input) : SV_TARGET {
-    const float4 shade = ShadeScene(input, false);
-    return float4(LinearToSrgb(shade.rgb), shade.a);
+    return ShadeScene(input);
 }

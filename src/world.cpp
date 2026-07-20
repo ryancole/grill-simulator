@@ -18,8 +18,8 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
       renderer_(&renderer),
       physics_(&physics) {
     // Hand the freshly built Scene to the persistent systems. Aim the sun and set
-    // the sky first, so the reflection probe LoadScene captures is lit and coloured
-    // the level's way; then upload the geometry, and drop the immovable colliders
+    // the sky first, so the first frame is lit and coloured the level's way; then
+    // upload the geometry, and drop the immovable colliders
     // into the physics scene the props and furniture already registered their bodies
     // with.
     renderer.SetSunDirection(level.sun_direction);

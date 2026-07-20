@@ -61,12 +61,12 @@ public:
     // for the whole session, independent of which level is loaded. No scene geometry
     // is uploaded here; call LoadScene once the first level's Scene exists.
     void Initialize(HWND hwnd, UINT width, UINT height);
-    // Uploads one level's models, textures and reflection probe into the GPU
+    // Uploads one level's models, textures and acceleration structures into the GPU
     // resources the frame draws from. Call after Initialize, and again after
     // ReleaseScene to swap in a different level. Assumes no scene is currently
     // loaded (ReleaseScene, or a fresh Initialize, left the slots empty).
     void LoadScene(const Scene& scene);
-    // Frees the current level's models, textures and probe, so a different Scene
+    // Frees the current level's models, textures and structures, so a different Scene
     // can be uploaded. Flushes the GPU first -- the frame in flight may still be
     // reading these -- so it is only for a between-levels swap, never mid-frame.
     // The device, swapchain, pipelines and shadow map outlive it; the font atlas
@@ -74,13 +74,12 @@ public:
     void ReleaseScene();
     // Points the sun a level's way: re-aims the shadow map's orthographic light and
     // sets the direction the scene's direct term is lit from. The gradient sky
-    // ignores it. Call before LoadScene so the reflection probe captures this sun.
+    // ignores it.
     void SetSunDirection(DirectX::XMFLOAT3 direction);
     // Sets the level's sky and lighting -- the sun colour, sky gradient, clouds,
     // ambient, fog and shafts every pass shades with. Just records the value; the
     // per-frame passes stamp it into their constant buffers each frame, so it takes
-    // effect on the next Render. Call before LoadScene so the reflection probe bakes
-    // the level's sky, exactly as SetSunDirection is called for its sun.
+    // effect on the next Render.
     void SetEnvironment(const Environment& environment);
     // A level's grass field: a flat rectangle of procedurally grown blades. `center`
     // is its middle on the ground (y the height the blades stand on), `size` its extent
@@ -255,7 +254,7 @@ private:
     // The one shader-visible CBV/SRV/UAV heap, created once at startup. Its front
     // block holds the session SRVs that outlive a level swap (slot 0 the HDR scene
     // buffer, then depth/shadow/bloom/fluid); the per-level material, atlas, shadow
-    // and probe descriptors follow, rewritten in place on each swap. Bound once and
+    // and raytracing descriptors follow, rewritten in place on each swap. Bound once and
     // never swapped mid-frame, which is what the scene pass's bindless fetches need.
     void CreateEngineDescriptorHeap();
     // The HDR scene buffer the whole world renders into, in linear light: an
@@ -331,13 +330,6 @@ private:
     // Uploads every model the scene holds, plus the 1x1 white texture that
     // stands in for a material with no texture of its own.
     void CreateSceneGeometry(const Scene& scene);
-
-    // Renders the static yard into a cubemap once, from a fixed point at its
-    // centre, so the scene pass can reflect the real fence and trees off a metal
-    // rather than only the analytic sky. Six faces, each the scene lit by the
-    // analytic sky (the capture pixel shader), with the gradient sky behind. Runs
-    // after CreateSceneGeometry, on the same one-shot command list.
-    void CaptureReflectionProbe(const Scene& scene);
 
     // Builds the raytracing acceleration structures the scene pass reflects off: a
     // bottom-level AS per model (BuildAccelerationStructures fills each GpuModel::blas)
@@ -490,22 +482,18 @@ private:
     // One draw per primitive of each instance's model, each under its own root
     // constants. `shadow_receive` is 1 for the world, which is shadowed by the
     // sun, and 0 for the viewmodel, which is not.
-    // `bind_probe` binds the reflection cubemap for the pass to sample. The
-    // on-screen pass wants it; the probe-capture pass must not (it is filling that
-    // cube and its pixel shader never reads it), so it passes false.
     void DrawInstances(std::span<const MeshInstance> instances,
                        const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 sun_direction,
-                       float shadow_receive, bool bind_probe);
+                       float shadow_receive);
 
     // Fills the currently bound render target with the gradient sky, seen from
     // `camera_position` through `view_projection`. Draws no depth, so geometry
     // rendered afterward paints over it. Switches to the sky pipeline and root
-    // signature; the caller restores whatever it needs next.
-    // `capture` picks the pixel shader: the on-screen pass leaves its radiance
-    // linear for the HDR buffer, the probe capture encodes to sRGB for the 8-bit
-    // cube. `time` drifts the cloud layer; the capture passes 0 for a still probe.
+    // signature; the caller restores whatever it needs next. Its radiance is left
+    // linear for the HDR buffer, which the tonemap pass encodes. `time` is vestigial
+    // (it once drifted the flat cloud layer).
     void DrawSky(const DirectX::XMMATRIX& view_projection, DirectX::XMFLOAT3 camera_position,
-                 float time, bool capture);
+                 float time);
 
     // The shadow pass: draws every caster depth-only into the shadow map from the
     // sun's point of view, wrapped in the barriers that flip the map between
@@ -585,7 +573,7 @@ private:
 
     // The one persistent, shader-visible CBV/SRV/UAV heap the game binds -- the
     // session SRVs (HDR buffer, depth, shadow, bloom, fluid) in its front block, the
-    // per-level material/atlas/shadow/probe descriptors after them. See
+    // per-level material/atlas/shadow/raytracing descriptors after them. See
     // CreateEngineDescriptorHeap and the kMaterialHeapBase / kSrvHeapSize constants in
     // the .cpp. Shaders index it directly (ResourceDescriptorHeap); a level swap
     // overwrites the per-level region rather than rebuilding the heap.
@@ -600,12 +588,9 @@ private:
 
     // The gradient-sky background pass. No vertex buffer, no textures: the pixel
     // shader reconstructs the view ray from the inverse view-projection handed in
-    // as root constants. `sky_capture_pipeline_state_` is the same pass encoding to
-    // sRGB into the 8-bit probe cube, where the on-screen one leaves its radiance
-    // linear for the HDR buffer.
+    // as root constants.
     ComPtr<ID3D12RootSignature> sky_root_signature_;
     ComPtr<ID3D12PipelineState> sky_pipeline_state_;
-    ComPtr<ID3D12PipelineState> sky_capture_pipeline_state_;
 
     // The resolve pass: tonemaps the HDR scene buffer and encodes it to the
     // swapchain. Reads engine_heap_ slot 0; no vertex buffer (a fullscreen triangle
@@ -649,17 +634,6 @@ private:
     ComPtr<ID3D12PipelineState> bloom_downsample_pipeline_state_;
     ComPtr<ID3D12PipelineState> bloom_upsample_pipeline_state_;
 
-    // The reflection probe. `scene_capture_pipeline_state_` is the scene PSO with
-    // the capture pixel shader (analytic sky, no cube read); it fills probe_cube_
-    // through the six face RTVs in probe_rtv_heap_, depth-tested against
-    // probe_depth_. The finished cube's SRV lives in engine_heap_ at
-    // probe_descriptor_. All built once, at startup.
-    ComPtr<ID3D12PipelineState> scene_capture_pipeline_state_;
-    ComPtr<ID3D12Resource> probe_cube_;
-    ComPtr<ID3D12DescriptorHeap> probe_rtv_heap_;
-    ComPtr<ID3D12Resource> probe_depth_;
-    UINT probe_descriptor_ = 0;
-
     // The pick-up outline pass. Shares the scene's vertex buffers and input
     // layout; only the root signature and PSO differ.
     ComPtr<ID3D12RootSignature> outline_root_signature_;
@@ -700,8 +674,8 @@ private:
     DirectX::XMFLOAT4X4 light_view_projection_{};
     // The current level's sky and lighting, stamped into every pass's constant
     // buffer each frame (see the ApplyEnvironment overloads). Defaults to the look
-    // the shaders once baked in, so the first frames before any level loads -- and
-    // the reflection probe's own default capture -- are drawn as they always were.
+    // the shaders once baked in, so the first frames before any level loads are
+    // drawn as they always were.
     Environment environment_ = kDefaultEnvironment;
     // The NVIDIA Flow fire/smoke sim, run by RenderFlow each frame. Session-persistent like
     // the device and pipelines: it comes up in Initialize on our device/queue/fence and is
