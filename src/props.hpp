@@ -208,18 +208,26 @@ private:
         // property of the asset rather than a failure: such an item simply stays rigid
         // and SoftBody::Status() says why.
         //
-        // A unique_ptr rather than an optional because a SoftBody owns SDK handles and
-        // is neither copyable nor movable, and items_ is a vector.
-        //
-        // While this is set the item is drawn from the soft body's skinned vertices
+        // While `soft` is set the item is drawn from the soft body's skinned vertices
         // (see SoftInstances) and NOT from world_, so it appears in exactly one draw
-        // list. The rigid body stays alive beside it: it is what the pick-up gaze test
-        // sweeps, what the shove pushes and what carries the item's pose, since a
+        // list. The rigid body stays alive beside it as a query-only shell: it is what
+        // the pick-up gaze test sweeps and what carries the item's pose, since a
         // deformable volume has no pose to speak of.
-        std::unique_ptr<SoftBody> soft;
-        // The renderer's handle for this item's deformable mesh, valid while `soft` is.
-        // Assigned by RegisterSoftMeshes once the renderer has the level's geometry.
+        //
+        // A food that swaps model as it cooks owns one body PER stage, each cooked from
+        // that stage's own model, so the chicken deforms as the raw shape until medium
+        // and as the cooked shape after -- a tet mesh cannot be re-skinned to a
+        // different model, so the swap has to swap bodies. `soft` and `soft_mesh` name
+        // the ACTIVE stage's body and renderer mesh; everything downstream -- the carry,
+        // the proxy glue, the draw lists -- reads only those two and never learns the
+        // twins exist. Inactive bodies sit parked outside the physics scene (unique_ptr
+        // per stage because a SoftBody owns SDK handles and is neither copyable nor
+        // movable; a null entry is a stage whose model would not cook).
+        SoftBody* soft = nullptr;
         std::uint32_t soft_mesh = 0;
+        std::vector<std::unique_ptr<SoftBody>> soft_stage_bodies;
+        std::vector<std::uint32_t> soft_stage_meshes;
+        std::size_t soft_stage = 0;
 
         // Set only on the serving tray: the delivery surface it carries. Props reads it
         // to place a live serve zone at the tray's current pose and to rest delivered
@@ -277,12 +285,13 @@ private:
         bool in_simulation = true;
     };
 
-    // `stages` are the item's cook-stage models (at least one); `base_model` is the
-    // model the physics box is cut from -- the base look, since the collider does not
-    // resize as the food swaps model. `cook` gives the item a cooking state built from
-    // that food's profile; the tongs and any other non-food carryable pass nullopt and
-    // simply never cook.
-    void Add(std::vector<CookStage> stages, const Model& base_model, std::string name,
+    // `stages` are the item's cook-stage models (at least one); `pool` is the loaded
+    // model pool they index -- the first stage's model cuts the physics box (the base
+    // look, since the collider does not resize as the food swaps model), and each
+    // stage's model seeds its own soft body. `cook` gives the item a cooking state
+    // built from that food's profile; the tongs and any other non-food carryable pass
+    // nullopt and simply never cook.
+    void Add(std::vector<CookStage> stages, const std::vector<Model>& pool, std::string name,
              DirectX::XMFLOAT3 position, float yaw_degrees, DirectX::FXMMATRIX held_local,
              float knock_rating, ImpactSound impact_sound, std::optional<CookProfile> cook,
              std::optional<ServeDef> serve, Ability ability, std::optional<HeatSource> heat,
@@ -314,6 +323,10 @@ private:
     // item has reached (the base while raw, or for a non-food that never cooks). So a
     // chicken shows its raw model until it hits medium, then its cooked one.
     static std::uint32_t CurrentModel(const Item& item);
+    // The index into `stages` behind CurrentModel: the stage with the highest `from`
+    // band the cook has reached. Split out so the soft-body swap can compare stages
+    // by index rather than by model id.
+    static std::size_t CurrentStage(const Item& item);
     // The item the player is looking at within reach, or -1. A sphere swept down
     // the gaze picks the nearest prop it meets; the query is filtered to prop
     // bodies, so the static world and the player's own capsule are ignored.
