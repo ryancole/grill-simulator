@@ -243,6 +243,18 @@ private:
     // destructor reads it too: a parked body must not be scene-removed twice.
     bool parked_ = false;
 
+    // The recovery snapshot (see RecoverGrip): the whole shape as it was gripped, in the
+    // carry pose's frame -- simulation and collision vertices both, inverse masses in w
+    // (pinned already zeroed) -- plus how big it was. If a carry blows the solve up, the
+    // snapshot is re-planted at the hand and the yard never learns it happened.
+    std::vector<DirectX::XMFLOAT4> grab_sim_local_;
+    std::vector<DirectX::XMFLOAT4> grab_collision_local_;
+    DirectX::XMFLOAT3 grab_extent_{0.0f, 0.0f, 0.0f};
+
+    // Re-plants the grab snapshot at `pose`, stilled: the escape hatch for a solve that
+    // has gone ballistic mid-carry.
+    void RecoverGrip(const DirectX::XMFLOAT4X4& pose);
+
     // See Status(). Set as soon as the cook has an opinion; "no gpu" when there was
     // never a CUDA context to try on.
     std::string status_ = "no gpu";

@@ -551,6 +551,19 @@ namespace {
 constexpr float kGripHeightFraction = 0.35f;
 constexpr float kGripRadiusFraction = 0.55f;
 
+// The carry's stability envelope, and the lesson of the first playtest. The pinned
+// vertices are infinitely massive, so grinding them into the world (holding the meat
+// against the table while walking) pumps unbounded contact impulses into the free part,
+// and the velocity echo faithfully re-injects that heat every frame -- measured going
+// from a 10 m/s simmer to 5.5 MILLION m/s and a 39-kilometre patty inside three frames,
+// sweeping every prop in the yard into orbit on the way. So: every echoed velocity is
+// damped and capped (the hand itself never beats ~5 m/s, so nothing it drags has
+// business sustaining more), and if the shape still blows past sanity it is quietly
+// re-planted from the grab-time snapshot instead of being allowed to flail.
+constexpr float kCarryVelocityDamping = 0.92f;
+constexpr float kCarryVelocityCap = 6.0f;     // m/s
+constexpr float kCarryBlowupFactor = 3.0f;    // extent vs the grab-time extent
+
 } // namespace
 
 void SoftBody::BeginKinematic(const XMFLOAT4X4& pose) {
@@ -664,6 +677,25 @@ void SoftBody::BeginKinematic(const XMFLOAT4X4& pose) {
         collision_positions[j] += delta;
     }
 
+    // The recovery snapshot: the whole grabbed shape in the carry pose's frame, taken
+    // now, while it is known-good. If the solve later goes ballistic (see
+    // UpdateKinematic), this is what gets planted back into the hand.
+    grab_extent_ = XMFLOAT3(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
+    grab_sim_local_.resize(local.size());
+    for (size_t i = 0; i < local.size(); ++i) {
+        grab_sim_local_[i] = XMFLOAT4(local[i].x - anchor.x, local[i].y - anchor.y,
+                                      local[i].z - anchor.z, positions[i].w);
+    }
+    grab_collision_local_.resize(collision_count);
+    for (PxU32 j = 0; j < collision_count; ++j) {
+        XMFLOAT3 cl;
+        XMStoreFloat3(&cl, XMVector3Transform(XMVectorSet(collision_positions[j].x,
+                                                          collision_positions[j].y,
+                                                          collision_positions[j].z, 1.0f),
+                                              to_local));
+        grab_collision_local_[j] = XMFLOAT4(cl.x, cl.y, cl.z, collision_positions[j].w);
+    }
+
     PxDeformableVolumeExt::copyToDevice(
         *volume_,
         PxDeformableVolumeDataFlags(PxDeformableVolumeDataFlag::eSIM_POSITION_INVMASS |
@@ -674,9 +706,72 @@ void SoftBody::BeginKinematic(const XMFLOAT4X4& pose) {
     kinematic_ = true;
 }
 
+void SoftBody::RecoverGrip(const XMFLOAT4X4& pose) {
+    // Re-plant the grab-time snapshot at the hand, stilled -- shape, masses, collision
+    // mesh, everything -- and rewrite the host mirrors to match, so this same frame
+    // skins and draws the recovered meat rather than the explosion. The player sees the
+    // meat snap back into their palm for one frame; the yard sees nothing at all.
+    PxVec4* positions = static_cast<PxVec4*>(sim_positions_pinned_);
+    PxVec4* velocities = static_cast<PxVec4*>(sim_velocities_pinned_);
+    const XMMATRIX to_world = XMLoadFloat4x4(&pose);
+    for (size_t i = 0; i < grab_sim_local_.size(); ++i) {
+        XMFLOAT3 world;
+        XMStoreFloat3(&world,
+                      XMVector3Transform(XMVectorSet(grab_sim_local_[i].x, grab_sim_local_[i].y,
+                                                     grab_sim_local_[i].z, 1.0f),
+                                         to_world));
+        positions[i] = PxVec4(world.x, world.y, world.z, grab_sim_local_[i].w);
+        velocities[i] = PxVec4(0.0f);
+        readback_[i] = XMFLOAT4(world.x, world.y, world.z, grab_sim_local_[i].w);
+        sim_positions_[i] = world;
+    }
+    PxVec4* collision_positions = static_cast<PxVec4*>(collision_positions_pinned_);
+    for (size_t j = 0; j < grab_collision_local_.size(); ++j) {
+        XMFLOAT3 world;
+        XMStoreFloat3(&world, XMVector3Transform(XMVectorSet(grab_collision_local_[j].x,
+                                                             grab_collision_local_[j].y,
+                                                             grab_collision_local_[j].z, 1.0f),
+                                                 to_world));
+        collision_positions[j] =
+            PxVec4(world.x, world.y, world.z, grab_collision_local_[j].w);
+    }
+    PxDeformableVolumeExt::copyToDevice(
+        *volume_,
+        PxDeformableVolumeDataFlags(PxDeformableVolumeDataFlag::eSIM_POSITION_INVMASS |
+                                    PxDeformableVolumeDataFlag::eSIM_VELOCITY |
+                                    PxDeformableVolumeDataFlag::ePOSITION_INVMASS),
+        positions, velocities, collision_positions,
+        static_cast<PxVec4*>(rest_positions_pinned_));
+    volume_->setWakeCounter(1.0f);
+    Skin();
+}
+
 void SoftBody::UpdateKinematic(const XMFLOAT4X4& pose) {
     if (!kinematic_) {
         return;
+    }
+
+    // Sanity first: if the solve blew up since the last frame -- a vertex went
+    // non-finite, or the shape swelled past any size a squashed meat can be -- replant
+    // the grab snapshot and skip the echo entirely, so the garbage below is never read
+    // back in. Compared against the grab-time extent so a big steak and a small patty
+    // get the same slack.
+    {
+        XMFLOAT3 lo{FLT_MAX, FLT_MAX, FLT_MAX};
+        XMFLOAT3 hi{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+        bool finite = true;
+        for (const XMFLOAT4& v : readback_) {
+            finite = finite && std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+            lo = {std::min(lo.x, v.x), std::min(lo.y, v.y), std::min(lo.z, v.z)};
+            hi = {std::max(hi.x, v.x), std::max(hi.y, v.y), std::max(hi.z, v.z)};
+        }
+        const float allowed =
+            kCarryBlowupFactor * std::max({grab_extent_.x, grab_extent_.y, grab_extent_.z});
+        if (!finite || (hi.x - lo.x) > allowed || (hi.y - lo.y) > allowed ||
+            (hi.z - lo.z) > allowed) {
+            RecoverGrip(pose);
+            return;
+        }
     }
     // Refresh BOTH host mirrors from the live state -- the positions from the readback
     // Update just brought down, the velocities straight off the device -- then overwrite
@@ -697,6 +792,17 @@ void SoftBody::UpdateKinematic(const XMFLOAT4X4& pose) {
             readback_.size() * sizeof(PxVec4));
     }
     std::memcpy(positions, readback_.data(), readback_.size() * sizeof(PxVec4));
+    // The echo is damped and capped on the way back in. Without this the echo is a
+    // ratchet: grinding the immovable grip against the world agitates the free part,
+    // the echo hands the agitation straight back, and nothing ever bleeds energy off.
+    for (size_t i = 0; i < readback_.size(); ++i) {
+        PxVec3 v = velocities[i].getXYZ() * kCarryVelocityDamping;
+        const float speed = v.magnitude();
+        if (speed > kCarryVelocityCap) {
+            v *= kCarryVelocityCap / speed;
+        }
+        velocities[i] = PxVec4(v.x, v.y, v.z, velocities[i].w);
+    }
     const XMMATRIX to_world = XMLoadFloat4x4(&pose);
     for (size_t p = 0; p < pinned_.size(); ++p) {
         XMFLOAT3 world;
@@ -746,7 +852,14 @@ void SoftBody::EndKinematic(const XMFLOAT3& velocity) {
     std::memcpy(positions, readback_.data(), readback_.size() * sizeof(PxVec4));
     const PxVec4 toss(velocity.x, velocity.y, velocity.z, 0.0f);
     for (size_t i = 0; i < readback_.size(); ++i) {
-        velocities[i] += toss;
+        // Capped like the carry echo, so letting go during a contact spike releases a
+        // meat, not a projectile.
+        PxVec3 v = velocities[i].getXYZ();
+        const float speed = v.magnitude();
+        if (speed > kCarryVelocityCap) {
+            v *= kCarryVelocityCap / speed;
+        }
+        velocities[i] = PxVec4(v.x, v.y, v.z, velocities[i].w) + toss;
     }
     for (size_t p = 0; p < pinned_.size(); ++p) {
         // The readback saw the pinned vertices with the zeroed mass the grip gave them;
