@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 
 using namespace DirectX;
 using namespace physx;
@@ -170,9 +171,9 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
     // held, how it lands, and -- for a food -- how it cooks (nullopt leaves the tongs
     // inert). Placed a hair above the ground in the files so physics settles them flat.
     for (const CarryableSpawn& spawn : spawns) {
-        // The base (raw) model cuts the physics box; the whole stage list rides along
-        // so the item can swap look as it cooks.
-        Add(spawn.models, pool[spawn.models.front().model], spawn.name, spawn.pos, spawn.yaw,
+        // The whole model pool rides along: the base (raw) model cuts the physics box,
+        // and every cook stage's model seeds a soft body of its own.
+        Add(spawn.models, pool, spawn.name, spawn.pos, spawn.yaw,
             HoldFor(spawn.hold), spawn.knock_rating, spawn.impact_sound, spawn.cook, spawn.serve,
             spawn.ability, spawn.heat, spawn.heat_offset, spawn.ignitable);
     }
@@ -263,30 +264,35 @@ float Props::ItemWetness(const Item& item) {
     return item.wetness ? item.wetness->Wetness() : 0.0f;
 }
 
-std::uint32_t Props::CurrentModel(const Item& item) {
+std::size_t Props::CurrentStage(const Item& item) {
     // Pick the stage with the highest `from` band the cook has reached. A non-food has
     // no cook, so it reads as Raw and shows its single base stage. The scan does not
     // assume the stages are sorted -- it takes the greatest matching band outright --
-    // so the browning tint still layers on top of whichever model this returns.
+    // so the browning tint still layers on top of whichever stage this returns.
     const int band = static_cast<int>(item.cook ? item.cook->DonenessBand()
                                                  : CookInformation::Doneness::Raw);
-    std::uint32_t model = item.stages.front().model;
+    std::size_t index = 0;
     int best = -1;
-    for (const CookStage& stage : item.stages) {
-        const int from = static_cast<int>(stage.from);
+    for (std::size_t s = 0; s < item.stages.size(); ++s) {
+        const int from = static_cast<int>(item.stages[s].from);
         if (from <= band && from > best) {
             best = from;
-            model = stage.model;
+            index = s;
         }
     }
-    return model;
+    return index;
 }
 
-void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::string name,
+std::uint32_t Props::CurrentModel(const Item& item) {
+    return item.stages[CurrentStage(item)].model;
+}
+
+void Props::Add(std::vector<CookStage> stages, const std::vector<Model>& pool, std::string name,
                 XMFLOAT3 position, float yaw_degrees, FXMMATRIX held_local, float knock_rating,
                 ImpactSound impact_sound, std::optional<CookProfile> cook,
                 std::optional<ServeDef> serve, Ability ability, std::optional<HeatSource> heat,
                 XMFLOAT3 heat_offset, std::optional<IgnitableRequirements> ignitable) {
+    const Model& base_model = pool[stages.front().model];
     Item item{};
     item.stages = std::move(stages);
     item.name = std::move(name);
@@ -325,9 +331,39 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
     if (item.cook) {
         XMFLOAT4X4 seed;
         XMStoreFloat4x4(&seed, pose);
-        auto body = std::make_unique<SoftBody>(*physics_, base_model, seed, 1.0f);
-        if (body->Active()) {
-            item.soft = std::move(body);
+        // One body per cook stage, each cooked from that stage's own model, all seeded
+        // at the spawn pose: a tet mesh cannot be re-skinned to a different model, so a
+        // food that swaps look mid-cook swaps bodies (see the swap in Update). Only the
+        // first stage's body enters the scene; the later ones -- the chicken's
+        // pre-cooked twin -- park outside it until their band arrives. A stage whose
+        // model will not cook stays null, and the item simply keeps deforming as the
+        // shape it had (the swap skips it).
+        item.soft_stage_bodies.reserve(item.stages.size());
+        for (size_t s = 0; s < item.stages.size(); ++s) {
+            auto body = std::make_unique<SoftBody>(*physics_, pool[item.stages[s].model], seed,
+                                                   1.0f);
+            if (!body->Active()) {
+                body.reset();
+            } else if (s > 0) {
+                body->Park();
+            }
+            item.soft_stage_bodies.push_back(std::move(body));
+        }
+        if (item.soft_stage_bodies.front() != nullptr) {
+            item.soft = item.soft_stage_bodies.front().get();
+            item.soft_stage = 0;
+            // The volume is the meat's physical presence from here on; the box stays
+            // for what a deformable cannot serve -- the gaze sweep, the tongs' target,
+            // the pose in `resting` -- as a query-only shell glued to the volume each
+            // frame (see the proxy glue in Update). Its simulation shape goes away
+            // because the two would otherwise collide with each other: the glue
+            // re-seats the box inside the volume every frame, and forcing that overlap
+            // against live contacts pumps energy into the meat instead of carrying it.
+            // Cost, accepted for now: a soft meat's landing no longer thuds -- the
+            // impact sounds were the box's contacts, and the volume reports none.
+            PxShape* shape = nullptr;
+            item.rigid.actor()->getShapes(&shape, 1);
+            shape->setFlag(PxShapeFlag::eSIMULATION_SHAPE, false);
         }
     }
 
@@ -339,15 +375,22 @@ void Props::Add(std::vector<CookStage> stages, const Model& base_model, std::str
 
 void Props::RegisterSoftMeshes(Renderer& renderer) {
     for (Item& item : items_) {
-        if (item.soft == nullptr) {
-            continue;
+        // One renderer mesh per stage body, each naming primitives of the model that
+        // stage was cooked from -- so when the chicken swaps to its pre-cooked twin at
+        // medium, the twin draws with the cooked model's materials, not the raw one's.
+        item.soft_stage_meshes.assign(item.soft_stage_bodies.size(), 0);
+        for (size_t s = 0; s < item.soft_stage_bodies.size(); ++s) {
+            const SoftBody* body = item.soft_stage_bodies[s].get();
+            if (body == nullptr) {
+                continue;
+            }
+            item.soft_stage_meshes[s] = renderer.CreateDeformableMesh(
+                item.stages[s].model, body->SkinnedIndices(), body->SkinnedPrimitives(),
+                static_cast<UINT>(body->SkinnedVertices().size()));
         }
-        // The runs name primitives of the item's base model, which is the one the soft
-        // body was cooked from -- a food that swaps mesh as it cooks keeps deforming the
-        // shape it started as.
-        item.soft_mesh = renderer.CreateDeformableMesh(
-            item.stages.front().model, item.soft->SkinnedIndices(), item.soft->SkinnedPrimitives(),
-            static_cast<UINT>(item.soft->SkinnedVertices().size()));
+        if (item.soft != nullptr) {
+            item.soft_mesh = item.soft_stage_meshes[item.soft_stage];
+        }
     }
 }
 
@@ -723,6 +766,44 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         item.cook->Update(AmbientAt(pose.r[3], heat_sources), dt);
     }
 
+    // A food whose cook just crossed into a new stage swaps its BODY along with its
+    // model: the outgoing stage's volume parks, and the incoming stage's -- cooked from
+    // that stage's own model at level load, waiting outside the scene -- is planted
+    // exactly where the meat stands and takes over. Everything downstream reads
+    // item.soft/item.soft_mesh, so the swap is three assignments once the bodies trade
+    // places. Doneness is monotonic, so each boundary fires at most once; a stage whose
+    // model never cooked is simply skipped, and the meat keeps deforming as the shape
+    // it had. Before the readback below, so the swap-in is read, skinned and drawn this
+    // same frame -- no one-frame flicker of the old shape.
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        Item& item = items_[i];
+        if (item.soft == nullptr || !item.cook) {
+            continue;
+        }
+        const std::size_t stage = CurrentStage(item);
+        if (stage == item.soft_stage || stage >= item.soft_stage_bodies.size() ||
+            item.soft_stage_bodies[stage] == nullptr) {
+            continue;
+        }
+        // Where the visible meat stands right now: the glued proxy's pose for a free
+        // meat, the hand or jaws for a carried one -- the same choice the kinematic
+        // drive below makes. A carried swap lands in the hand and the drive loop grips
+        // the new body next frame.
+        const XMMATRIX pose = i == carried_ ? XMLoadFloat4x4(&item.held_local) * camera_to_world
+                              : i == gripped_ ? TongsGripPose() * camera_to_world
+                                              : XMLoadFloat4x4(&item.resting);
+        XMFLOAT4X4 plant;
+        XMStoreFloat4x4(&plant, pose);
+        if (item.soft->Kinematic()) {
+            item.soft->EndKinematic();
+        }
+        item.soft->Park();
+        item.soft_stage_bodies[stage]->Unpark(plant);
+        item.soft = item.soft_stage_bodies[stage].get();
+        item.soft_stage = stage;
+        item.soft_mesh = item.soft_stage_meshes[stage];
+    }
+
     // Rebuild the draw lists from the current state. There are a handful of
     // items, so this is cheaper than tracking which one moved.
     // Read every soft meat back from the GPU before the draw lists are built: the
@@ -734,22 +815,90 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
         }
     }
 
+    // Glue each free soft meat's rigid twin to the volume it shadows. The box exists for
+    // what a deformable cannot give the rest of the game -- the gaze sweep, the pose in
+    // `resting`, the impact sounds -- but left to simulate on its own it drifts from the
+    // meat the player sees (most visibly on a drop, where the box is tossed while the
+    // volume falls limp from the hand). So while both are in the scene the box is a
+    // proxy, teleported each frame to ride the volume's underside: picking, cooking and
+    // the hover outline all track the visible meat. Its velocity is set to the volume's
+    // real motion (clamped -- the re-glue after a drop crosses the yard in one frame) so
+    // a landing still reads as an impact to the contact reporter, not an arrival at rest.
+    if (dt > 0.0f) {
+        for (Item& item : items_) {
+            if (item.soft == nullptr || !item.soft->Active() || !item.in_simulation) {
+                continue;
+            }
+            const XMFLOAT3 c = item.soft->Centroid();
+            if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z)) {
+                // A blown-up solve must not become the box's pose -- feeding NaN to
+                // setGlobalPose takes down the GPU broadphase, far from the real fault.
+                continue;
+            }
+            PxRigidDynamic* body = item.rigid.actor();
+            const PxTransform old = body->getGlobalPose();
+            // The body frame is the model frame, whose origin sits under the meat; the
+            // shape is lifted by com_offset. Rotate that lift by the pose the box kept,
+            // so the box stays wrapped around the centroid whatever way it lies.
+            const PxVec3 lift = old.q.rotate(
+                PxVec3(item.com_offset.x, item.com_offset.y, item.com_offset.z));
+            const PxTransform target(PxVec3(c.x, c.y, c.z) - lift, old.q);
+            PxVec3 velocity = (target.p - old.p) / dt;
+            constexpr float kMaxProxySpeed = 10.0f; // m/s
+            const float speed = velocity.magnitude();
+            if (speed > kMaxProxySpeed) {
+                velocity *= kMaxProxySpeed / speed;
+            }
+            body->setGlobalPose(target);
+            body->setLinearVelocity(velocity);
+            body->setAngularVelocity(PxVec3(0.0f));
+            RebuildTransform(item);
+        }
+    }
+
+    // Then hand every held soft meat its kinematic target for the next step. `in_simulation`
+    // is exactly the right test: it is false precisely while an item is out of the rigid
+    // scene -- carried, clamped in the tongs, served onto a tray, stacked in the pit -- so
+    // this one loop covers every pick-up and put-down without any of those call sites
+    // knowing about soft bodies. A deformable volume cannot simply leave the scene the way
+    // the rigid body does (it would stop being read back, and the meat would draw frozen
+    // where it was), so instead it is driven to where the hand holds it: still colliding,
+    // still shoving what it meets, and on release carrying on from that exact shape.
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+        Item& item = items_[i];
+        if (item.soft == nullptr) {
+            continue;
+        }
+        if (item.in_simulation) {
+            item.soft->EndKinematic(); // A no-op unless it was being carried.
+            continue;
+        }
+        // CurrentPose covers carried and resting-or-stuck; the tongs' jaws are their own
+        // pose, which it does not know about.
+        const XMMATRIX pose =
+            i == gripped_ ? TongsGripPose() * camera_to_world : CurrentPose(i, camera_to_world);
+        XMFLOAT4X4 held;
+        XMStoreFloat4x4(&held, pose);
+        if (item.soft->Kinematic()) {
+            item.soft->UpdateKinematic(held);
+        } else {
+            item.soft->BeginKinematic(held);
+        }
+    }
+
     world_.clear();
     held_.clear();
     highlight_.clear();
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-        if (i == carried_ || i == gripped_) {
-            continue; // drawn in the held pass below (the tongs, and the meat in them)
-        }
-        // A meat served onto the carried tray travels in the hand with it, so it draws
-        // in the held pass alongside the tray rather than out in the world.
-        if (items_[i].served && items_[i].stuck_to == carried_) {
-            continue;
-        }
         // A deforming meat is drawn from its skinned vertices instead of as a rigid
         // instance -- one draw list or the other, never both. The vertices are already
         // in world space, so unlike the rigid path there is no pose to hand over; the
-        // browning tint and the wet sheen carry across unchanged.
+        // browning tint and the wet sheen carry across unchanged. This comes before the
+        // held checks because it holds *wherever* the meat is: carried and gripped ones
+        // are being driven to the hand (see the kinematic loop above), so their vertices
+        // are already at the held pose and they draw here rather than in the held pass.
+        // They lose that pass's cleared depth, but a driven meat is a real collider and
+        // so cannot be inside the wall that would have sliced it.
         if (items_[i].soft != nullptr) {
             SoftMeshInstance draw;
             draw.mesh = items_[i].soft_mesh;
@@ -759,17 +908,29 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
             soft_.push_back(draw);
             continue;
         }
+        if (i == carried_ || i == gripped_) {
+            continue; // drawn in the held pass below (the tongs, and the meat in them)
+        }
+        // A meat served onto the carried tray travels in the hand with it, so it draws
+        // in the held pass alongside the tray rather than out in the world.
+        if (items_[i].served && items_[i].stuck_to == carried_) {
+            continue;
+        }
         world_.push_back(MakeInstance(CurrentModel(items_[i]), XMLoadFloat4x4(&items_[i].resting),
                                       ItemTint(items_[i]), ItemWetness(items_[i])));
     }
-    if (carried_ >= 0) {
+    // A soft meat is never in the held pass -- it went into soft_ above, at the pose it is
+    // being driven to -- so both of these skip one.
+    if (carried_ >= 0 && items_[carried_].soft == nullptr) {
         held_.push_back(MakeInstance(CurrentModel(items_[carried_]),
                                      XMLoadFloat4x4(&items_[carried_].held_local) * camera_to_world,
                                      ItemTint(items_[carried_]), ItemWetness(items_[carried_])));
+    }
+    if (carried_ >= 0) {
         // The plate of food on a carried tray: each stuck meat's resting was set above to
         // its pose on the (held) tray, so it draws in the hand right where it sits.
         for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-            if (items_[i].served && items_[i].stuck_to == carried_) {
+            if (items_[i].served && items_[i].stuck_to == carried_ && items_[i].soft == nullptr) {
                 held_.push_back(MakeInstance(CurrentModel(items_[i]),
                                              XMLoadFloat4x4(&items_[i].resting), ItemTint(items_[i])));
             }
@@ -777,7 +938,7 @@ void Props::Update(const XMMATRIX& camera_to_world, const Actions& actions, floa
     }
     // The meat clamped in the tongs draws in the hand at the grip pose, over the cleared
     // depth like the tongs themselves, so a wall never slices it.
-    if (gripped_ >= 0) {
+    if (gripped_ >= 0 && items_[gripped_].soft == nullptr) {
         held_.push_back(MakeInstance(CurrentModel(items_[gripped_]),
                                      TongsGripPose() * camera_to_world, ItemTint(items_[gripped_])));
     }
@@ -933,6 +1094,15 @@ void Props::ReleaseBody(int index, FXMMATRIX pose_world, FXMMATRIX camera_to_wor
         XMStoreFloat3(&linear, XMVectorAdd(XMVectorScale(forward, kThrowSpeed),
                                            XMVectorSet(0.0f, -kThrowDrop, 0.0f, 0.0f)));
         XMStoreFloat3(&spin, XMVectorScale(right, kThrowSpin));
+    }
+
+    // A soft meat's toss goes into the volume itself, or the throw would die at the
+    // hand: the release restores the pinned vertices' masses and hands every vertex the
+    // throw velocity, so the meat leaves the hand moving and lands where it is thrown.
+    // The rigid twin re-enters the scene below regardless -- the proxy glue in Update
+    // re-seats it on the volume next frame.
+    if (item.soft != nullptr) {
+        item.soft->EndKinematic(linear);
     }
 
     // Re-enter the scene at the release pose: pose first (so the actor arrives

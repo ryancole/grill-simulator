@@ -125,6 +125,17 @@ public:
     UINT CreateDeformableMesh(std::uint32_t model, std::span<const std::uint32_t> indices,
                               std::span<const SoftBodyPrimitive> primitives, UINT max_vertices);
 
+    // Folds the registered deformable meshes into the raytracing geometry the reflection
+    // hit shader reads, so a deforming meat reflects like everything else. A deformable
+    // mesh keeps its own flattened index buffer, whose runs start at different offsets
+    // than the source model's primitives do, so it needs its own entries in the shared
+    // RtPrimInfo array -- and that array is built during LoadScene, before any deformable
+    // mesh exists. This rebuilds and re-uploads it once they all do.
+    //
+    // Call after the last CreateDeformableMesh and before the first Render. A no-op when
+    // no deformable mesh was registered, so a machine with no GPU physics skips it.
+    void FinalizeRaytracingGeometry();
+
     // `props` are the loose objects resting in the yard, drawn with the scene.
     // `highlight` is the one the player is aiming at, ringed with a glowing
     // outline; empty rings nothing. `viewmodel` and `held_props` are drawn last,
@@ -352,20 +363,38 @@ private:
     // and one top-level AS over the yard's static instances, tlas_. Runs at scene load
     // after CreateSceneGeometry, on its own one-shot command list. The TLAS gets a
     // shader-visible SRV at tlas_descriptor_, which the scene pixel shader reads
-    // bindlessly to trace reflection rays. Static for now -- rebuilt whole on a level
-    // swap; moving props are not yet in the TLAS.
+    // bindlessly to trace reflection rays. The BLASes and the per-primitive info are
+    // static and rebuilt whole on a level swap; the TLAS itself is only sized here and
+    // is filled every frame by UpdateTopLevelAS.
     void BuildAccelerationStructures(const Scene& scene);
+    // Rebuilds each deforming mesh's bottom-level AS from this frame's vertices, on the
+    // render command list between UploadDeformableMeshes (which lands them) and
+    // UpdateTopLevelAS (which references the result). The first frame is a full build;
+    // every frame after refits the same buffer in place, which is what ALLOW_UPDATE buys.
+    void RefitDeformableAccelerationStructures(std::span<const SoftMeshInstance> instances);
     // Rebuilds the top-level AS for this frame: fills the current instance-descs region
     // with the yard's static instances plus the loose `props` (each pointing at its model's
     // BLAS with its world transform), fills the matching per-instance hit-info region, and
     // builds the TLAS on the render command list before the scene pass reads it. Called at
     // the top of Render, so carried and toppled props -- and the browning meat, whose tint
-    // rides along -- reflect where they actually are this frame.
-    void UpdateTopLevelAS(const Scene& scene, std::span<const MeshInstance> props);
+    // rides along -- reflect where they actually are this frame. The deforming meats come
+    // last, each as an untransformed instance over the BLAS just refit for it.
+    void UpdateTopLevelAS(const Scene& scene, std::span<const MeshInstance> props,
+                          std::span<const SoftMeshInstance> soft_meshes);
     // Creates a default-heap buffer sized for an acceleration structure or its build
     // scratch (both need ALLOW_UNORDERED_ACCESS). Born layout-less like every other
     // buffer; the build is its first access.
     ComPtr<ID3D12Resource> CreateAsBuffer(UINT64 bytes, bool result);
+    // A raw (ByteAddressBuffer) SRV over `bytes` of `buffer` starting at `first_byte`, in
+    // the next free raytracing slot, whose index it returns. This is how the reflection hit
+    // shader reaches geometry: it fetches indices and vertices by byte offset, so the view
+    // carries no format. The offset is what lets one deformable vertex buffer expose each
+    // frame's region separately.
+    UINT CreateRawBufferSrv(ID3D12Resource* buffer, UINT first_byte, UINT bytes);
+    // Points rt_prim_info_descriptor_ at the current rt_prim_info_ buffer, `count` entries
+    // long. The slot is claimed once and reused, so rebuilding the buffer with the
+    // deformable runs appended does not move it out from under the frame constants.
+    void CreatePrimInfoSrv(UINT count);
 
     // The second, tiny pipeline: the alpha-blended, depth-free pass that draws
     // HUD text from the MSDF atlas. Builds its root signature, PSO and the
@@ -682,6 +711,17 @@ private:
         // Which loaded model the runs below take their materials from.
         std::uint32_t model = 0;
         std::vector<SoftBodyPrimitive> primitives;
+        // What a reflection ray needs to hit and shade this mesh. Unlike a model's, the
+        // BLAS here is rebuilt every frame -- the vertices move -- so it is built
+        // ALLOW_UPDATE and refit in place, and the vertex SRVs come one per frame in
+        // flight to match the vertex regions. `prim_base` indexes the shared RtPrimInfo
+        // array, whose deformable entries FinalizeRaytracingGeometry appends.
+        ComPtr<ID3D12Resource> blas;
+        ComPtr<ID3D12Resource> blas_scratch;
+        bool blas_built = false;
+        UINT vertex_srv[kFrameCount]{};
+        UINT ib_srv = 0;
+        UINT prim_base = 0;
     };
     // Registered by CreateDeformableMesh, indexed by the handle it returns, cleared with
     // the level. A handful at most -- one per meat.
@@ -799,6 +839,11 @@ private:
     UINT rt_instance_info_descriptor_[kFrameCount]{};
     ComPtr<ID3D12Resource> rt_prim_info_;
     UINT rt_prim_info_descriptor_ = 0;
+    // Where the next raytracing descriptor goes. BuildAccelerationStructures hands out the
+    // models' slots from here and leaves the cursor past them, so the deformable meshes --
+    // registered after it, once the level's soft bodies exist -- carry on from the same
+    // run rather than guessing a free slot. Reset with the level.
+    UINT rt_next_slot_ = 0;
 
     ComPtr<ID3D12Fence> fence_;
     HANDLE fence_event_ = nullptr;

@@ -123,6 +123,61 @@ public:
     std::span<const std::uint32_t> SkinnedIndices() const { return skinned_indices_; }
     std::span<const SoftBodyPrimitive> SkinnedPrimitives() const { return skinned_primitives_; }
 
+    // --- Carrying ---------------------------------------------------------------
+    //
+    // A carried meat is gripped, not frozen. At pick-up a small patch of simulation
+    // vertices around the underside of the grip -- the part resting in the hand or
+    // clamped in the jaws -- has its inverse mass zeroed and is written to the carry
+    // pose every frame; the solver treats zero-inverse-mass vertices as immovable, so
+    // the rest of the meat stays fully simulated and hangs off the pinned patch through
+    // the same FEM elasticity that makes it squash. The free part sags, swings when the
+    // player turns, and keeps colliding with the world; on release the inverse masses
+    // are restored and the body falls from exactly the shape it was dangling in.
+    //
+    // The writes go through PxDeformableVolumeExt::copyToDevice -- the same path the
+    // constructor stages the body's initial placement through -- refreshed each frame
+    // from the live readback so the solver's own state is never clobbered with stale
+    // data. This deliberately does NOT use PxDeformableVolume's kinematic target buffer:
+    // that API is silently ignored unless the scene raises eENABLE_DIRECT_GPU_API, a
+    // flag this game cannot afford (it kills every CPU-side pose read; see
+    // Props::RebuildTransform and the contact-report audio). Learned the hard way --
+    // targets tracked the hand perfectly while the body never moved.
+    //
+    // Note this also does NOT go through the rigid path's scene-remove (see
+    // Props::RemoveBodyFromScene): a deformable volume must stay in the scene to keep
+    // simulating its free part, and eDISABLE_SIMULATION is fatal on GPU anyway.
+
+    // Grips the body at `pose`: selects the pinned patch from the shape it is in right
+    // now (so a meat picked up mid-squash is carried mid-squash) and drives that patch
+    // to the pose. No-op if inert or already gripped.
+    void BeginKinematic(const DirectX::XMFLOAT4X4& pose);
+    // Moves the gripped patch to `pose`. Call once a frame while carried, after
+    // Physics::Step and after Update() -- the buffers must not be written while the
+    // solver runs, and the refresh reads the positions Update just brought back.
+    void UpdateKinematic(const DirectX::XMFLOAT4X4& pose);
+    // Lets go: restores the pinned vertices' inverse masses and hands the body
+    // `velocity` -- the hand's toss for a throw, zero for a placed drop -- so a thrown
+    // meat leaves the hand moving instead of dying at the release and falling limp.
+    // The free vertices keep whatever swing they had on top of it. No-op if not gripped.
+    void EndKinematic(const DirectX::XMFLOAT3& velocity = DirectX::XMFLOAT3{0.0f, 0.0f, 0.0f});
+    bool Kinematic() const { return kinematic_; }
+
+    // --- Parking ----------------------------------------------------------------
+    //
+    // A body cooked for a later cook stage -- the chicken's pre-cooked twin -- waits
+    // outside the physics scene until its stage arrives: no cost, no collisions, no
+    // readback. Scene removal, NOT eDISABLE_SIMULATION, which is fatal on the GPU
+    // pipeline (see Props::RemoveBodyFromScene for the same rule on the rigids).
+
+    // Takes the body out of the physics scene. No-op if inert or already parked.
+    void Park();
+    // Plants the body at `pose` -- its rest shape, bounds' bottom-centre at the pose
+    // origin, stilled -- and puts it back in the scene, awake. The whole point is that
+    // the swap-in lands exactly where the swapped-out body stood. No-op if inert or
+    // not parked.
+    void Unpark(const DirectX::XMFLOAT4X4& pose);
+    bool Parked() const { return parked_; }
+
 private:
     // Rebuilds SkinnedVertices() from the freshly read-back simulation positions:
     // blends each drawn vertex from its embedding, then rebuilds the normals off the
@@ -174,6 +229,31 @@ private:
     std::vector<Vertex> skinned_;
     std::vector<std::uint32_t> skinned_indices_;
     std::vector<SoftBodyPrimitive> skinned_primitives_;
+
+    // Carrying state (see BeginKinematic). The pinned patch: which simulation vertices
+    // are gripped, where each sits in the carry pose's frame (fixed at pick-up, so the
+    // grip is rigid while the rest swings), and the inverse mass each had before the
+    // grip zeroed it, restored on release.
+    bool kinematic_ = false;
+    std::vector<std::uint32_t> pinned_;
+    std::vector<DirectX::XMFLOAT3> pinned_local_;
+    std::vector<float> pinned_inv_mass_;
+
+    // Whether the volume is currently out of the physics scene (see Park). The
+    // destructor reads it too: a parked body must not be scene-removed twice.
+    bool parked_ = false;
+
+    // The recovery snapshot (see RecoverGrip): the whole shape as it was gripped, in the
+    // carry pose's frame -- simulation and collision vertices both, inverse masses in w
+    // (pinned already zeroed) -- plus how big it was. If a carry blows the solve up, the
+    // snapshot is re-planted at the hand and the yard never learns it happened.
+    std::vector<DirectX::XMFLOAT4> grab_sim_local_;
+    std::vector<DirectX::XMFLOAT4> grab_collision_local_;
+    DirectX::XMFLOAT3 grab_extent_{0.0f, 0.0f, 0.0f};
+
+    // Re-plants the grab snapshot at `pose`, stilled: the escape hatch for a solve that
+    // has gone ballistic mid-carry.
+    void RecoverGrip(const DirectX::XMFLOAT4X4& pose);
 
     // See Status(). Set as soon as the cook has an opinion; "no gpu" when there was
     // never a CUDA context to try on.
