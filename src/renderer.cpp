@@ -806,11 +806,14 @@ void Renderer::ReleaseScene() {
     // Everything CreateSceneGeometry built. The one SRV heap is NOT torn down -- it is
     // persistent now and holds the engine block's post-process SRVs too, which must
     // outlive the swap. Its per-level region (the material, atlas, shadow and
-    // raytracing descriptors) is simply overwritten by the
-    // next LoadScene; the slots left dangling in between are never sampled, since no
-    // frame is drawn between this release and that load (the level swap reset+emplaces
-    // the World in one step). Only the resources those descriptors named are freed
-    // here; the shadow map resource, created once in CreateShadowMap, is left standing.
+    // raytracing descriptors) is simply overwritten by the next LoadScene. The only
+    // frames drawn between this release and that load are the loading screen's progress
+    // frames, and the only per-level slots those touch are the font atlases' -- which is
+    // why the atlas textures are deliberately NOT released here: their old descriptors
+    // stay valid (this heap region is never cleared, only rewritten) and keep naming
+    // live textures until LoadScene lands the new slots. Every other resource the
+    // dangling descriptors named is freed, unsampled in the window; the shadow map
+    // resource, created once in CreateShadowMap, is left standing.
     models_.clear();  // frees each GpuModel's BLAS along with its buffers
     tlas_.Reset();
     tlas_scratch_.Reset();
@@ -822,8 +825,6 @@ void Renderer::ReleaseScene() {
     rt_next_slot_ = 0;
     deformable_meshes_.clear();  // frees each mesh's BLAS along with its buffers
     textures_.clear();
-    atlas_texture_.Reset();
-    mono_atlas_texture_.Reset();
 }
 
 float Renderer::AspectRatio() const {
@@ -2578,6 +2579,14 @@ void Renderer::CreateSceneGeometry(const Scene& scene) {
             "Level needs more material descriptors than the SRV heap reserves");
     }
 
+    // A loading-screen frame presented while the incoming Scene was building may still
+    // be on the GPU, reading the outgoing level's font-atlas descriptors -- and the
+    // writes below sweep the whole per-level region those sit in. Descriptors must not
+    // be rewritten under an executing command list, so retire it first. (RenderLoading's
+    // own MoveToNextFrame only waits out the frame that shared its allocator, which
+    // still leaves the other frame in flight.)
+    FlushGpu();
+
     ThrowIfFailed(allocators_[frame_index_]->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocators_[frame_index_].Get(), nullptr),
                   "CommandList::Reset");
@@ -3122,14 +3131,38 @@ void Renderer::LoadFontFace(const std::filesystem::path& csv, const std::filesys
 }
 
 void Renderer::LoadFontAtlas(std::vector<ComPtr<ID3D12Resource>>& staging) {
-    const std::filesystem::path dir = ExecutableDirectory() / "assets" / "fonts";
     // The Inter HUD face at atlas_descriptor_, then the monospace debug face in the
-    // slot straight after it.
-    LoadFontFace(dir / "hud.csv", dir / "hud.png", atlas_descriptor_, font_, atlas_texture_,
-                 atlas_width_, atlas_height_, staging);
+    // slot straight after it. The faces are session assets -- the same two files
+    // whatever the level -- so their textures are built on the first load and then
+    // survive ReleaseScene: the loading screen draws with them while no level is
+    // resident. Their slots still move with every level (they sit after the level's
+    // model images), so each load must at least land fresh SRVs.
     mono_atlas_descriptor_ = atlas_descriptor_ + 1;
-    LoadFontFace(dir / "mono.csv", dir / "mono.png", mono_atlas_descriptor_, mono_font_,
-                 mono_atlas_texture_, mono_atlas_width_, mono_atlas_height_, staging);
+    if (atlas_texture_ == nullptr) {
+        const std::filesystem::path dir = ExecutableDirectory() / "assets" / "fonts";
+        LoadFontFace(dir / "hud.csv", dir / "hud.png", atlas_descriptor_, font_, atlas_texture_,
+                     atlas_width_, atlas_height_, staging);
+        LoadFontFace(dir / "mono.csv", dir / "mono.png", mono_atlas_descriptor_, mono_font_,
+                     mono_atlas_texture_, mono_atlas_width_, mono_atlas_height_, staging);
+        return;
+    }
+
+    // Both atlases upload with their mip chain cut to the one full-resolution level
+    // (see LoadFontFace), so the rewritten view is a single-mip Texture2D like the
+    // one UploadTexture wrote the first time.
+    const auto write_srv = [this](ID3D12Resource* texture, UINT descriptor) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = kTextureFormat;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = 1;
+        const CD3DX12_CPU_DESCRIPTOR_HANDLE handle(
+            engine_heap_->GetCPUDescriptorHandleForHeapStart(), static_cast<INT>(descriptor),
+            engine_heap_size_);
+        device_->CreateShaderResourceView(texture, &srv, handle);
+    };
+    write_srv(atlas_texture_.Get(), atlas_descriptor_);
+    write_srv(mono_atlas_texture_.Get(), mono_atlas_descriptor_);
 }
 
 void Renderer::CreateTextPipeline() {
@@ -3792,23 +3825,31 @@ void Renderer::DrawMenu(std::string_view title, std::span<const std::string> ent
     }
 }
 
-void Renderer::DrawLoading(std::string_view title, std::string_view subtitle) {
-    if (width_ == 0 || height_ == 0) {
+void Renderer::DrawLoading(std::string_view title, std::string_view subtitle, float progress) {
+    // The atlas check covers the one window where drawing would be invalid: a load
+    // reporting progress before the first LoadScene ever built the font textures.
+    if (width_ == 0 || height_ == 0 || atlas_texture_ == nullptr) {
         return;
     }
 
+    const float w = static_cast<float>(width_);
     const float h = static_cast<float>(height_);
     const float title_pixel = h * kMenuTitleFraction;
     const float subtitle_pixel = h * kMenuEntryFraction;
 
-    // The same warm palette the menu uses: an amber title over a quiet grey subtitle.
+    // The same warm palette the menu uses: an amber title over a quiet grey subtitle,
+    // and the bar's fill in the selection amber so the screen reads as one family. The
+    // track is a faint white so the fill's full run is visible from the first frame.
     const XMFLOAT4 title_color{1.0f, 0.82f, 0.48f, 1.0f};
     const XMFLOAT4 subtitle_color{0.72f, 0.72f, 0.75f, 1.0f};
+    const XMFLOAT4 track_color{1.0f, 1.0f, 1.0f, 0.12f};
+    const XMFLOAT4 fill_color{1.0f, 0.78f, 0.35f, 1.0f};
 
     struct Run {
         UINT first;
         UINT count;
         XMFLOAT4 color;
+        bool solid;
     };
     std::vector<Run> runs;
 
@@ -3816,13 +3857,41 @@ void Renderer::DrawLoading(std::string_view title, std::string_view subtitle) {
     UINT cursor = 0;
     const UINT title_first = cursor;
     cursor = LayoutLine(face, title, h * kMenuTitleBaselineFraction, title_pixel, cursor);
-    runs.push_back({title_first, cursor - title_first, title_color});
+    runs.push_back({title_first, cursor - title_first, title_color, false});
 
     if (!subtitle.empty()) {
         const UINT subtitle_first = cursor;
         cursor = LayoutLine(face, subtitle, h * kMenuFirstEntryBaselineFraction, subtitle_pixel,
                             cursor);
-        runs.push_back({subtitle_first, cursor - subtitle_first, subtitle_color});
+        runs.push_back({subtitle_first, cursor - subtitle_first, subtitle_color, false});
+    }
+
+    // The bar, centred beneath the subtitle: the full-width track first, then the fill
+    // grown across it, then the percentage in the subtitle's quiet grey below.
+    const float fraction = std::min(std::max(progress, 0.0f), 1.0f);
+    const float bar_w = w * 0.30f;
+    const float bar_h = std::max(h * 0.010f, 4.0f);
+    const float bar_x0 = 0.5f * (w - bar_w);
+    const float bar_y0 = h * kMenuFirstEntryBaselineFraction + subtitle_pixel * 1.2f;
+    {
+        const UINT first = cursor;
+        cursor = LayoutSolidQuad(bar_x0, bar_y0, bar_x0 + bar_w, bar_y0 + bar_h, cursor);
+        runs.push_back({first, cursor - first, track_color, true});
+    }
+    if (fraction > 0.0f) {
+        const UINT first = cursor;
+        cursor = LayoutSolidQuad(bar_x0, bar_y0, bar_x0 + bar_w * fraction, bar_y0 + bar_h,
+                                 cursor);
+        runs.push_back({first, cursor - first, fill_color, true});
+    }
+    {
+        const std::string percent =
+            std::to_string(static_cast<int>(fraction * 100.0f + 0.5f)) + "%";
+        const float percent_pixel = subtitle_pixel * 0.7f;
+        const UINT first = cursor;
+        cursor = LayoutLine(face, percent, bar_y0 + bar_h + percent_pixel * 1.6f, percent_pixel,
+                            cursor);
+        runs.push_back({first, cursor - first, subtitle_color, false});
     }
 
     if (cursor == 0) {
@@ -3831,7 +3900,11 @@ void Renderer::DrawLoading(std::string_view title, std::string_view subtitle) {
 
     BindTextPipeline();
     for (const Run& run : runs) {
-        DrawTextRun(face, run.first, run.count, run.color);
+        if (run.solid) {
+            DrawSolidRun(run.first, run.count, run.color);
+        } else {
+            DrawTextRun(face, run.first, run.count, run.color);
+        }
     }
 }
 
@@ -4146,9 +4219,9 @@ void Renderer::FinalizeRaytracingGeometry() {
         }
     }
 
-    // Staged into video memory on a one-shot command list, like the original upload. The
-    // old buffer is released once the flush retires the frames that could still be reading
-    // it -- which is none, since this runs at level load before any frame is drawn.
+    // Staged into video memory on a one-shot command list, like the original upload.
+    // Releasing the old buffer here is safe: the only frames drawn this side of the
+    // level swap are the loading screen's, and those never read the prim info.
     ThrowIfFailed(allocators_[frame_index_]->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocators_[frame_index_].Get(), nullptr),
                   "CommandList::Reset");
@@ -5139,14 +5212,15 @@ void Renderer::RenderMenu(std::string_view title, std::span<const std::string> e
     MoveToNextFrame();
 }
 
-void Renderer::RenderLoading(std::string_view title, std::string_view subtitle) {
+void Renderer::RenderLoading(std::string_view title, std::string_view subtitle, float progress) {
     ID3D12CommandAllocator* allocator = allocators_[frame_index_].Get();
     ThrowIfFailed(allocator->Reset(), "CommandAllocator::Reset");
     ThrowIfFailed(command_list_->Reset(allocator, pipeline_state_.Get()), "CommandList::Reset");
 
-    // Same setup as RenderMenu: the font atlas rides the one persistent heap (the
-    // outgoing level is still resident), so bind it, then own the swapchain buffer from
-    // clear to present over the menu backdrop.
+    // Same setup as RenderMenu: the font atlases ride the one persistent heap (and,
+    // unlike the rest of a level's textures, survive its release -- see LoadFontAtlas),
+    // so bind it, then own the swapchain buffer from clear to present over the menu
+    // backdrop.
     ID3D12DescriptorHeap* heaps[] = {engine_heap_.Get()};
     command_list_->SetDescriptorHeaps(_countof(heaps), heaps);
 
@@ -5163,7 +5237,7 @@ void Renderer::RenderLoading(std::string_view title, std::string_view subtitle) 
     command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     command_list_->ClearRenderTargetView(rtv, kMenuClearColor, 0, nullptr);
 
-    DrawLoading(title, subtitle);
+    DrawLoading(title, subtitle, progress);
 
     TextureBarrier(command_list_.Get(), render_targets_[frame_index_].Get(),
                    D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET,

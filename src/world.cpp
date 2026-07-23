@@ -7,16 +7,44 @@
 #include <algorithm>
 #include <limits>
 
-World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
+namespace {
+// How the loading bar splits across the stages with per-item granularity, weighted
+// by measured wall time (Debug, both levels): the Scene's model loading takes about
+// a quarter of a load, and the Props seeding -- where every meat's FEM meshes cook --
+// about two thirds. The GPU stages reported from the body are quick and share the tail.
+constexpr float kProgressSceneEnd = 0.25f;
+constexpr float kProgressPropsEnd = 0.9f;
+} // namespace
+
+World::World(const LevelDef& level, Renderer& renderer, Physics& physics,
+             const std::function<void(float)>& progress)
     // Scene first: Props and Furniture both read its models and instances. Building
     // them here (in the member list) mirrors the old startup order, where the props
     // and furniture bodies were created before the static world was added below.
-    : scene_(level),
-      props_(scene_, physics),
+    // The Scene's per-model fractions and the Props' per-carryable ones are folded
+    // down into their spans of the overall load; the body reports the stages after.
+    : scene_(level,
+             [&progress](float fraction) {
+                 if (progress) {
+                     progress(fraction * kProgressSceneEnd);
+                 }
+             }),
+      props_(scene_, physics,
+             [&progress](float fraction) {
+                 if (progress) {
+                     progress(kProgressSceneEnd +
+                              fraction * (kProgressPropsEnd - kProgressSceneEnd));
+                 }
+             }),
       furniture_(scene_, physics),
       objectives_(level.goals),
       renderer_(&renderer),
       physics_(&physics) {
+    const auto report = [&](float fraction) {
+        if (progress) {
+            progress(fraction);
+        }
+    };
     // Hand the freshly built Scene to the persistent systems. Aim the sun and set
     // the sky first, so the first frame is lit and coloured the level's way; then
     // upload the geometry, and drop the immovable colliders
@@ -56,12 +84,14 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
         renderer.ClearGrass();
     }
     renderer.LoadScene(scene_);
+    report(0.95f); // The whole GPU upload, BLASes and TLAS included.
     // The meats' deformable meshes name primitives of the models just uploaded, so they
     // are registered only now, once the renderer has them.
     props_.RegisterSoftMeshes(renderer);
     // And only now can the raytracing geometry be closed out: those meshes carry index
     // buffers of their own, which the reflection hit shader needs entries for.
     renderer.FinalizeRaytracingGeometry();
+    report(0.98f); // What follows is CPU-cheap: colliders, zones, the Flow box.
     physics.AddStaticWorld(scene_.Colliders());
 
     // Build the turn-in zone from the level's `turn_in`, if it set one. A static column
@@ -113,6 +143,7 @@ World::World(const LevelDef& level, Renderer& renderer, Physics& physics)
         const float half = std::max(0.5f * std::max(max_x - min_x, max_z - min_z) + 2.0f, 12.0f);
         renderer.SetFlowRegion({0.5f * (min_x + max_x), 2.5f, 0.5f * (min_z + max_z)}, half);
     }
+    report(1.0f);
 }
 
 World::~World() {

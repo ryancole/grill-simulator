@@ -3,11 +3,13 @@
 #include "dx_common.hpp"
 #include "level.hpp"
 
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 using namespace DirectX;
@@ -16,7 +18,7 @@ namespace {
 constexpr XMFLOAT3 kWhite{1.0f, 1.0f, 1.0f};
 } // namespace
 
-Scene::Scene(const LevelDef& level) {
+Scene::Scene(const LevelDef& level, const std::function<void(float)>& progress) {
     cube_ = AddModel(MakeUnitCubeModel());
 
     // The catalog says what every placed type is -- a "charcoal_grill", a "steak" --
@@ -24,11 +26,37 @@ Scene::Scene(const LevelDef& level) {
     // are joined. Models load on first reference and are reused, so two crates or two
     // steaks upload one model each.
     const Catalog catalog = catalog::Load(ExecutableDirectory() / "assets" / "catalog.toml");
+
+    // Count the distinct model files the placements will pull in, so each load below
+    // can report what fraction of them is in. A type the catalog does not know is
+    // skipped rather than thrown here: the placement loops below raise that error
+    // with its proper name, and this pre-pass must not preempt them.
+    std::unordered_set<std::string> files;
+    for (const PropPlacement& placement : level.props) {
+        if (const auto it = catalog.props.find(placement.type); it != catalog.props.end()) {
+            files.insert(it->second.model);
+        }
+    }
+    for (const CarryablePlacement& placement : level.carryables) {
+        if (const auto it = catalog.carryables.find(placement.type);
+            it != catalog.carryables.end()) {
+            for (const CookStageModel& stage : it->second.models) {
+                files.insert(stage.model);
+            }
+        }
+    }
+    const float total = static_cast<float>(std::max<std::size_t>(files.size(), 1));
+
     std::unordered_map<std::string, std::uint32_t> loaded;
     const auto load = [&](const std::string& file) {
         const auto [it, inserted] = loaded.try_emplace(file, 0u);
         if (inserted) {
             it->second = LoadModel(file.c_str());
+            if (progress) {
+                // `loaded` holds exactly the distinct files loaded so far, so its size
+                // over the pre-counted total is the fraction done.
+                progress(static_cast<float>(loaded.size()) / total);
+            }
         }
         return it->second;
     };

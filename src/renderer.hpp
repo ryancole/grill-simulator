@@ -173,11 +173,14 @@ public:
 
     // Draws the loading screen as its own complete frame, like RenderMenu: the menu
     // backdrop, a `title` ("LOADING") and a quieter `subtitle` (the level's name) beneath
-    // it. Owns the swapchain buffer from clear to present. The game loop draws this once
-    // and presents it, so it is the frame left on screen while the following blocking
-    // level build stalls the thread. Reads the font atlas from the heap's per-level region,
-    // so a level must be loaded (the outgoing one, whose geometry simply is not drawn).
-    void RenderLoading(std::string_view title, std::string_view subtitle);
+    // it, then a progress bar filled to `progress` (0..1) with the percentage under it.
+    // Owns the swapchain buffer from clear to present. The level build calls this again
+    // as each of its stages reports, so the bar crawls across the blocking load rather
+    // than one static frame sitting through it. Draws with the font atlases, which
+    // outlive the level swap (see LoadFontAtlas), so it is safe to call while no level
+    // is resident -- but not before the first LoadScene ever builds them, and DrawLoading
+    // quietly draws nothing in that window.
+    void RenderLoading(std::string_view title, std::string_view subtitle, float progress);
 
     // One line of the level-complete breakdown: an order's readout (e.g. "STEAK -- medium
     // rare to medium") and whether the turned-in tray met it. `met` colours the line so a
@@ -468,10 +471,11 @@ private:
     // then drawn, so they never alias one another in the shared buffer the way
     // repeated DrawText calls would.
     void DrawMenu(std::string_view title, std::span<const std::string> entries, int selected);
-    // Packs the loading screen -- the amber title and a quieter subtitle beneath it --
-    // into this frame's text region and draws it, the way DrawMenu does for the list. See
-    // RenderLoading for the arguments; called by it once the target is cleared and bound.
-    void DrawLoading(std::string_view title, std::string_view subtitle);
+    // Packs the loading screen -- the amber title, a quieter subtitle, and the progress
+    // bar with its percentage -- into this frame's text region and draws it, the way
+    // DrawMenu does for the list. See RenderLoading for the arguments; called by it once
+    // the target is cleared and bound.
+    void DrawLoading(std::string_view title, std::string_view subtitle, float progress);
     // Packs the keybinds screen -- title plus two-column rows -- into this frame's text
     // region and draws it, the way DrawMenu does for the plain list. See RenderKeybinds
     // for the arguments; called by it once the render target is cleared and bound.

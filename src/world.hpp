@@ -6,6 +6,7 @@
 #include "scene.hpp"
 #include "serve_zone.hpp"
 
+#include <functional>
 #include <optional>
 
 struct LevelDef;
@@ -30,7 +31,13 @@ class Renderer;
 // loading.
 class World {
 public:
-    World(const LevelDef& level, Renderer& renderer, Physics& physics);
+    // `progress`, if set, is called with the load's overall fraction (0..1) as each
+    // stage of the build lands -- per model file through the Scene, per carryable
+    // through the Props (the FEM-cook stretch), then once per GPU stage after. The
+    // loading screen renders a frame from each report; leave it empty to build
+    // silently. Only called during construction; never stored.
+    World(const LevelDef& level, Renderer& renderer, Physics& physics,
+          const std::function<void(float)>& progress = {});
     ~World();
 
     World(const World&) = delete;

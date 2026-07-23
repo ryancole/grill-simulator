@@ -9,6 +9,7 @@
 #include <DirectXMath.h>
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -122,7 +123,12 @@ struct DynamicBody {
 // that turns into once models are loaded and colliders are cut.
 class Scene {
 public:
-    explicit Scene(const LevelDef& level);
+    // `progress`, if set, is called after each distinct model file loads with the
+    // fraction of the level's models now in (0..1] -- the loading screen's feed.
+    // Loading the models is most of what building a Scene costs, so this is where a
+    // level load's progress actually crawls rather than jumps. Only called during
+    // construction; never stored.
+    explicit Scene(const LevelDef& level, const std::function<void(float)>& progress = {});
 
     const std::vector<Model>& Models() const { return models_; }
     const std::vector<MeshInstance>& Instances() const { return instances_; }

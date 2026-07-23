@@ -14,6 +14,7 @@
 #include <DirectXMath.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -40,8 +41,12 @@ public:
     // Takes the whole scene, not just the model ids, because each prop's box
     // collider is derived from its model's vertex bounds (Primitive::bounds), and
     // those live on the Models the scene loaded. `physics` is where the bodies
-    // are created and stepped.
-    Props(const Scene& scene, Physics& physics);
+    // are created and stepped. `progress`, if set, is called after each carryable
+    // seeds with the fraction of them done (0..1] -- seeding is where the meats'
+    // FEM meshes cook, the slowest stretch of a level load, so the loading screen
+    // wants to hear from inside it. Only called during construction; never stored.
+    Props(const Scene& scene, Physics& physics,
+          const std::function<void(float)>& progress = {});
     // Frees the bodies that were removed from the physics scene (carried, gripped,
     // served, stacked) -- Physics::ClearLevel releases only what is still in the
     // scene, and an out-of-scene actor is otherwise leaked.

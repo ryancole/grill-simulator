@@ -158,7 +158,8 @@ struct PropQueryFilter : PxQueryFilterCallback {
 
 } // namespace
 
-Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
+Props::Props(const Scene& scene, Physics& physics, const std::function<void(float)>& progress)
+    : physics_(&physics) {
     const std::vector<Model>& pool = scene.Models();
     const std::vector<CarryableSpawn>& spawns = scene.Carryables();
 
@@ -166,16 +167,33 @@ Props::Props(const Scene& scene, Physics& physics) : physics_(&physics) {
     // stored inside its Item, and that address has to stay put for the session.
     items_.reserve(spawns.size());
 
+    // A carryable's seeding cost is dominated by its FEM cook: a food cooks one soft
+    // body per stage model (most of a second each), where an inert tool or log seeds
+    // in microseconds. Weight each spawn's slice of the progress span accordingly, so
+    // the bar crawls through the meats rather than leaping whole meats at a time.
+    const auto weight = [](const CarryableSpawn& spawn) {
+        return spawn.cook ? 10.0f * static_cast<float>(spawn.models.size()) : 1.0f;
+    };
+    float total = 0.0f;
+    for (const CarryableSpawn& spawn : spawns) {
+        total += weight(spawn);
+    }
+
     // The starting objects are the level's carryables, already joined to their catalog
     // types by Scene: each hands over its loaded model, where it starts, how it is
     // held, how it lands, and -- for a food -- how it cooks (nullopt leaves the tongs
     // inert). Placed a hair above the ground in the files so physics settles them flat.
+    float done = 0.0f;
     for (const CarryableSpawn& spawn : spawns) {
         // The whole model pool rides along: the base (raw) model cuts the physics box,
         // and every cook stage's model seeds a soft body of its own.
         Add(spawn.models, pool, spawn.name, spawn.pos, spawn.yaw,
             HoldFor(spawn.hold), spawn.knock_rating, spawn.impact_sound, spawn.cook, spawn.serve,
             spawn.ability, spawn.heat, spawn.heat_offset, spawn.ignitable);
+        done += weight(spawn);
+        if (progress) {
+            progress(done / std::max(total, 1.0f));
+        }
     }
 }
 

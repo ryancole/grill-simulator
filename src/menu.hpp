@@ -4,9 +4,9 @@
 #include <vector>
 
 // Which top-level mode the game is in. It launches into Menu; confirming a level
-// entry switches to Loading, which draws a single "loading" frame and then performs
-// the blocking level build before dropping into Playing. Escape out of play raises the
-// menu again. Turning the loaded tray in at the level's delivery zone switches Playing
+// entry switches to Loading, which performs the blocking level build under the
+// loading screen's progress frames before dropping into Playing. Escape out of play
+// raises the menu again. Turning the loaded tray in at the level's delivery zone switches Playing
 // to LevelComplete, the results screen, which offers a replay of the level or a return
 // to the launch menu.
 enum class GameState {
